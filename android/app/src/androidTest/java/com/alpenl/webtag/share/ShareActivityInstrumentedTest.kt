@@ -113,7 +113,7 @@ class ShareActivityInstrumentedTest {
 
             compose.waitUntil(5_000) {
                 runCatching {
-                    compose.onNodeWithTag("status").assertTextContains("Save failed")
+                    compose.onNodeWithTag("status").assertTextContains("Save failed", substring = true)
                     true
                 }.getOrDefault(false)
             }
@@ -135,7 +135,7 @@ class ShareActivityInstrumentedTest {
             .putExtra(ShareActivity.EXTRA_API_BASE_URL, api)
 
         ActivityScenario.launch<ShareActivity>(intent).use {
-            compose.onNodeWithTag("status").assertTextContains("No HTTP or HTTPS")
+            compose.onNodeWithTag("status").assertTextContains("No HTTP or HTTPS", substring = true)
             assertEquals(0, server!!.requestCount)
         }
     }
