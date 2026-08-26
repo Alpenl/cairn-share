@@ -11,7 +11,7 @@ androidxTestCore = "1.6.1"
 androidxTestJunit = "1.2.1"
 androidxTestRunner = "1.6.2"
 androidxTestRules = "1.6.1"
-mockWebServer = "4.12.0"
+mockWebServer = "5.5.0"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
