@@ -113,7 +113,7 @@ class ShareActivityInstrumentedTest {
 
             compose.waitUntil(5_000) {
                 runCatching {
-                    compose.onNodeWithTag("status").assertTextContains("Save failed", substring = true)
+                    compose.onNodeWithTag("status").assertTextContains("保存失败", substring = true)
                     true
                 }.getOrDefault(false)
             }
@@ -135,7 +135,7 @@ class ShareActivityInstrumentedTest {
             .putExtra(ShareActivity.EXTRA_API_BASE_URL, api)
 
         ActivityScenario.launch<ShareActivity>(intent).use {
-            compose.onNodeWithTag("status").assertTextContains("No HTTP or HTTPS", substring = true)
+            compose.onNodeWithTag("status").assertTextContains("没有发现 HTTP 或 HTTPS", substring = true)
             assertEquals(0, server!!.requestCount)
         }
     }
@@ -147,8 +147,8 @@ class ShareActivityInstrumentedTest {
             .setClass(targetContext(), ShareActivity::class.java)
 
         ActivityScenario.launch<ShareActivity>(intent).use {
-            compose.onNodeWithTag("status").assertTextContains("Cairn Share is installed", substring = true)
-            compose.onNodeWithTag("status").assertTextContains("public unauthenticated Cloudflare API", substring = true)
+            compose.onNodeWithTag("status").assertTextContains("链接收集已安装", substring = true)
+            compose.onNodeWithTag("status").assertTextContains("公开、无鉴权接口", substring = true)
             compose.onAllNodesWithTag("note").assertCountEquals(0)
             compose.onAllNodesWithTag("save").assertCountEquals(0)
         }

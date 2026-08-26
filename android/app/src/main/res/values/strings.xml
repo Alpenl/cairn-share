@@ -1,17 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Cairn Share</string>
-    <string name="share_title">Save link</string>
-    <string name="share_choose_link">Choose a link</string>
-    <string name="share_installed">Cairn Share is installed. Use Android Share from another app, then choose Cairn Share to save a link.\n\nSecurity note: this app saves to a public unauthenticated Cloudflare API. Do not share private links or secrets.</string>
-    <string name="share_no_supported_content">No HTTP or HTTPS link was shared.</string>
-    <string name="share_note_label">Note</string>
-    <string name="share_note_placeholder">Optional note</string>
-    <string name="share_save">Save</string>
-    <string name="share_cancel">Cancel</string>
-    <string name="share_saving">Saving&#8230;</string>
-    <string name="share_saved">Saved</string>
-    <string name="share_failed">Save failed. Check the network and try again.</string>
-    <string name="share_interrupted">Save was interrupted. Try again.</string>
-    <string name="share_note_too_long">Note is too long.</string>
+    <string name="app_name">链接收集</string>
+    <string name="share_title">保存分享链接</string>
+    <string name="share_subtitle">把系统分享过来的链接和备注保存到公开云端接口。</string>
+    <string name="share_card_title">保存内容</string>
+    <string name="share_choose_link">选择要保存的链接</string>
+    <string name="share_selected_link">已选择</string>
+    <string name="share_installed">链接收集已安装。请在浏览器、聊天或其他应用中点“分享”，再选择“链接收集”保存链接。\n\n安全提示：本应用提交到公开、无鉴权接口。不要保存私密链接、访问令牌或一次性签名地址。</string>
+    <string name="share_no_supported_content">没有发现 HTTP 或 HTTPS 链接。</string>
+    <string name="share_note_label">备注</string>
+    <string name="share_note_placeholder">可选，例如：稍后阅读、项目资料</string>
+    <string name="share_save">保存</string>
+    <string name="share_cancel">关闭</string>
+    <string name="share_saving">保存中&#8230;</string>
+    <string name="share_saved">已保存</string>
+    <string name="share_failed">保存失败。请检查网络后重试。</string>
+    <string name="share_interrupted">保存被中断，请重试。</string>
+    <string name="share_note_too_long">备注太长，最多 2000 字。</string>
 </resources>

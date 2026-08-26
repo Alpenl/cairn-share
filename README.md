@@ -42,14 +42,14 @@ code unit。D1 使用参数化查询，MVP 允许重复链接，不做抓取、�
 ## Android
 
 Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，用户可见
-名称是 `Cairn Share`。Manifest 只声明 `INTERNET`、桌面启动入口和系统分享入口。
+名称是 `链接收集`。Manifest 只声明 `INTERNET`、桌面启动入口和系统分享入口。
 
 分享流程：
 
 1. 接收 `Intent.ACTION_SEND` + `text/plain`。
 2. 从 intent data、ClipData URI、`EXTRA_TEXT` 和 ClipData text 中提取 HTTP(S) URL。
 3. 单链接自动选中但不自动提交；多链接先让用户选择。
-4. 用户填写可选备注后点击 Save。
+4. 用户填写可选备注后点击“保存”。
 5. App 直接通过 Android/Java 原生 HTTPS API POST 到 Cloudflare Worker。
 6. 成功后关闭；失败留在当前界面，用户可手动重试。
 
