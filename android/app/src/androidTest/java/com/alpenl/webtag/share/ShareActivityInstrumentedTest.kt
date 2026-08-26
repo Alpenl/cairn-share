@@ -12,6 +12,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
@@ -129,6 +130,7 @@ class ShareActivityInstrumentedTest {
         val api = startServer()
         val intent = Intent(Intent.ACTION_SEND)
             .setType("text/plain")
+            .setClass(targetContext(), ShareActivity::class.java)
             .putExtra(Intent.EXTRA_TEXT, "plain text only")
             .putExtra(ShareActivity.EXTRA_API_BASE_URL, api)
 
@@ -148,6 +150,7 @@ class ShareActivityInstrumentedTest {
     private fun shareIntent(text: String, apiBaseUrl: String): Intent =
         Intent(Intent.ACTION_SEND)
             .setType("text/plain")
+            .setClass(targetContext(), ShareActivity::class.java)
             .putExtra(Intent.EXTRA_TEXT, text)
             .putExtra(ShareActivity.EXTRA_API_BASE_URL, apiBaseUrl)
             .also {
@@ -165,4 +168,6 @@ class ShareActivityInstrumentedTest {
         assertTrue(server!!.requestCount >= 1)
         return request!!
     }
+
+    private fun targetContext() = InstrumentationRegistry.getInstrumentation().targetContext
 }
