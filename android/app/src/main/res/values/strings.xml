@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cairn Share</string>
+    <string name="share_title">Save link</string>
+    <string name="share_choose_link">Choose a link</string>
+    <string name="share_no_supported_content">No HTTP or HTTPS link was shared.</string>
+    <string name="share_note_label">Note</string>
+    <string name="share_note_placeholder">Optional note</string>
+    <string name="share_save">Save</string>
+    <string name="share_cancel">Cancel</string>
+    <string name="share_saving">Saving&#8230;</string>
+    <string name="share_saved">Saved</string>
+    <string name="share_failed">Save failed. Check the network and try again.</string>
+    <string name="share_interrupted">Save was interrupted. Try again.</string>
+    <string name="share_note_too_long">Note is too long.</string>
+</resources>

@@ -1,0 +1,6 @@
+CREATE TABLE links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  url TEXT NOT NULL CHECK (length(url) BETWEEN 1 AND 8192),
+  note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 2000),
+  created_at TEXT NOT NULL
+);

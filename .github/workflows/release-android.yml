@@ -1,0 +1,171 @@
+name: release-android
+run-name: release-android / ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-android
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - name: Check signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          missing=""
+          test -n "${KEYSTORE_BASE64}" || missing="${missing} ANDROID_KEYSTORE_BASE64"
+          test -n "${KEYSTORE_PASSWORD}" || missing="${missing} ANDROID_KEYSTORE_PASSWORD"
+          test -n "${KEY_ALIAS}" || missing="${missing} ANDROID_KEY_ALIAS"
+          test -n "${KEY_PASSWORD}" || missing="${missing} ANDROID_KEY_PASSWORD"
+          test -n "${EXPECTED_CERT_SHA256}" || missing="${missing} ANDROID_CERT_SHA256"
+          if [ -n "${missing}" ]; then
+            echo "::error::Missing signing secrets:${missing}"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Release tag must be vX.Y.Z"
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$(git rev-parse HEAD)" origin/main || {
+            echo "::error::Release tag commit must be reachable from origin/main"
+            exit 1
+          }
+          IFS=. read -r major minor patch <<< "$version"
+          code=$(( major * 10000 + minor * 100 + patch ))
+          {
+            echo "name=${version}"
+            echo "code=${code}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup JDK
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Install Android SDK packages
+        working-directory: android
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Run release gates
+        working-directory: android
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --dependency-verification strict \
+            -PcairnShareVersionName="${VERSION_NAME}" \
+            -PcairnShareVersionCode="${VERSION_CODE}" \
+            testDebugUnitTest lintDebug assembleDebug compileDebugAndroidTestKotlin assembleRelease
+
+      - name: Sign and verify APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_CERT_SHA256 }}
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          keystore="${RUNNER_TEMP}/signing.jks"
+          trap 'shred -u "${keystore}" 2>/dev/null || rm -f "${keystore}"' EXIT
+          printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${keystore}"
+
+          build_tools="$(find "${ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          unsigned="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          test -f "${unsigned}"
+          mkdir -p release-assets
+          out="release-assets/cairn-share-android-${VERSION_NAME}.apk"
+
+          "${build_tools}/zipalign" -p -f 4 "${unsigned}" "${RUNNER_TEMP}/aligned.apk"
+          "${build_tools}/apksigner" sign \
+            --v4-signing-enabled false \
+            --ks "${keystore}" \
+            --ks-pass "pass:${KEYSTORE_PASSWORD}" \
+            --key-pass "pass:${KEY_PASSWORD}" \
+            --ks-key-alias "${KEY_ALIAS}" \
+            --out "${out}" \
+            "${RUNNER_TEMP}/aligned.apk"
+
+          "${build_tools}/apksigner" verify --print-certs --verbose "${out}" | tee "${RUNNER_TEMP}/verify.txt"
+          grep -q "APK Signature Scheme v2): true" "${RUNNER_TEMP}/verify.txt"
+          cert_sha256="$(sed -n 's/.*certificate SHA-256 digest: *\([0-9a-fA-F]\{64\}\).*/\1/p' "${RUNNER_TEMP}/verify.txt" | tr '[:upper:]' '[:lower:]' | sort -u)"
+          expected="$(printf '%s' "${EXPECTED_CERT_SHA256}" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')"
+          if [ "${cert_sha256}" != "${expected}" ]; then
+            echo "::error::APK certificate SHA-256 does not match expected signing certificate"
+            exit 1
+          fi
+          ( cd release-assets && sha256sum ./*.apk > SHA256SUMS )
+          {
+            echo "APK: ${out}"
+            echo "Certificate SHA-256: ${cert_sha256}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check release assets
+        run: |
+          set -euo pipefail
+          test ! -e "${RUNNER_TEMP}/signing.jks"
+          if find release-assets -type f \( -name '*.jks' -o -name '*.keystore' -o -name '*.p12' -o -name '*.pem' \) | grep -q .; then
+            echo "::error::Signing material found in release assets"
+            exit 1
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "Cairn Share Android ${VERSION_NAME}"
+            echo
+            echo "- Public unauthenticated Cloudflare-backed link saver."
+            echo "- No account, token, local queue, old Cairn/WebTag backend, or Play upload."
+            echo "- APK and SHA256SUMS are attached below."
+          } > "${notes}"
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber release-assets/*
+          else
+            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
+              --title "Cairn Share Android ${VERSION_NAME}" \
+              --notes-file "${notes}" \
+              release-assets/*
+          fi

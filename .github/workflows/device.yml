@@ -1,0 +1,63 @@
+name: device
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "android/**"
+      - ".github/workflows/device.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: device-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-device:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [26, 35]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Setup JDK
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Enable KVM
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run connected tests
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          script: ./android/gradlew -p android --no-daemon --dependency-verification strict connectedDebugAndroidTest
+
+      - name: Upload instrumentation report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: connected-test-report-api-${{ matrix.api-level }}
+          path: android/app/build/reports/androidTests/connected/**
+          if-no-files-found: ignore
+          retention-days: 7

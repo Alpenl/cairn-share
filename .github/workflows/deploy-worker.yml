@@ -1,0 +1,72 @@
+name: deploy-worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-worker-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: worker
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Check Cloudflare secrets
+        run: |
+          set -euo pipefail
+          test -n "${CLOUDFLARE_ACCOUNT_ID}" || { echo "::error::Missing CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+          test -n "${CLOUDFLARE_API_TOKEN}" || { echo "::error::Missing CLOUDFLARE_API_TOKEN"; exit 1; }
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          npm run typecheck
+          npm test
+          npm run deploy:dry-run
+
+      - name: Apply remote D1 migrations
+        run: npm run migrate:remote
+
+      - name: Deploy Worker
+        id: deploy
+        run: |
+          set -euo pipefail
+          npm run deploy | tee "${RUNNER_TEMP}/wrangler-deploy.txt"
+          url="$(sed -n 's/.*https:\/\//https:\/\//p' "${RUNNER_TEMP}/wrangler-deploy.txt" | tail -1)"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        run: |
+          set -euo pipefail
+          {
+            echo "Worker: cairn-share-api"
+            echo "Database: cairn-share"
+            echo "Commit: ${GITHUB_SHA}"
+            echo "URL: ${{ steps.deploy.outputs.url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,21 @@
+{
+  "name": "cairn-share-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "deploy:dry-run": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "migrate:local": "wrangler d1 migrations apply cairn-share --local",
+    "migrate:remote": "wrangler d1 migrations apply cairn-share --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.1.0",
+    "@cloudflare/workers-types": "5.20260826.1",
+    "@types/node": "22.15.17",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "wrangler": "4.126.0"
+  }
+}

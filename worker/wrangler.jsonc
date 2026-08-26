@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cairn-share-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-26",
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cairn-share",
+      "database_id": "08f52f6c-4f94-4e51-bd1c-596fdeac295c"
+    }
+  ]
+}
