@@ -1,0 +1,28 @@
+# Android / Gradle
+.gradle/
+.kotlin/
+**/build/
+local.properties
+.idea/
+*.iml
+.externalNativeBuild/
+.cxx/
+captures/
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# Cloudflare / Node.js
+node_modules/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+coverage/
+dist/
+
+# Operating systems
+.DS_Store
+Thumbs.db
