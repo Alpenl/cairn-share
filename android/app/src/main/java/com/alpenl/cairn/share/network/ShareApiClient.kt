@@ -1,5 +1,6 @@
 package com.alpenl.cairn.share.network
 
+import com.alpenl.cairn.share.BuildConfig
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
@@ -21,7 +22,12 @@ internal class ShareApiClient(
     private val baseUrl: String,
     private val connectTimeoutMillis: Int = 10_000,
     private val readTimeoutMillis: Int = 10_000,
+    private val userAgent: String = defaultUserAgent(),
 ) {
+    companion object {
+        private fun defaultUserAgent(): String = "CairnShareAndroid/${BuildConfig.VERSION_NAME} (Android)"
+    }
+
     fun save(url: String, note: String): ShareSubmitResult {
         val endpoint = URL(baseUrl.trimEnd('/') + "/api/links")
         val body = LinkRequestJson.encode(url, note).toByteArray(StandardCharsets.UTF_8)
@@ -33,6 +39,7 @@ internal class ShareApiClient(
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("User-Agent", userAgent)
             connection.setFixedLengthStreamingMode(body.size)
             connection.outputStream.use { it.write(body) }
 
