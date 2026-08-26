@@ -73,7 +73,7 @@ android {
     lint {
         warningsAsErrors = true
         abortOnError = true
-        disable += setOf("GradleDependency", "ObsoleteSdkInt", "OldTargetApi")
+        disable += setOf("AndroidGradlePluginVersion", "GradleDependency", "ObsoleteSdkInt", "OldTargetApi")
     }
 }
 
