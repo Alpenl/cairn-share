@@ -10,7 +10,7 @@ json = "20240303"
 androidxTestCore = "1.6.1"
 androidxTestJunit = "1.2.1"
 androidxTestRunner = "1.6.2"
-androidxTestRules = "1.6.1"
+androidxTestRules = "1.7.0"
 mockWebServer = "4.12.0"
 
 [libraries]
