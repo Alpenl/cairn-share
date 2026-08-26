@@ -1,4 +1,4 @@
-package com.alpenl.webtag.share.network
+package com.alpenl.cairn.share.network
 
 import java.io.IOException
 import java.net.HttpURLConnection

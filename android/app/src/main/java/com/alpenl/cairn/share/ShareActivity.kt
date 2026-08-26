@@ -1,4 +1,4 @@
-package com.alpenl.webtag.share
+package com.alpenl.cairn.share
 
 import android.content.Intent
 import android.os.Bundle
@@ -10,12 +10,12 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
-import com.alpenl.webtag.share.contract.UrlCandidate
-import com.alpenl.webtag.share.contract.UrlCandidateExtractor
-import com.alpenl.webtag.share.network.FailureKind
-import com.alpenl.webtag.share.network.ShareApiClient
-import com.alpenl.webtag.share.network.ShareSubmitResult
-import com.alpenl.webtag.share.ui.theme.CairnShareTheme
+import com.alpenl.cairn.share.contract.UrlCandidate
+import com.alpenl.cairn.share.contract.UrlCandidateExtractor
+import com.alpenl.cairn.share.network.FailureKind
+import com.alpenl.cairn.share.network.ShareApiClient
+import com.alpenl.cairn.share.network.ShareSubmitResult
+import com.alpenl.cairn.share.ui.theme.CairnShareTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -25,7 +25,7 @@ import kotlinx.coroutines.withContext
 
 class ShareActivity : ComponentActivity() {
     companion object {
-        const val EXTRA_API_BASE_URL = "com.alpenl.webtag.share.extra.API_BASE_URL"
+        const val EXTRA_API_BASE_URL = "com.alpenl.cairn.share.extra.API_BASE_URL"
 
         private const val STATE_SELECTED_INDEX = "share.selected_index"
         private const val STATE_NOTE = "share.note"
@@ -98,6 +98,13 @@ class ShareActivity : ComponentActivity() {
             ?.trimEnd('/')
             ?.takeIf(String::isNotEmpty)
             ?: BuildConfig.CAIRN_SHARE_API_BASE_URL
+
+        if (intent.action == Intent.ACTION_MAIN) {
+            candidates = emptyList()
+            selectedIndex = -1
+            status = getString(R.string.share_installed)
+            return
+        }
 
         if (intent.action != Intent.ACTION_SEND || intent.type != "text/plain") {
             candidates = emptyList()

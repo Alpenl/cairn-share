@@ -1,4 +1,4 @@
-package com.alpenl.webtag.share.contract
+package com.alpenl.cairn.share.contract
 
 data class SharePayload(
     val structuredUrls: List<String>,

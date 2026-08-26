@@ -1,6 +1,6 @@
-package com.alpenl.webtag.share
+package com.alpenl.cairn.share
 
-import com.alpenl.webtag.share.contract.SharePayload
+import com.alpenl.cairn.share.contract.SharePayload
 
 internal data class ClipItem(val uri: String? = null, val text: String? = null)
 

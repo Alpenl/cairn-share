@@ -1,4 +1,4 @@
-package com.alpenl.webtag.share.network
+package com.alpenl.cairn.share.network
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals

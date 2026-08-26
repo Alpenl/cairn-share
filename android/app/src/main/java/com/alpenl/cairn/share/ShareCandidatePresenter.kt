@@ -1,6 +1,6 @@
-package com.alpenl.webtag.share
+package com.alpenl.cairn.share
 
-import com.alpenl.webtag.share.contract.UrlCandidate
+import com.alpenl.cairn.share.contract.UrlCandidate
 
 internal data class ShareScreenModel(
     val rowLabels: List<String>,

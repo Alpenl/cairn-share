@@ -1,4 +1,4 @@
-package com.alpenl.webtag.share
+package com.alpenl.cairn.share
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -127,22 +127,24 @@ internal fun ShareScreen(
                 ) {
                     Text(stringResource(R.string.share_cancel))
                 }
-                Button(
-                    onClick = onSave,
-                    enabled = model.saveEnabled,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("save"),
-                ) {
-                    if (model.submitting) {
-                        CircularProgressIndicator(
-                            strokeWidth = 2.dp,
-                            modifier = Modifier
-                                .padding(end = 8.dp)
-                                .sizeIn(maxWidth = 18.dp, maxHeight = 18.dp),
-                        )
+                if (model.selectedLabel != null || model.submitting) {
+                    Button(
+                        onClick = onSave,
+                        enabled = model.saveEnabled,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("save"),
+                    ) {
+                        if (model.submitting) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier
+                                    .padding(end = 8.dp)
+                                    .sizeIn(maxWidth = 18.dp, maxHeight = 18.dp),
+                            )
+                        }
+                        Text(stringResource(R.string.share_save))
                     }
-                    Text(stringResource(R.string.share_save))
                 }
             }
         }

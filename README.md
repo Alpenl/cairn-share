@@ -41,8 +41,8 @@ code unit。D1 使用参数化查询，MVP 允许重复链接，不做抓取、�
 
 ## Android
 
-Android app 位于 `android/`，application id 是 `com.alpenl.webtag.share`，用户可见
-名称是 `Cairn Share`。Manifest 只声明 `INTERNET` 和系统分享入口。
+Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，用户可见
+名称是 `Cairn Share`。Manifest 只声明 `INTERNET`、桌面启动入口和系统分享入口。
 
 分享流程：
 
@@ -52,6 +52,8 @@ Android app 位于 `android/`，application id 是 `com.alpenl.webtag.share`，�
 4. 用户填写可选备注后点击 Save。
 5. App 直接通过 Android/Java 原生 HTTPS API POST 到 Cloudflare Worker。
 6. 成功后关闭；失败留在当前界面，用户可手动重试。
+
+直接从桌面打开 App 时，不会提交任何数据，只显示使用说明和公开 API 风险提示。
 
 没有账号、token、server 设置页、本地队列、Room、WorkManager、Keystore、Todo、
 Reader、旧 Cairn/WebTag endpoint 或后台同步。

@@ -1,4 +1,4 @@
-package com.alpenl.webtag.share.contract
+package com.alpenl.cairn.share.contract
 
 data class UrlCandidate(
     val submissionValue: String,

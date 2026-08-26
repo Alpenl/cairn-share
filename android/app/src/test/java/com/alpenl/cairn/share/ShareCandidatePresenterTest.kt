@@ -1,7 +1,7 @@
-package com.alpenl.webtag.share
+package com.alpenl.cairn.share
 
-import com.alpenl.webtag.share.contract.UrlCandidate
-import com.alpenl.webtag.share.contract.UrlCandidateExtractor
+import com.alpenl.cairn.share.contract.UrlCandidate
+import com.alpenl.cairn.share.contract.UrlCandidateExtractor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull

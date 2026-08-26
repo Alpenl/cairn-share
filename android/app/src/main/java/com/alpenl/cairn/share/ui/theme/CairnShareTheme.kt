@@ -1,4 +1,4 @@
-package com.alpenl.webtag.share.ui.theme
+package com.alpenl.cairn.share.ui.theme
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.lightColorScheme

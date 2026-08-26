@@ -1,4 +1,4 @@
-package com.alpenl.webtag.share
+package com.alpenl.cairn.share
 
 import android.content.ClipData
 import android.content.Intent
@@ -137,6 +137,20 @@ class ShareActivityInstrumentedTest {
         ActivityScenario.launch<ShareActivity>(intent).use {
             compose.onNodeWithTag("status").assertTextContains("No HTTP or HTTPS", substring = true)
             assertEquals(0, server!!.requestCount)
+        }
+    }
+
+    @Test
+    fun launcherEntryShowsInstalledGuidanceWithoutSubmitting() {
+        val intent = Intent(Intent.ACTION_MAIN)
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+            .setClass(targetContext(), ShareActivity::class.java)
+
+        ActivityScenario.launch<ShareActivity>(intent).use {
+            compose.onNodeWithTag("status").assertTextContains("Cairn Share is installed", substring = true)
+            compose.onNodeWithTag("status").assertTextContains("public unauthenticated Cloudflare API", substring = true)
+            compose.onAllNodesWithTag("note").assertCountEquals(0)
+            compose.onAllNodesWithTag("save").assertCountEquals(0)
         }
     }
 

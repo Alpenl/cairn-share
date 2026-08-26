@@ -28,7 +28,7 @@ jobs:
         api-level: [26, 35]
     steps:
       - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Setup JDK
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
@@ -55,7 +55,7 @@ jobs:
 
       - name: Upload instrumentation report
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: connected-test-report-api-${{ matrix.api-level }}
           path: android/app/build/reports/androidTests/connected/**

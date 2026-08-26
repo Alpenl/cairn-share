@@ -26,11 +26,11 @@ val apiBaseUrl = providers.gradleProperty("cairnShareApiBaseUrl")
     .trimEnd('/')
 
 android {
-    namespace = "com.alpenl.webtag.share"
+    namespace = "com.alpenl.cairn.share"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.alpenl.webtag.share"
+        applicationId = "com.alpenl.cairn.share"
         minSdk = 26
         targetSdk = 35
         versionCode = releaseVersionCode
