@@ -21,7 +21,9 @@ describe("cairn-share worker", () => {
     await expect(response.json()).resolves.toMatchObject({
       id: 1,
       url,
-      note: "line one\n稍后阅读"
+      note: "line one\n稍后阅读",
+      learned: false,
+      learned_at: null
     });
   });
 
@@ -74,12 +76,30 @@ describe("cairn-share worker", () => {
     expect(pageTwo.next_before_id).toBeNull();
   });
 
+  it("filters records by learned state", async () => {
+    const first = await create("https://example.com/unlearned-1");
+    const second = await create("https://example.com/learned");
+    const third = await create("https://example.com/unlearned-2");
+
+    await patchLearned(second.id, true);
+
+    const unlearned = await json(await dispatch("/api/links?learned=false"));
+    expect(unlearned.items.map((item: LinkRecord) => item.id)).toEqual([third.id, first.id]);
+
+    const learned = await json(await dispatch("/api/links?learned=true"));
+    expect(learned.items.map((item: LinkRecord) => item.id)).toEqual([second.id]);
+
+    const all = await json(await dispatch("/api/links?learned=all"));
+    expect(all.items.map((item: LinkRecord) => item.id)).toEqual([third.id, second.id, first.id]);
+  });
+
   it("validates list query parameters", async () => {
     await expectError(dispatch("/api/links?limit=0"), 400, "invalid_limit");
     await expectError(dispatch("/api/links?limit=101"), 400, "invalid_limit");
     await expectError(dispatch("/api/links?limit=abc"), 400, "invalid_limit");
     await expectError(dispatch("/api/links?before_id=0"), 400, "invalid_before_id");
     await expectError(dispatch("/api/links?before_id=abc"), 400, "invalid_before_id");
+    await expectError(dispatch("/api/links?learned=maybe"), 400, "invalid_learned");
   });
 
   it("reads individual records and hides missing rows behind JSON 404", async () => {
@@ -90,6 +110,37 @@ describe("cairn-share worker", () => {
     await expect(response.json()).resolves.toMatchObject(created);
 
     await expectError(dispatch("/api/links/999"), 404, "not_found");
+  });
+
+  it("marks a link learned and can move it back to unlearned", async () => {
+    const created = await create("https://example.com/state");
+
+    const learned = await patchLearned(created.id, true);
+    expect(learned.learned).toBe(true);
+    expect(learned.learned_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const unlearned = await patchLearned(created.id, false);
+    expect(unlearned.learned).toBe(false);
+    expect(unlearned.learned_at).toBeNull();
+
+    const readBack = await json(await dispatch(`/api/links/${created.id}`));
+    expect(readBack).toMatchObject(unlearned);
+  });
+
+  it("validates learned state writes", async () => {
+    const created = await create("https://example.com/state-errors");
+
+    await expectError(patchRaw(created.id, "{"), 400, "invalid_json");
+    await expectError(patchJson(created.id, { learned: "true" }), 400, "invalid_learned");
+    await expectError(patchJson(999, { learned: true }), 404, "not_found");
+
+    const response = await dispatch(`/api/links/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ learned: true })
+    });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "invalid_content_type" });
   });
 
   it("returns health, CORS preflight, 404 and 405 without leaking internals", async () => {
@@ -106,6 +157,10 @@ describe("cairn-share worker", () => {
     expect(deleted.status).toBe(405);
     expect(deleted.headers.get("allow")).toBe("GET, POST, OPTIONS");
     await expect(deleted.json()).resolves.toEqual({ error: "method_not_allowed" });
+
+    const deletedLink = await dispatch("/api/links/1", { method: "DELETE" });
+    expect(deletedLink.status).toBe(405);
+    expect(deletedLink.headers.get("allow")).toBe("GET, PATCH, OPTIONS");
   });
 });
 
@@ -114,6 +169,8 @@ interface LinkRecord {
   url: string;
   note: string;
   created_at: string;
+  learned: boolean;
+  learned_at: string | null;
 }
 
 async function create(url: string, note?: string): Promise<LinkRecord> {
@@ -133,6 +190,28 @@ async function postJson(body: unknown): Promise<Response> {
 async function postRaw(body: string): Promise<Response> {
   return dispatch("/api/links", {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body
+  });
+}
+
+async function patchLearned(id: number, learned: boolean): Promise<LinkRecord> {
+  const response = await patchJson(id, { learned });
+  expect(response.status).toBe(200);
+  return await response.json();
+}
+
+async function patchJson(id: number, body: unknown): Promise<Response> {
+  return dispatch(`/api/links/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(body)
+  });
+}
+
+async function patchRaw(id: number, body: string): Promise<Response> {
+  return dispatch(`/api/links/${id}`, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body
   });

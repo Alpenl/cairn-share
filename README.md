@@ -6,7 +6,7 @@ Cairn Share 是一个开源 Android 分享入口：从系统分享菜单接收�
 生产 API 当前部署在：
 
 ```text
-https://cairn-share-api.yangyuyang91.workers.dev
+https://share.alpenl.com
 ```
 
 ## 范围
@@ -19,10 +19,10 @@ https://cairn-share-api.yangyuyang91.workers.dev
 
 ## API
 
-所有接口都不需要认证。
+所有接口都不需要认证。新收藏的链接默认是未学习状态。
 
 ```bash
-curl -X POST https://cairn-share-api.yangyuyang91.workers.dev/api/links \
+curl -X POST https://share.alpenl.com/api/links \
   -H 'Content-Type: application/json' \
   --data '{"url":"https://example.com/a?x=1#fragment","note":"later"}'
 ```
@@ -31,13 +31,42 @@ curl -X POST https://cairn-share-api.yangyuyang91.workers.dev/api/links \
 
 - `GET /health`
 - `POST /api/links`
-- `GET /api/links?limit=50&before_id=123`
+- `GET /api/links?limit=50&before_id=123&learned=false`
 - `GET /api/links/:id`
+- `PATCH /api/links/:id`
 - `OPTIONS *`
 
 `POST /api/links` 只接受 `application/json`。`url` 必须是有 host、无 userinfo 的
 HTTP(S) URL，最长 8192 个 UTF-16 code unit；`note` 可省略，最长 2000 个 UTF-16
-code unit。D1 使用参数化查询，MVP 允许重复链接，不做抓取、去重、删除或修改。
+code unit。创建成功后的记录会包含：
+
+```json
+{
+  "id": 1,
+  "url": "https://example.com/a?x=1#fragment",
+  "note": "later",
+  "created_at": "2026-08-26T00:00:00.000Z",
+  "learned": false,
+  "learned_at": null
+}
+```
+
+`GET /api/links` 支持 `learned` 查询参数：
+
+- 不传或传 `learned=all`：返回全部链接。
+- `learned=false` 或 `learned=0`：只返回未学习链接。
+- `learned=true` 或 `learned=1`：只返回已学习链接。
+
+手动切换学习状态：
+
+```bash
+curl -X PATCH https://share.alpenl.com/api/links/1 \
+  -H 'Content-Type: application/json' \
+  --data '{"learned":true}'
+```
+
+再次传 `{"learned":false}` 可以把已学习链接改回未学习。D1 使用参数化查询，MVP
+允许重复链接，不做抓取、去重或删除。
 
 ## Android
 
@@ -102,6 +131,7 @@ Cloudflare 配置位于 `worker/wrangler.jsonc`：
 - D1：`cairn-share`
 - D1 binding：`DB`
 - D1 database id：`08f52f6c-4f94-4e51-bd1c-596fdeac295c`
+- Custom domain：`share.alpenl.com`
 
 本地部署：
 

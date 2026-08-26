@@ -3,9 +3,16 @@
   "name": "cairn-share-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-26",
+  "workers_dev": true,
   "observability": {
     "enabled": true
   },
+  "routes": [
+    {
+      "pattern": "share.alpenl.com",
+      "custom_domain": true
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

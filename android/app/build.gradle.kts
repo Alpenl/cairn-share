@@ -21,7 +21,7 @@ val releaseVersionCode = providers.gradleProperty("cairnShareVersionCode")
     .map(String::toInt)
     .getOrElse(versionCodeFrom(releaseVersionName))
 val apiBaseUrl = providers.gradleProperty("cairnShareApiBaseUrl")
-    .orElse("https://cairn-share-api.yangyuyang91.workers.dev")
+    .orElse("https://share.alpenl.com")
     .get()
     .trimEnd('/')
 

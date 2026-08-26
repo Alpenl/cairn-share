@@ -7,6 +7,17 @@ interface LinkRecord {
   url: string;
   note: string;
   created_at: string;
+  learned: boolean;
+  learned_at: string | null;
+}
+
+interface LinkRow {
+  id: number;
+  url: string;
+  note: string;
+  created_at: string;
+  learned: number;
+  learned_at: string | null;
 }
 
 type ErrorCode =
@@ -14,6 +25,7 @@ type ErrorCode =
   | "invalid_content_type"
   | "invalid_url"
   | "invalid_note"
+  | "invalid_learned"
   | "invalid_limit"
   | "invalid_before_id"
   | "not_found"
@@ -21,7 +33,7 @@ type ErrorCode =
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
   "Access-Control-Max-Age": "86400"
 };
@@ -59,7 +71,11 @@ export default {
 
     const linkIdMatch = path.match(/^\/api\/links\/(\d+)$/);
     if (linkIdMatch !== null) {
-      return routeMethod(request, ["GET"], () => getLink(Number(linkIdMatch[1]), env));
+      return routeMethod(request, ["GET", "PATCH"], () => {
+        const id = Number(linkIdMatch[1]);
+        if (request.method === "PATCH") return updateLinkLearned(request, env, id);
+        return getLink(id, env);
+      });
     }
 
     return json({ error: "not_found" }, 404);
@@ -95,17 +111,19 @@ async function createLink(request: Request, env: Env): Promise<Response> {
   }
 
   const createdAt = new Date().toISOString();
-  const record = await env.DB.prepare(
-    "INSERT INTO links (url, note, created_at) VALUES (?, ?, ?) RETURNING id, url, note, created_at"
+  const row = await env.DB.prepare(
+    `INSERT INTO links (url, note, created_at)
+      VALUES (?, ?, ?)
+      RETURNING id, url, note, created_at, learned, learned_at`
   )
     .bind(url, note, createdAt)
-    .first<LinkRecord>();
+    .first<LinkRow>();
 
-  if (record === null) {
+  if (row === null) {
     return json({ error: "not_found" }, 500);
   }
 
-  return json(record, 201);
+  return json(mapLink(row), 201);
 }
 
 async function listLinks(url: URL, env: Env): Promise<Response> {
@@ -115,38 +133,80 @@ async function listLinks(url: URL, env: Env): Promise<Response> {
   const beforeId = parseOptionalPositiveInt(url.searchParams.get("before_id"));
   if (beforeId === null) return error("invalid_before_id");
 
-  const pageSize = limit + 1;
-  const statement = beforeId === undefined
-    ? env.DB.prepare("SELECT id, url, note, created_at FROM links ORDER BY id DESC LIMIT ?").bind(pageSize)
-    : env.DB.prepare("SELECT id, url, note, created_at FROM links WHERE id < ? ORDER BY id DESC LIMIT ?")
-      .bind(beforeId, pageSize);
+  const learned = parseLearnedFilter(url.searchParams.get("learned"));
+  if (learned === null) return error("invalid_learned");
 
-  const result = await statement.all<LinkRecord>();
+  const pageSize = limit + 1;
+  const select = "SELECT id, url, note, created_at, learned, learned_at FROM links";
+  const order = "ORDER BY id DESC LIMIT ?";
+  const learnedValue = learned === undefined ? undefined : learned ? 1 : 0;
+  const statement = learnedValue === undefined
+    ? beforeId === undefined
+      ? env.DB.prepare(`${select} ${order}`).bind(pageSize)
+      : env.DB.prepare(`${select} WHERE id < ? ${order}`).bind(beforeId, pageSize)
+    : beforeId === undefined
+      ? env.DB.prepare(`${select} WHERE learned = ? ${order}`).bind(learnedValue, pageSize)
+      : env.DB.prepare(`${select} WHERE learned = ? AND id < ? ${order}`).bind(learnedValue, beforeId, pageSize);
+
+  const result = await statement.all<LinkRow>();
   const rows = result.results ?? [];
   const items = rows.slice(0, limit);
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
-  return json({ items, next_before_id: next });
+  return json({ items: items.map(mapLink), next_before_id: next });
 }
 
 async function getLink(id: number, env: Env): Promise<Response> {
-  const record = await env.DB.prepare(
-    "SELECT id, url, note, created_at FROM links WHERE id = ?"
+  const row = await env.DB.prepare(
+    "SELECT id, url, note, created_at, learned, learned_at FROM links WHERE id = ?"
   )
     .bind(id)
-    .first<LinkRecord>();
+    .first<LinkRow>();
 
-  if (record === null) {
+  if (row === null) {
     return error("not_found", 404);
   }
-  return json(record);
+  return json(mapLink(row));
+}
+
+async function updateLinkLearned(request: Request, env: Env, id: number): Promise<Response> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (contentType.toLowerCase().split(";")[0].trim() !== "application/json") {
+    return error("invalid_content_type");
+  }
+
+  const raw = await readJson(request);
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return error("invalid_json");
+  }
+
+  const body = raw as Record<string, unknown>;
+  if (typeof body.learned !== "boolean") {
+    return error("invalid_learned");
+  }
+
+  const learned = body.learned ? 1 : 0;
+  const learnedAt = body.learned ? new Date().toISOString() : null;
+  const row = await env.DB.prepare(
+    `UPDATE links
+      SET learned = ?, learned_at = ?
+      WHERE id = ?
+      RETURNING id, url, note, created_at, learned, learned_at`
+  )
+    .bind(learned, learnedAt, id)
+    .first<LinkRow>();
+
+  if (row === null) {
+    return error("not_found", 404);
+  }
+  return json(mapLink(row));
 }
 
 function routeMethod(
   request: Request,
-  allowed: ReadonlyArray<"GET" | "POST">,
+  allowed: ReadonlyArray<"GET" | "POST" | "PATCH">,
   handler: () => Promise<Response> | Response
 ): Promise<Response> | Response {
-  if (allowed.includes(request.method as "GET" | "POST")) {
+  if (allowed.includes(request.method as "GET" | "POST" | "PATCH")) {
     return handler();
   }
   return json(
@@ -193,6 +253,24 @@ function parseOptionalPositiveInt(raw: string | null): number | undefined | null
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 1) return null;
   return value;
+}
+
+function parseLearnedFilter(raw: string | null): boolean | undefined | null {
+  if (raw === null || raw === "" || raw === "all") return undefined;
+  if (raw === "true" || raw === "1") return true;
+  if (raw === "false" || raw === "0") return false;
+  return null;
+}
+
+function mapLink(row: LinkRow): LinkRecord {
+  return {
+    id: row.id,
+    url: row.url,
+    note: row.note,
+    created_at: row.created_at,
+    learned: row.learned === 1,
+    learned_at: row.learned_at
+  };
 }
 
 function trimTrailingSlash(path: string): string {
