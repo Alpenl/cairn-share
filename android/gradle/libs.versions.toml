@@ -9,7 +9,7 @@ junit = "4.13.2"
 json = "20240303"
 androidxTestCore = "1.6.1"
 androidxTestJunit = "1.2.1"
-androidxTestRunner = "1.6.2"
+androidxTestRunner = "1.7.0"
 androidxTestRules = "1.6.1"
 mockWebServer = "4.12.0"
 
