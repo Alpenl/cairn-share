@@ -80,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
-          yes | "${sdkmanager}" --licenses >/dev/null
+          yes | "${sdkmanager}" --licenses >/dev/null || true
           "${sdkmanager}" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: Run release gates
