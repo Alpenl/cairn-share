@@ -179,8 +179,15 @@ class ShareActivityInstrumentedTest {
             compose.onNodeWithTag("filter_all").performClick()
             compose.waitUntil(5_000) {
                 runCatching {
-                    compose.onAllNodesWithTag("link_1").assertCountEquals(1)
                     compose.onAllNodesWithTag("link_2").assertCountEquals(1)
+                    true
+                }.getOrDefault(false)
+            }
+
+            compose.onNodeWithTag("filter_unlearned").performClick()
+            compose.waitUntil(5_000) {
+                runCatching {
+                    compose.onAllNodesWithTag("link_1").assertCountEquals(1)
                     true
                 }.getOrDefault(false)
             }
