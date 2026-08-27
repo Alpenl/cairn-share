@@ -122,6 +122,59 @@ describe("cairn-share worker", () => {
     expect(noMatches.items).toEqual([]);
   });
 
+  it("caches equivalent list reads and invalidates tracked list entries after writes", async () => {
+    const first = await create("https://example.com/cache-list-1", "cache");
+
+    const firstRead = await dispatch("/api/links?q=cache&limit=20&learned=all");
+    expect(firstRead.headers.get("x-cairn-cache")).toBe("MISS");
+    expect((await json(firstRead)).items.map((item: LinkRecord) => item.id)).toEqual([first.id]);
+
+    const reorderedRead = await dispatch("/api/links?learned=all&limit=20&q=cache");
+    expect(reorderedRead.headers.get("x-cairn-cache")).toBe("HIT");
+    expect((await json(reorderedRead)).items.map((item: LinkRecord) => item.id)).toEqual([first.id]);
+
+    const second = await create("https://example.com/cache-list-2", "cache");
+
+    const afterWrite = await dispatch("/api/links?q=cache&limit=20&learned=all");
+    expect(afterWrite.headers.get("x-cairn-cache")).toBe("MISS");
+    expect((await json(afterWrite)).items.map((item: LinkRecord) => item.id)).toEqual([second.id, first.id]);
+  });
+
+  it("caches detail reads and evicts the exact detail cache after update and delete", async () => {
+    const created = await create("https://example.com/cache-detail", "old");
+
+    const firstRead = await dispatch(`/api/links/${created.id}`);
+    expect(firstRead.headers.get("x-cairn-cache")).toBe("MISS");
+    await expect(firstRead.json()).resolves.toMatchObject({ id: created.id, note: "old" });
+
+    const cachedRead = await dispatch(`/api/links/${created.id}`);
+    expect(cachedRead.headers.get("x-cairn-cache")).toBe("HIT");
+    await expect(cachedRead.json()).resolves.toMatchObject({ id: created.id, note: "old" });
+
+    await patchJson(created.id, { note: "new" });
+
+    const afterPatch = await dispatch(`/api/links/${created.id}`);
+    expect(afterPatch.headers.get("x-cairn-cache")).toBe("MISS");
+    await expect(afterPatch.json()).resolves.toMatchObject({ id: created.id, note: "new" });
+
+    const deleted = await dispatch(`/api/links/${created.id}`, { method: "DELETE" });
+    expect(deleted.status).toBe(204);
+    await expectError(dispatch(`/api/links/${created.id}`), 404, "not_found");
+  });
+
+  it("bypasses shared read cache when a request carries private headers", async () => {
+    const created = await create("https://example.com/private-cache", "private");
+
+    const cached = await dispatch(`/api/links/${created.id}`);
+    expect(cached.headers.get("x-cairn-cache")).toBe("MISS");
+
+    const privateRead = await dispatch(`/api/links/${created.id}`, {
+      headers: { Authorization: "Bearer test" }
+    });
+    expect(privateRead.headers.get("x-cairn-cache")).toBe("BYPASS");
+    await expect(privateRead.json()).resolves.toMatchObject({ id: created.id, note: "private" });
+  });
+
   it("validates list query parameters", async () => {
     await expectError(dispatch("/api/links?limit=0"), 400, "invalid_limit");
     await expectError(dispatch("/api/links?limit=101"), 400, "invalid_limit");

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -184,6 +185,7 @@ internal fun CairnLinksApp(
             }
         },
         containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0.dp),
         modifier = Modifier.fillMaxSize(),
     ) { padding ->
         NavHost(
@@ -437,9 +439,12 @@ private fun LibraryScreen(
             title = "链接库",
             subtitle = "${stats.total} 条收藏 · ${stats.pending} 条待读",
             actions = {
-                IconButton(onClick = onOpenSearch, modifier = Modifier.testTag("open_search")) {
-                    Icon(Icons.Default.Search, contentDescription = "搜索")
-                }
+                HeaderIconButton(
+                    icon = Icons.Default.Search,
+                    contentDescription = "搜索",
+                    onClick = onOpenSearch,
+                    modifier = Modifier.testTag("open_search"),
+                )
             },
         )
         FilterRow(
@@ -943,6 +948,25 @@ private fun DetailTopBar(
             overflow = TextOverflow.Ellipsis,
         )
         Row(content = actions)
+    }
+}
+
+@Composable
+private fun HeaderIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+    ) {
+        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(20.dp))
     }
 }
 
