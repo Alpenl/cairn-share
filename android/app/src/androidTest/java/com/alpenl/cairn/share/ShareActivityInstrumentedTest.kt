@@ -154,7 +154,7 @@ class ShareActivityInstrumentedTest {
         ActivityScenario.launch<ShareActivity>(intent).use {
             compose.waitUntil(5_000) {
                 runCatching {
-                    compose.onAllNodesWithTag("link_1").assertCountEquals(1)
+                    compose.onAllNodesWithTag("link_2").assertCountEquals(1)
                     compose.onNodeWithTag("update_title").assertTextContains("发现新版本 9.9.9", substring = true)
                     true
                 }.getOrDefault(false)
@@ -163,6 +163,14 @@ class ShareActivityInstrumentedTest {
             compose.onNodeWithTag("download_update").assertIsEnabled()
             compose.onAllNodesWithTag("note").assertCountEquals(0)
             compose.onAllNodesWithTag("save").assertCountEquals(0)
+
+            compose.onNodeWithTag("filter_unlearned").performClick()
+            compose.waitUntil(5_000) {
+                runCatching {
+                    compose.onAllNodesWithTag("link_1").assertCountEquals(1)
+                    true
+                }.getOrDefault(false)
+            }
 
             compose.onNodeWithTag("toggle_1").performClick()
             val toggleRequest = takeRequest("PATCH", "/api/links/1")
