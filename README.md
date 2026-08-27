@@ -29,6 +29,7 @@ curl -X POST https://share.alpenl.com/api/links \
 
 可用接口：
 
+- `GET /` 和 `GET /debug`：同源 API 调试台。
 - `GET /health`
 - `POST /api/links`
 - `GET /api/links?limit=50&before_id=123&learned=false&q=keyword`
@@ -74,12 +75,15 @@ curl -X PATCH https://share.alpenl.com/api/links/1 \
 curl -X DELETE https://share.alpenl.com/api/links/1
 ```
 
-D1 使用参数化查询，MVP 允许重复链接，不做抓取或去重。
+D1 使用参数化查询，MVP 允许重复链接，不做抓取或去重。直接打开
+`https://share.alpenl.com/` 会显示一个公开 API 调试台，可以从浏览器手动创建、查询、
+搜索、修改和删除链接。
 
 ## Android
 
 Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，用户可见
-名称是 `链接收集`。Manifest 只声明 `INTERNET`、桌面启动入口和系统分享入口。
+名称是 `链接收集`。Manifest 声明 `INTERNET`、`REQUEST_INSTALL_PACKAGES`、桌面启动
+入口、系统分享入口和用于 APK 安装的 `FileProvider`。
 
 分享流程：
 
@@ -93,6 +97,16 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 直接从桌面打开 App 时，不会自动提交任何数据，而是显示云端链接库。用户可以查看全部
 收藏，按未学习/已学习筛选，按链接或备注搜索，并对单条链接进行打开、改学习状态、编辑
 备注/URL 和删除。
+
+应用内更新：
+
+1. 桌面打开 App 时会检查 GitHub Release 最新稳定版本。
+2. 发现新版后，App 内部下载 APK 到自身 cache。
+3. 下载完成后通过 `FileProvider` 把 APK 授权给 Android 系统安装器。
+4. Android 8+ 如果尚未允许“安装未知来源应用”，会先打开系统权限设置；授权后回到 App
+   会继续打开安装器。
+
+普通 Android 应用不能静默安装 APK，最终确认安装仍由系统安装器完成，这是系统安全边界。
 
 没有账号、token、server 设置页、本地队列、Room、WorkManager、Keystore、Todo、
 Reader、旧 Cairn/WebTag endpoint 或后台同步。
@@ -188,7 +202,7 @@ GitHub Release 只上传 APK 和 `SHA256SUMS`。本项目不自动上传 Google 
 
 - 不抓取、解析、摘要或分类网页内容。
 - 不提供 Reader、待办、账户、跨设备同步或离线持久队列。
-- 不包含 iOS 客户端、Web 管理界面或应用商店自动上传。
+- 不包含 iOS 客户端、带鉴权的 Web 管理后台或应用商店自动上传。
 
 ## 数据公开边界
 

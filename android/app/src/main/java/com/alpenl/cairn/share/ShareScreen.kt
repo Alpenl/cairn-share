@@ -637,8 +637,12 @@ private fun UpdateCard(
             val title = when (updateState) {
                 is AppUpdateState.Available -> stringResource(R.string.update_available_title, updateState.update.versionName)
                 AppUpdateState.Checking -> stringResource(R.string.update_checking_title)
+                is AppUpdateState.Downloading -> stringResource(R.string.update_downloading_title, updateState.update.versionName)
                 AppUpdateState.Failed -> stringResource(R.string.update_failed_title)
                 AppUpdateState.Hidden -> ""
+                is AppUpdateState.InstallFailed -> stringResource(R.string.update_install_failed_title)
+                is AppUpdateState.InstallPermissionRequired -> stringResource(R.string.update_permission_title)
+                is AppUpdateState.InstallStarted -> stringResource(R.string.update_install_started_title)
                 AppUpdateState.UpToDate -> stringResource(R.string.update_latest_title)
             }
             val message = when (updateState) {
@@ -648,8 +652,12 @@ private fun UpdateCard(
                     updateState.update.versionName,
                 )
                 AppUpdateState.Checking -> stringResource(R.string.update_checking_message)
+                is AppUpdateState.Downloading -> stringResource(R.string.update_downloading_message)
                 AppUpdateState.Failed -> stringResource(R.string.update_failed_message)
                 AppUpdateState.Hidden -> ""
+                is AppUpdateState.InstallFailed -> stringResource(R.string.update_install_failed_message)
+                is AppUpdateState.InstallPermissionRequired -> stringResource(R.string.update_permission_message)
+                is AppUpdateState.InstallStarted -> stringResource(R.string.update_install_started_message, updateState.update.versionName)
                 AppUpdateState.UpToDate -> stringResource(R.string.update_latest_message, currentVersionName)
             }
 
@@ -657,7 +665,7 @@ private fun UpdateCard(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (updateState == AppUpdateState.Checking) {
+                if (updateState == AppUpdateState.Checking || updateState is AppUpdateState.Downloading) {
                     CircularProgressIndicator(
                         strokeWidth = 2.dp,
                         modifier = Modifier.sizeIn(maxWidth = 18.dp, maxHeight = 18.dp),
@@ -682,7 +690,19 @@ private fun UpdateCard(
                     onClick = onOpenUpdate,
                     modifier = Modifier.testTag("download_update"),
                 ) {
-                    Text(stringResource(R.string.update_download))
+                    Text(stringResource(R.string.update_download_install))
+                }
+                is AppUpdateState.InstallFailed -> Button(
+                    onClick = onOpenUpdate,
+                    modifier = Modifier.testTag("download_update"),
+                ) {
+                    Text(stringResource(R.string.update_retry_install))
+                }
+                is AppUpdateState.InstallPermissionRequired -> Button(
+                    onClick = onOpenUpdate,
+                    modifier = Modifier.testTag("download_update"),
+                ) {
+                    Text(stringResource(R.string.update_open_permission_settings))
                 }
                 AppUpdateState.Failed,
                 AppUpdateState.UpToDate -> OutlinedButton(
@@ -692,7 +712,14 @@ private fun UpdateCard(
                     Text(stringResource(R.string.update_check_again))
                 }
                 AppUpdateState.Checking,
+                is AppUpdateState.Downloading,
                 AppUpdateState.Hidden -> Unit
+                is AppUpdateState.InstallStarted -> OutlinedButton(
+                    onClick = onCheckUpdate,
+                    modifier = Modifier.testTag("check_update"),
+                ) {
+                    Text(stringResource(R.string.update_check_again))
+                }
             }
         }
     }

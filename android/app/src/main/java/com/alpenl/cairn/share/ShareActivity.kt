@@ -1,8 +1,11 @@
 package com.alpenl.cairn.share
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -10,9 +13,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.alpenl.cairn.share.contract.UrlCandidate
 import com.alpenl.cairn.share.contract.UrlCandidateExtractor
+import com.alpenl.cairn.share.network.AppUpdateInfo
 import com.alpenl.cairn.share.network.FailureKind
 import com.alpenl.cairn.share.network.LinkFilter
 import com.alpenl.cairn.share.network.LinkListResult
@@ -30,6 +35,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class ShareActivity : ComponentActivity() {
     companion object {
@@ -41,6 +47,7 @@ class ShareActivity : ComponentActivity() {
         private const val STATE_STATUS = "share.status"
         private const val STATE_SUBMITTING = "share.submitting"
         private const val MAX_NOTE_LENGTH = 2000
+        private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
     }
 
     private var candidates by mutableStateOf(emptyList<UrlCandidate>())
@@ -54,6 +61,8 @@ class ShareActivity : ComponentActivity() {
     private var releasesApiUrl = BuildConfig.CAIRN_SHARE_RELEASES_API_URL
     private var updateState by mutableStateOf<AppUpdateState>(AppUpdateState.Hidden)
     private var updateJob: Job? = null
+    private var pendingInstallFile: File? = null
+    private var pendingInstallUpdate: AppUpdateInfo? = null
     private var libraryVisible by mutableStateOf(false)
     private var linkFilter by mutableStateOf(LinkFilter.All)
     private var linkSearchQuery by mutableStateOf("")
@@ -114,6 +123,8 @@ class ShareActivity : ComponentActivity() {
         submitJob = null
         updateJob?.cancel()
         updateJob = null
+        pendingInstallFile = null
+        pendingInstallUpdate = null
         libraryJob?.cancel()
         libraryJob = null
         submitGeneration += 1
@@ -136,6 +147,17 @@ class ShareActivity : ComponentActivity() {
         updateJob?.cancel()
         libraryJob?.cancel()
         super.onDestroy()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val file = pendingInstallFile ?: return
+        val update = pendingInstallUpdate ?: return
+        if (canRequestPackageInstalls()) {
+            pendingInstallFile = null
+            pendingInstallUpdate = null
+            installDownloadedUpdate(update, file)
+        }
     }
 
     private fun inspectIntent(intent: Intent) {
@@ -430,7 +452,7 @@ class ShareActivity : ComponentActivity() {
     }
 
     private fun checkForUpdates() {
-        if (updateState == AppUpdateState.Checking) return
+        if (updateState == AppUpdateState.Checking || updateState is AppUpdateState.Downloading) return
         updateJob?.cancel()
         updateState = AppUpdateState.Checking
         updateJob = lifecycleScope.launch {
@@ -447,11 +469,83 @@ class ShareActivity : ComponentActivity() {
     }
 
     private fun openUpdate() {
-        val update = (updateState as? AppUpdateState.Available)?.update ?: return
+        when (val state = updateState) {
+            is AppUpdateState.Available -> downloadAndInstallUpdate(state.update)
+            is AppUpdateState.InstallFailed -> downloadAndInstallUpdate(state.update)
+            is AppUpdateState.InstallPermissionRequired -> openInstallPermissionSettings(state.update)
+            AppUpdateState.Checking,
+            is AppUpdateState.Downloading,
+            AppUpdateState.Failed,
+            is AppUpdateState.InstallStarted,
+            AppUpdateState.Hidden,
+            AppUpdateState.UpToDate -> Unit
+        }
+    }
+
+    private fun downloadAndInstallUpdate(update: AppUpdateInfo) {
+        updateJob?.cancel()
+        pendingInstallFile = null
+        pendingInstallUpdate = null
+        updateState = AppUpdateState.Downloading(update)
+        updateJob = lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                UpdateApkDownloader().download(
+                    downloadUrl = update.downloadUrl,
+                    versionName = update.versionName,
+                    updateDir = File(cacheDir, "updates"),
+                )
+            }
+            if (!isActive) return@launch
+            when (result) {
+                is UpdateDownloadResult.Downloaded -> installDownloadedUpdate(update, result.file)
+                UpdateDownloadResult.Failed -> updateState = AppUpdateState.InstallFailed(update)
+            }
+        }
+    }
+
+    private fun installDownloadedUpdate(update: AppUpdateInfo, file: File) {
+        if (!canRequestPackageInstalls()) {
+            pendingInstallFile = file
+            pendingInstallUpdate = update
+            updateState = AppUpdateState.InstallPermissionRequired(update)
+            openInstallPermissionSettings(update)
+            return
+        }
+
+        val apkUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, APK_MIME_TYPE)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+            putExtra(Intent.EXTRA_RETURN_RESULT, true)
+        }
+
+        try {
+            startActivity(installIntent)
+            updateState = AppUpdateState.InstallStarted(update)
+        } catch (_: ActivityNotFoundException) {
+            updateState = AppUpdateState.InstallFailed(update)
+        } catch (_: SecurityException) {
+            updateState = AppUpdateState.InstallFailed(update)
+        }
+    }
+
+    private fun canRequestPackageInstalls(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()
+
+    private fun openInstallPermissionSettings(update: AppUpdateInfo) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         runCatching {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl)))
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName"),
+                ),
+            )
         }.onFailure {
-            updateState = AppUpdateState.Failed
+            pendingInstallFile = null
+            pendingInstallUpdate = null
+            updateState = AppUpdateState.InstallFailed(update)
         }
     }
 

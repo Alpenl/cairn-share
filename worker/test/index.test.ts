@@ -8,6 +8,18 @@ beforeEach(async () => {
 });
 
 describe("cairn-share worker", () => {
+  it("serves an API debugging interface at the root path", async () => {
+    const response = await dispatch("/");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    const body = await response.text();
+    expect(body).toContain("API 调试台");
+    expect(body).toContain("POST /api/links");
+    expect(body).toContain("PATCH /api/links/:id");
+    expect(body).toContain("DELETE /api/links/:id");
+    expect(body).toContain("公开无鉴权");
+  });
+
   it("saves a public link anonymously and preserves the exact URL and note", async () => {
     const url = "HTTPS://Example.com/Article/Keep%2FCase?source=share#Section";
     const response = await dispatch("/api/links", {

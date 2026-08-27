@@ -46,6 +46,12 @@ const JSON_HEADERS = {
   ...CORS_HEADERS
 };
 
+const HTML_HEADERS = {
+  "Content-Type": "text/html; charset=utf-8",
+  "Cache-Control": "no-store",
+  ...CORS_HEADERS
+};
+
 const MAX_URL_LENGTH = 8192;
 const MAX_NOTE_LENGTH = 2000;
 const MAX_QUERY_LENGTH = 200;
@@ -60,6 +66,10 @@ export default {
 
     const url = new URL(request.url);
     const path = trimTrailingSlash(url.pathname);
+
+    if (path === "/" || path === "/debug") {
+      return routeMethod(request, ["GET"], () => html(apiDebugHtml()));
+    }
 
     if (path === "/health") {
       return routeMethod(request, ["GET"], () => json({ ok: true }));
@@ -368,4 +378,350 @@ function json(body: unknown, status = 200, extraHeaders: HeadersInit = {}): Resp
       ...extraHeaders
     }
   });
+}
+
+function html(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: HTML_HEADERS
+  });
+}
+
+function apiDebugHtml(): string {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cairn Share API 调试台</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f4ee;
+      --card: #ffffff;
+      --text: #1e1b16;
+      --muted: #6f6559;
+      --line: #e5ddd2;
+      --primary: #6d4c21;
+      --primary-contrast: #ffffff;
+      --danger: #9b1c1c;
+      --code: #15120f;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #15120f;
+        --card: #211d18;
+        --text: #f3ece2;
+        --muted: #cfc2b3;
+        --line: #3c342c;
+        --primary: #e8bf79;
+        --primary-contrast: #271805;
+        --danger: #ffb4a8;
+        --code: #090806;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top left, rgba(232, 191, 121, .22), transparent 34rem), var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 44px;
+    }
+    header {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: clamp(30px, 5vw, 56px); letter-spacing: -.04em; line-height: 1.02; }
+    h2 { font-size: 18px; }
+    .lead { max-width: 760px; color: var(--muted); font-size: 17px; }
+    .warning {
+      border: 1px solid rgba(155, 28, 28, .35);
+      background: rgba(155, 28, 28, .08);
+      color: var(--danger);
+      border-radius: 18px;
+      padding: 14px 16px;
+      font-weight: 650;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      align-items: start;
+    }
+    .card {
+      background: color-mix(in oklab, var(--card), transparent 0%);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 18px;
+      box-shadow: 0 18px 42px rgba(55, 41, 23, .08);
+    }
+    .card.full { grid-column: 1 / -1; }
+    .row { display: grid; gap: 10px; margin-top: 14px; }
+    .inline {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 11px 12px;
+      background: var(--card);
+      color: var(--text);
+      font: inherit;
+    }
+    input[type="checkbox"] { width: auto; }
+    textarea { min-height: 92px; resize: vertical; }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 16px;
+      background: var(--primary);
+      color: var(--primary-contrast);
+      font: inherit;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: transparent;
+      color: var(--primary);
+      border: 1px solid color-mix(in oklab, var(--primary), transparent 55%);
+    }
+    button.danger {
+      background: var(--danger);
+      color: #fff;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    pre {
+      min-height: 260px;
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: var(--code);
+      color: #f7f0e6;
+      border-radius: 18px;
+      padding: 16px;
+      font-size: 13px;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 10px;
+    }
+    a { color: var(--primary); }
+    @media (max-width: 820px) {
+      .grid, .inline { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="meta">Cairn Share · Cloudflare Worker + D1</p>
+      <h1>API 调试台</h1>
+      <p class="lead">这个页面直接调用当前域名下的公开 API。可以创建、查询、搜索、修改和删除链接，用来验证 Android App 背后的 Cloudflare 接口。</p>
+      <div class="warning">公开无鉴权：这里提交和读取的数据对任何人开放。不要保存私密链接、访问令牌、Cookie、一次性签名地址或内部系统 URL。</div>
+    </header>
+
+    <section class="grid">
+      <form class="card" id="create-form">
+        <h2>创建链接</h2>
+        <div class="row">
+          <label>URL
+            <input id="create-url" required placeholder="https://example.com/a?x=1#fragment">
+          </label>
+          <label>备注
+            <textarea id="create-note" maxlength="2000" placeholder="可选，例如：稍后阅读、项目资料"></textarea>
+          </label>
+        </div>
+        <div class="actions">
+          <button type="submit">POST /api/links</button>
+        </div>
+      </form>
+
+      <form class="card" id="list-form">
+        <h2>查询列表</h2>
+        <div class="row">
+          <div class="inline">
+            <label>学习状态
+              <select id="list-learned">
+                <option value="all">全部</option>
+                <option value="false">未学习</option>
+                <option value="true">已学习</option>
+              </select>
+            </label>
+            <label>数量
+              <input id="list-limit" type="number" min="1" max="100" value="20">
+            </label>
+          </div>
+          <div class="inline">
+            <label>搜索关键词
+              <input id="list-q" maxlength="200" placeholder="链接或备注">
+            </label>
+            <label>before_id
+              <input id="list-before" type="number" min="1" placeholder="分页用，可空">
+            </label>
+          </div>
+        </div>
+        <div class="actions">
+          <button type="submit">GET /api/links</button>
+          <button type="button" class="secondary" id="health-button">GET /health</button>
+        </div>
+      </form>
+
+      <form class="card" id="read-form">
+        <h2>读取或删除单条</h2>
+        <div class="row">
+          <label>链接 ID
+            <input id="read-id" type="number" min="1" placeholder="1">
+          </label>
+        </div>
+        <div class="actions">
+          <button type="submit">GET /api/links/:id</button>
+          <button type="button" class="danger" id="delete-button">DELETE /api/links/:id</button>
+        </div>
+      </form>
+
+      <form class="card" id="update-form">
+        <h2>修改链接</h2>
+        <div class="row">
+          <label>链接 ID
+            <input id="update-id" type="number" min="1" placeholder="1">
+          </label>
+          <label>新 URL（可空）
+            <input id="update-url" placeholder="https://example.com/updated">
+          </label>
+          <label>新备注
+            <textarea id="update-note" maxlength="2000" placeholder="新的备注"></textarea>
+          </label>
+          <label class="check">
+            <input id="update-note-enabled" type="checkbox">
+            提交备注字段，可用于清空备注
+          </label>
+          <label>学习状态
+            <select id="update-learned">
+              <option value="">不修改</option>
+              <option value="true">已学习</option>
+              <option value="false">未学习</option>
+            </select>
+          </label>
+        </div>
+        <div class="actions">
+          <button type="submit">PATCH /api/links/:id</button>
+        </div>
+      </form>
+
+      <section class="card full">
+        <h2>响应</h2>
+        <p class="meta">所有请求都从浏览器直接发往 <code id="origin"></code>，没有隐藏代理或鉴权。</p>
+        <pre id="output">等待请求...</pre>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const out = document.getElementById("output");
+    document.getElementById("origin").textContent = location.origin;
+
+    function value(id) {
+      return document.getElementById(id).value.trim();
+    }
+
+    function show(payload) {
+      out.textContent = JSON.stringify(payload, null, 2);
+    }
+
+    async function send(method, path, body) {
+      out.textContent = "请求中...";
+      const options = { method, headers: { "Accept": "application/json" } };
+      if (body !== undefined) {
+        options.headers["Content-Type"] = "application/json";
+        options.body = JSON.stringify(body);
+      }
+      const response = await fetch(path, options);
+      const text = await response.text();
+      let parsed = text;
+      try {
+        parsed = text ? JSON.parse(text) : null;
+      } catch (_) {}
+      show({ method, path, status: response.status, ok: response.ok, body: parsed });
+    }
+
+    document.getElementById("create-form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      send("POST", "/api/links", { url: value("create-url"), note: document.getElementById("create-note").value });
+    });
+
+    document.getElementById("list-form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      const params = new URLSearchParams();
+      params.set("learned", value("list-learned"));
+      params.set("limit", value("list-limit") || "20");
+      if (value("list-q")) params.set("q", value("list-q"));
+      if (value("list-before")) params.set("before_id", value("list-before"));
+      send("GET", "/api/links?" + params.toString());
+    });
+
+    document.getElementById("health-button").addEventListener("click", function () {
+      send("GET", "/health");
+    });
+
+    document.getElementById("read-form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      send("GET", "/api/links/" + value("read-id"));
+    });
+
+    document.getElementById("delete-button").addEventListener("click", function () {
+      const id = value("read-id");
+      if (!id || !confirm("确认删除链接 #" + id + "？")) return;
+      send("DELETE", "/api/links/" + id);
+    });
+
+    document.getElementById("update-form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      const body = {};
+      const url = value("update-url");
+      const learned = value("update-learned");
+      if (url) body.url = url;
+      if (document.getElementById("update-note-enabled").checked) {
+        body.note = document.getElementById("update-note").value;
+      }
+      if (learned) body.learned = learned === "true";
+      send("PATCH", "/api/links/" + value("update-id"), body);
+    });
+  </script>
+</body>
+</html>`;
 }
