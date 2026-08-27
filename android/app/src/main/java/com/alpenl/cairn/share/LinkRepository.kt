@@ -11,26 +11,27 @@ import com.alpenl.cairn.share.network.LinksApiClient
 internal class LinkRepository(apiBaseUrl: String) {
     private val client = LinksApiClient(apiBaseUrl)
 
-    fun loadAll(): LinkListResult =
-        client.listAll(LinkFilter.All, "")
+    fun loadAll(apiToken: String): LinkListResult =
+        client.listAll(LinkFilter.All, "", apiToken)
 
-    fun searchPage(query: String, beforeId: Int? = null): LinkPageResult =
-        client.listPage(LinkFilter.All, query, beforeId)
+    fun searchPage(query: String, apiToken: String, beforeId: Int? = null): LinkPageResult =
+        client.listPage(LinkFilter.All, query, apiToken, beforeId)
 
-    fun get(id: Int): LinkGetResult =
-        client.get(id)
+    fun get(id: Int, apiToken: String): LinkGetResult =
+        client.get(id, apiToken)
 
-    fun create(url: String, note: String): LinkCreateResult =
-        client.create(url, note)
+    fun create(url: String, note: String, apiToken: String): LinkCreateResult =
+        client.create(url, note, apiToken)
 
     fun update(
         id: Int,
         url: String? = null,
         note: String? = null,
         learned: Boolean? = null,
+        apiToken: String,
     ): LinkMutationResult =
-        client.update(id = id, url = url, note = note, learned = learned)
+        client.update(id = id, url = url, note = note, learned = learned, apiToken = apiToken)
 
-    fun delete(id: Int): LinkMutationResult =
-        client.delete(id)
+    fun delete(id: Int, apiToken: String): LinkMutationResult =
+        client.delete(id, apiToken)
 }

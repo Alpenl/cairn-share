@@ -14,15 +14,18 @@ https://share.alpenl.com
 - 保留 Android `ACTION_SEND` 的文本分享入口和完整 URL，不删除 query 或 fragment。
 - 分享时允许填写可选备注，再由应用直接提交到 Cloudflare。
 - 后端只使用 Cloudflare Worker 与 D1，不依赖 Cairn、WebTag 或其他自托管服务。
-- 应用和 HTTP API 都不做登录、令牌、账号、会话或权限鉴别。
-- API 的读写接口面向所有人开放，存储的数据也按公开数据处理。
+- 应用和 HTTP API 不做账号、会话或多用户权限，只使用一个部署侧访问 Token 保护读写接口。
+- Android 本地保存访问 Token、分享偏好、筛选、搜索词和上次打开页面。
 
 ## API
 
-所有接口都不需要认证。新收藏的链接默认是未学习状态。
+`/api/links` 相关接口需要 `Authorization: Bearer <token>`。`GET /health` 和 API 调试台
+页面不需要认证；调试台会把填写的 Token 保存到当前浏览器的 `localStorage`。新收藏的
+链接默认是未学习状态。
 
 ```bash
 curl -X POST https://share.alpenl.com/api/links \
+  -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   --data '{"url":"https://example.com/a?x=1#fragment","note":"later"}'
 ```
@@ -64,6 +67,7 @@ code unit。创建成功后的记录会包含：
 
 ```bash
 curl -X PATCH https://share.alpenl.com/api/links/1 \
+  -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   --data '{"url":"https://example.com/updated","note":"updated note","learned":true}'
 ```
@@ -72,12 +76,13 @@ curl -X PATCH https://share.alpenl.com/api/links/1 \
 把已学习链接改回未学习。删除链接：
 
 ```bash
-curl -X DELETE https://share.alpenl.com/api/links/1
+curl -X DELETE https://share.alpenl.com/api/links/1 \
+  -H 'Authorization: Bearer <token>'
 ```
 
 D1 使用参数化查询，MVP 允许重复链接，不做抓取或去重。直接打开
-`https://share.alpenl.com/` 会显示一个公开 API 调试台，可以从浏览器手动创建、查询、
-搜索、修改和删除链接。
+`https://share.alpenl.com/` 会显示一个 API 调试台。填写访问 Token 后，可以从浏览器
+手动创建、查询、搜索、修改和删除链接。
 
 ## Android
 
@@ -94,7 +99,7 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
   系统返回逐级退出。
 - “链接库”提供总览、搜索、筛选、周进度、链接详情入口和手动添加 FAB。
 - “待学习”只展示未学习链接，按收藏时间先进先读，并支持批量标记已学习。
-- “设置”展示只读服务器地址、分享偏好、更新入口、API 调试台入口和关于入口。
+- “设置”展示只读服务器地址、访问 Token、分享偏好、更新入口、API 调试台入口和关于入口。
 - 系统 `ACTION_SEND` 不进入应用壳，而是打开透明 Activity 上的 Material bottom sheet。
 
 分享流程：
@@ -122,9 +127,9 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 
 普通 Android 应用不能静默安装 APK，最终确认安装仍由系统安装器完成，这是系统安全边界。
 
-仍然没有账号、token、可编辑 server、多服务器切换、Room、WorkManager、Keystore、
-Reader、旧 Cairn/WebTag endpoint 或后台同步。设置页中的服务器地址只读，生产用户不能
-切换到任意 API 主机；API 调试台也被限制在当前配置服务器下。
+仍然没有账号体系、可编辑 server、多服务器切换、Room、WorkManager、Keystore、Reader、
+旧 Cairn/WebTag endpoint 或后台同步。设置页中的服务器地址只读，生产用户不能切换到
+任意 API 主机；API 调试台也被限制在当前配置服务器下。
 
 ## 本地构建
 
@@ -171,12 +176,14 @@ Cloudflare 配置位于 `worker/wrangler.jsonc`：
 - D1 binding：`DB`
 - D1 database id：`08f52f6c-4f94-4e51-bd1c-596fdeac295c`
 - Custom domain：`share.alpenl.com`
+- Worker secret：`CAIRN_API_TOKEN`
 
 本地部署：
 
 ```bash
 cd worker
 npm run migrate:remote
+npx wrangler secret put CAIRN_API_TOKEN
 npm run deploy
 ```
 
@@ -186,8 +193,10 @@ repository/environment secrets：
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_API_TOKEN`
 
-API token 应使用最小权限，只授予部署该 Worker 和迁移该 D1 所需能力。不要提交
-Wrangler OAuth 文件、Cloudflare token、`.dev.vars` 或 GitHub secret 值。
+Cloudflare API token 应使用最小权限，只授予部署该 Worker 和迁移该 D1 所需能力。
+`CAIRN_API_TOKEN` 是应用访问 API 用的 Bearer token，应通过 Wrangler secret 或
+Cloudflare Dashboard 配置，不要提交 Wrangler OAuth 文件、Cloudflare token、`.dev.vars`
+或 GitHub secret 值。
 
 ## Android 发布
 
@@ -219,11 +228,11 @@ GitHub Release 只上传 APK 和 `SHA256SUMS`。本项目不自动上传 Google 
 - 不提供 Reader、待办、账户、跨设备同步或离线持久队列。
 - 不包含 iOS 客户端、带鉴权的 Web 管理后台或应用商店自动上传。
 
-## 数据公开边界
+## 数据边界
 
-该项目刻意不提供鉴权。提交的链接和备注将能够被公开 API 枚举和读取，不应提交私密
-链接、一次性签名 URL、访问令牌或其他敏感内容。输入校验、长度限制和基础滥用防护不会
-改变 API 对所有人开放的产品边界。
+该项目不提供账号体系，只有一个共享访问 Token。知道 Token 的客户端可以枚举、读取、
+创建、修改和删除全部链接，因此不应提交私密链接、一次性签名 URL、访问令牌或其他敏感
+内容。输入校验、长度限制、缓存和基础滥用防护不能替代完整权限模型。
 
 ## GitHub Actions
 

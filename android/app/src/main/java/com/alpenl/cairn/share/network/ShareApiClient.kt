@@ -14,11 +14,13 @@ internal sealed interface ShareSubmitResult {
 internal enum class FailureKind {
     Network,
     Timeout,
+    Unauthorized,
     Server,
 }
 
 internal class ShareApiClient(
     private val baseUrl: String,
+    private val apiToken: String,
     private val connectTimeoutMillis: Int = 10_000,
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
@@ -35,15 +37,18 @@ internal class ShareApiClient(
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("User-Agent", userAgent)
+            if (apiToken.isNotBlank()) {
+                connection.setRequestProperty("Authorization", "Bearer ${apiToken.trim()}")
+            }
             connection.setFixedLengthStreamingMode(body.size)
             connection.outputStream.use { it.write(body) }
 
             val status = connection.responseCode
             drainResponse(connection)
-            if (status == HttpURLConnection.HTTP_CREATED) {
-                ShareSubmitResult.Saved
-            } else {
-                ShareSubmitResult.Failed(FailureKind.Server)
+            when (status) {
+                HttpURLConnection.HTTP_CREATED -> ShareSubmitResult.Saved
+                HttpURLConnection.HTTP_UNAUTHORIZED -> ShareSubmitResult.Failed(FailureKind.Unauthorized)
+                else -> ShareSubmitResult.Failed(FailureKind.Server)
             }
         } catch (_: SocketTimeoutException) {
             ShareSubmitResult.Failed(FailureKind.Timeout)

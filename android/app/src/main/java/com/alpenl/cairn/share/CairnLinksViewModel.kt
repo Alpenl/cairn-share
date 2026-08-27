@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.alpenl.cairn.share.network.ApiDebugClient
 import com.alpenl.cairn.share.network.ApiDebugMethod
 import com.alpenl.cairn.share.network.ApiDebugResult
+import com.alpenl.cairn.share.network.FailureKind
 import com.alpenl.cairn.share.network.LinkCreateResult
 import com.alpenl.cairn.share.network.LinkFilter
 import com.alpenl.cairn.share.network.LinkGetResult
@@ -48,6 +49,7 @@ internal data class CairnLinksUiState(
     val editDraft: EditDraft? = null,
     val manualAdd: ManualAddState = ManualAddState(),
     val preferences: SharePreferences = SharePreferences(),
+    val preferencesLoaded: Boolean = false,
     val updateState: AppUpdateState = AppUpdateState.Hidden,
     val apiDebug: ApiDebugUiState = ApiDebugUiState(),
     val message: UiMessage? = null,
@@ -128,22 +130,36 @@ internal class CairnLinksViewModel(
 
     private var messageId = 0L
     private var searchJob: Job? = null
+    private var loadedPreferencesOnce = false
 
     init {
         observeSettings()
-        refreshLinks()
         checkForUpdates()
     }
 
     fun refreshLinks() {
+        if (!uiState.preferencesLoaded) return
         if (uiState.loading) return
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            uiState = uiState.copy(
+                loading = false,
+                statusText = "请先在设置中配置访问 Token。",
+                message = if (uiState.links.isEmpty()) {
+                    nextMessage("需要配置访问 Token 后才能同步。")
+                } else {
+                    uiState.message
+                },
+            )
+            return
+        }
         val hadLinks = uiState.links.isNotEmpty()
         uiState = uiState.copy(
             loading = true,
             statusText = if (hadLinks) "正在刷新链接..." else "正在同步云端链接...",
         )
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.loadAll() }) {
+            when (val result = withContext(Dispatchers.IO) { repository.loadAll(apiToken) }) {
                 is LinkListResult.Loaded -> {
                     uiState = uiState.copy(
                         links = result.items.sortedByDescending { it.id },
@@ -152,11 +168,12 @@ internal class CairnLinksViewModel(
                     )
                 }
                 is LinkListResult.Failed -> {
+                    val authFailure = result.kind == FailureKind.Unauthorized
                     uiState = uiState.copy(
                         loading = false,
-                        statusText = "加载失败。请检查网络后重试。",
+                        statusText = if (authFailure) "Token 无效，请在设置中重新填写。" else "加载失败。请检查网络后重试。",
                         message = if (uiState.links.isNotEmpty()) {
-                            nextMessage("同步失败，已保留当前列表。")
+                            nextMessage(if (authFailure) "Token 无效，已保留当前列表。" else "同步失败，已保留当前列表。")
                         } else {
                             uiState.message
                         },
@@ -168,11 +185,13 @@ internal class CairnLinksViewModel(
 
     fun setFilter(filter: LinkFilter) {
         uiState = uiState.copy(filter = filter)
+        viewModelScope.launch { settingsStore.setLastFilter(filter.apiValue) }
     }
 
     fun setSearchQuery(value: String) {
         searchJob?.cancel()
         val query = value.trim()
+        viewModelScope.launch { settingsStore.setLastSearchQuery(value) }
         uiState = if (query.isEmpty()) {
             uiState.copy(
                 searchQuery = value,
@@ -209,9 +228,17 @@ internal class CairnLinksViewModel(
 
     fun ensureLink(id: Int) {
         if (uiState.links.any { it.id == id } || uiState.detailLoads[id] == DetailLoadState.Loading) return
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            uiState = uiState.copy(
+                detailLoads = uiState.detailLoads + (id to DetailLoadState.Failed),
+                message = nextMessage("需要配置访问 Token 后才能加载详情。"),
+            )
+            return
+        }
         uiState = uiState.copy(detailLoads = uiState.detailLoads + (id to DetailLoadState.Loading))
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.get(id) }) {
+            when (val result = withContext(Dispatchers.IO) { repository.get(id, apiToken) }) {
                 is LinkGetResult.Loaded -> {
                     uiState = uiState.copy(
                         links = uiState.links.upsert(result.link),
@@ -222,7 +249,14 @@ internal class CairnLinksViewModel(
                     uiState = uiState.copy(detailLoads = uiState.detailLoads + (id to DetailLoadState.NotFound))
                 }
                 is LinkGetResult.Failed -> {
-                    uiState = uiState.copy(detailLoads = uiState.detailLoads + (id to DetailLoadState.Failed))
+                    uiState = uiState.copy(
+                        detailLoads = uiState.detailLoads + (id to DetailLoadState.Failed),
+                        message = if (result.kind == FailureKind.Unauthorized) {
+                            nextMessage("Token 无效，请在设置中重新填写。")
+                        } else {
+                            uiState.message
+                        },
+                    )
                 }
             }
         }
@@ -256,10 +290,15 @@ internal class CairnLinksViewModel(
             uiState = uiState.copy(manualAdd = draft.copy(statusText = error))
             return
         }
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            uiState = uiState.copy(manualAdd = draft.copy(statusText = "请先在设置中配置访问 Token。"))
+            return
+        }
 
         uiState = uiState.copy(manualAdd = draft.copy(submitting = true, statusText = "保存中..."))
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.create(preparedUrl, note) }) {
+            when (val result = withContext(Dispatchers.IO) { repository.create(preparedUrl, note, apiToken) }) {
                 is LinkCreateResult.Created -> {
                     uiState = uiState.copy(
                         links = uiState.links.upsert(result.link),
@@ -271,7 +310,7 @@ internal class CairnLinksViewModel(
                     uiState = uiState.copy(
                         manualAdd = uiState.manualAdd.copy(
                             submitting = false,
-                            statusText = "保存失败。请检查网络后重试。",
+                            statusText = failureText(result.kind, "保存失败。请检查网络后重试。"),
                         ),
                     )
                 }
@@ -301,11 +340,16 @@ internal class CairnLinksViewModel(
             uiState = uiState.copy(editDraft = draft.copy(error = error))
             return
         }
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            uiState = uiState.copy(editDraft = draft.copy(error = "请先在设置中配置访问 Token。"))
+            return
+        }
 
         uiState = uiState.copy(editDraft = draft.copy(saving = true, error = ""))
         viewModelScope.launch {
             when (val result = withContext(Dispatchers.IO) {
-                repository.update(id = draft.id, url = url, note = draft.note)
+                repository.update(id = draft.id, url = url, note = draft.note, apiToken = apiToken)
             }) {
                 is LinkMutationResult.Updated -> {
                     uiState = uiState.copy(
@@ -320,7 +364,7 @@ internal class CairnLinksViewModel(
                     uiState = uiState.copy(
                         editDraft = uiState.editDraft?.copy(
                             saving = false,
-                            error = "保存失败。请检查网络后重试。",
+                            error = failureText(result.kind, "保存失败。请检查网络后重试。"),
                         ),
                     )
                 }
@@ -335,9 +379,14 @@ internal class CairnLinksViewModel(
 
     fun setLearned(linkId: Int, learned: Boolean, undoLearned: Boolean? = null) {
         if (linkId in uiState.busyIds) return
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            uiState = uiState.copy(message = nextMessage("请先在设置中配置访问 Token。"))
+            return
+        }
         uiState = uiState.copy(busyIds = uiState.busyIds + linkId)
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.update(linkId, learned = learned) }) {
+            when (val result = withContext(Dispatchers.IO) { repository.update(linkId, learned = learned, apiToken = apiToken) }) {
                 is LinkMutationResult.Updated -> {
                     val message = if (undoLearned != null) {
                         nextMessage(
@@ -358,7 +407,7 @@ internal class CairnLinksViewModel(
                 is LinkMutationResult.Failed -> {
                     uiState = uiState.copy(
                         busyIds = uiState.busyIds - linkId,
-                        message = nextMessage("学习状态保存失败。"),
+                        message = nextMessage(failureText(result.kind, "学习状态保存失败。")),
                     )
                 }
             }
@@ -367,9 +416,14 @@ internal class CairnLinksViewModel(
 
     fun deleteLink(linkId: Int, onSuccess: () -> Unit) {
         if (linkId in uiState.busyIds) return
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            uiState = uiState.copy(message = nextMessage("请先在设置中配置访问 Token。"))
+            return
+        }
         uiState = uiState.copy(busyIds = uiState.busyIds + linkId)
         viewModelScope.launch {
-            when (withContext(Dispatchers.IO) { repository.delete(linkId) }) {
+            when (val result = withContext(Dispatchers.IO) { repository.delete(linkId, apiToken) }) {
                 LinkMutationResult.Deleted -> {
                     uiState = uiState.copy(
                         links = uiState.links.filterNot { it.id == linkId },
@@ -383,7 +437,7 @@ internal class CairnLinksViewModel(
                 is LinkMutationResult.Failed -> {
                     uiState = uiState.copy(
                         busyIds = uiState.busyIds - linkId,
-                        message = nextMessage("删除失败。请检查网络后重试。"),
+                        message = nextMessage(failureText(result.kind, "删除失败。请检查网络后重试。")),
                     )
                 }
             }
@@ -396,12 +450,17 @@ internal class CairnLinksViewModel(
             uiState = uiState.copy(message = nextMessage("待学习队列已经清空。"))
             return
         }
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            uiState = uiState.copy(message = nextMessage("请先在设置中配置访问 Token。"))
+            return
+        }
         viewModelScope.launch {
             var success = 0
             var failed = 0
             for (link in pending) {
                 uiState = uiState.copy(busyIds = uiState.busyIds + link.id)
-                when (val result = withContext(Dispatchers.IO) { repository.update(link.id, learned = true) }) {
+                when (val result = withContext(Dispatchers.IO) { repository.update(link.id, learned = true, apiToken = apiToken) }) {
                     is LinkMutationResult.Updated -> {
                         success += 1
                         uiState = uiState.copy(links = uiState.links.upsert(result.link))
@@ -432,6 +491,19 @@ internal class CairnLinksViewModel(
     fun setPreserveCompleteUrl(value: Boolean) {
         uiState = uiState.copy(preferences = uiState.preferences.copy(preserveCompleteUrl = value))
         viewModelScope.launch { settingsStore.setPreserveCompleteUrl(value) }
+    }
+
+    fun setApiToken(value: String) {
+        val token = value.trim()
+        uiState = uiState.copy(preferences = uiState.preferences.copy(apiToken = token))
+        viewModelScope.launch { settingsStore.setApiToken(token) }
+        refreshLinks()
+    }
+
+    fun setLastRoute(route: String) {
+        if (uiState.preferences.lastRoute == route) return
+        uiState = uiState.copy(preferences = uiState.preferences.copy(lastRoute = route))
+        viewModelScope.launch { settingsStore.setLastRoute(route) }
     }
 
     fun checkForUpdates() {
@@ -469,7 +541,7 @@ internal class CairnLinksViewModel(
         uiState = uiState.copy(apiDebug = state.copy(sending = true, statusLine = "发送中..."))
         viewModelScope.launch {
             when (val result = withContext(Dispatchers.IO) {
-                apiDebugClient.send(state.method, state.path, state.body)
+                apiDebugClient.send(state.method, state.path, state.body, currentApiToken())
             }) {
                 is ApiDebugResult.Loaded -> {
                     val response = result.response
@@ -504,16 +576,46 @@ internal class CairnLinksViewModel(
         viewModelScope.launch {
             settingsStore.preferences
                 .catch { emit(SharePreferences()) }
-                .collect { uiState = uiState.copy(preferences = it) }
+                .collect { preferences ->
+                    val firstLoad = !loadedPreferencesOnce
+                    val previousToken = uiState.preferences.apiToken.trim()
+                    val restoredFilter = if (firstLoad) filterFromPreference(preferences.lastFilter) else uiState.filter
+                    val restoredQuery = if (firstLoad) preferences.lastSearchQuery else uiState.searchQuery
+                    loadedPreferencesOnce = true
+                    uiState = uiState.copy(
+                        preferences = preferences,
+                        preferencesLoaded = true,
+                        filter = restoredFilter,
+                        searchQuery = restoredQuery,
+                    )
+                    if (firstLoad || previousToken != preferences.apiToken.trim()) {
+                        refreshLinks()
+                    }
+                    if (firstLoad && restoredQuery.isNotBlank()) {
+                        searchJob?.cancel()
+                        searchJob = viewModelScope.launch {
+                            loadSearchPage(query = restoredQuery.trim(), beforeId = null, append = false)
+                        }
+                    }
+                }
         }
     }
 
     private suspend fun loadSearchPage(query: String, beforeId: Int?, append: Boolean) {
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            uiState = uiState.copy(
+                searchLoading = false,
+                searchStatusText = "请先在设置中配置访问 Token。",
+                message = nextMessage("需要配置访问 Token 后才能搜索。"),
+            )
+            return
+        }
         uiState = uiState.copy(
             searchLoading = true,
             searchStatusText = if (append) "正在加载更多..." else "正在搜索...",
         )
-        when (val result = withContext(Dispatchers.IO) { repository.searchPage(query, beforeId) }) {
+        when (val result = withContext(Dispatchers.IO) { repository.searchPage(query, apiToken, beforeId) }) {
             is LinkPageResult.Loaded -> {
                 if (uiState.searchQuery.trim() != query) return
                 val nextItems = if (append) {
@@ -532,14 +634,33 @@ internal class CairnLinksViewModel(
             }
             is LinkPageResult.Failed -> {
                 if (uiState.searchQuery.trim() != query) return
+                val authFailure = result.kind == FailureKind.Unauthorized
                 uiState = uiState.copy(
                     searchLoading = false,
-                    searchStatusText = if (append) "加载更多失败。" else "搜索失败。请检查网络后重试。",
-                    message = nextMessage(if (append) "加载更多失败。" else "搜索失败。请检查网络。"),
+                    searchStatusText = when {
+                        authFailure -> "Token 无效，请在设置中重新填写。"
+                        append -> "加载更多失败。"
+                        else -> "搜索失败。请检查网络后重试。"
+                    },
+                    message = nextMessage(
+                        when {
+                            authFailure -> "Token 无效，请在设置中重新填写。"
+                            append -> "加载更多失败。"
+                            else -> "搜索失败。请检查网络。"
+                        },
+                    ),
                 )
             }
         }
     }
+
+    private fun currentApiToken(): String = uiState.preferences.apiToken.trim()
+
+    private fun filterFromPreference(value: String): LinkFilter =
+        LinkFilter.entries.firstOrNull { it.apiValue == value } ?: LinkFilter.All
+
+    private fun failureText(kind: FailureKind, fallback: String): String =
+        if (kind == FailureKind.Unauthorized) "Token 无效，请在设置中重新填写。" else fallback
 
     private fun validateLinkDraft(url: String, note: String): String? =
         when {

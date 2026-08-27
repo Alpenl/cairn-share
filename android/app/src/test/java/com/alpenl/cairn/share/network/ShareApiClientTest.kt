@@ -12,6 +12,7 @@ class ShareApiClientTest {
     @Test
     fun saveSendsStableUserAgent() {
         val userAgents = LinkedBlockingQueue<String>()
+        val authorizations = LinkedBlockingQueue<String>()
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val serverThread = Thread {
             server.use { socketServer ->
@@ -22,6 +23,10 @@ class ShareApiClientTest {
                         ?.substringAfter(':')
                         ?.trim()
                         ?.let(userAgents::offer)
+                    headers.firstOrNull { it.startsWith("Authorization:", ignoreCase = true) }
+                        ?.substringAfter(':')
+                        ?.trim()
+                        ?.let(authorizations::offer)
                     val contentLength = headers.firstOrNull { it.startsWith("Content-Length:", ignoreCase = true) }
                         ?.substringAfter(':')
                         ?.trim()
@@ -40,11 +45,13 @@ class ShareApiClientTest {
         try {
             val result = ShareApiClient(
                 baseUrl = "http://127.0.0.1:${server.localPort}",
+                apiToken = "test-token",
                 userAgent = "CairnShareAndroid/test (Android)",
             ).save("https://example.com/article", "稍后阅读")
 
             assertEquals(ShareSubmitResult.Saved, result)
             assertEquals("CairnShareAndroid/test (Android)", userAgents.poll(5, TimeUnit.SECONDS))
+            assertEquals("Bearer test-token", authorizations.poll(5, TimeUnit.SECONDS))
         } finally {
             server.close()
             serverThread.join(5_000)

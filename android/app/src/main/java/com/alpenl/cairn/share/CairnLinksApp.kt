@@ -85,6 +85,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
@@ -143,11 +144,26 @@ internal fun CairnLinksApp(
     onInstallUpdate: () -> Unit,
 ) {
     val state = viewModel.uiState
+    if (!state.preferencesLoaded) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
+        }
+        return
+    }
+
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
     val currentEntry by navController.currentBackStackEntryAsState()
     val currentRoute = currentEntry?.destination?.route
     val showBottomBar = currentRoute in TopDestinations.map { it.route }
+    val startDestination = restorableRoute(state.preferences.lastRoute) ?: Routes.Library
 
     LaunchedEffect(state.message?.id) {
         val message = state.message ?: return@LaunchedEffect
@@ -160,6 +176,10 @@ internal fun CairnLinksApp(
             message.undo?.let { viewModel.setLearned(it.linkId, it.learned) }
         }
         viewModel.consumeMessage(message.id)
+    }
+
+    LaunchedEffect(currentRoute) {
+        currentRoute?.let(::restorableRoute)?.let(viewModel::setLastRoute)
     }
 
     Scaffold(
@@ -190,7 +210,7 @@ internal fun CairnLinksApp(
     ) { padding ->
         NavHost(
             navController = navController,
-            startDestination = Routes.Library,
+            startDestination = startDestination,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
@@ -215,6 +235,7 @@ internal fun CairnLinksApp(
                     state = state,
                     onCloseAfterSaveChange = viewModel::setCloseAfterSave,
                     onPreserveCompleteUrlChange = viewModel::setPreserveCompleteUrl,
+                    onApiTokenChange = viewModel::setApiToken,
                     onOpenConsole = { navController.navigate(Routes.Console) },
                     onOpenUpdate = { navController.navigate(Routes.Update) },
                     onOpenAbout = { navController.navigate(Routes.About) },
@@ -223,7 +244,16 @@ internal fun CairnLinksApp(
             composable(Routes.Search) {
                 SearchScreen(
                     state = state,
-                    onBack = { navController.popBackStack() },
+                    onBack = {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.Library) {
+                                popUpTo(navController.graph.startDestinationId) {
+                                    inclusive = true
+                                }
+                                launchSingleTop = true
+                            }
+                        }
+                    },
                     onSearchQueryChange = viewModel::setSearchQuery,
                     onLoadMoreSearchResults = viewModel::loadMoreSearchResults,
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
@@ -418,13 +448,22 @@ private fun CompactNavItem(
 
 private fun NavHostController.navigateTop(route: String) {
     navigate(route) {
-        popUpTo(Routes.Library) {
+        popUpTo(graph.startDestinationId) {
             saveState = true
         }
         launchSingleTop = true
         restoreState = true
     }
 }
+
+private fun restorableRoute(route: String?): String? =
+    when (route) {
+        Routes.Library,
+        Routes.Queue,
+        Routes.Settings,
+        Routes.Search -> route
+        else -> null
+    }
 
 @Composable
 private fun LibraryScreen(
@@ -528,10 +567,14 @@ private fun SettingsScreen(
     state: CairnLinksUiState,
     onCloseAfterSaveChange: (Boolean) -> Unit,
     onPreserveCompleteUrlChange: (Boolean) -> Unit,
+    onApiTokenChange: (String) -> Unit,
     onOpenConsole: () -> Unit,
     onOpenUpdate: () -> Unit,
     onOpenAbout: () -> Unit,
 ) {
+    var tokenDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var tokenDraft by rememberSaveable { mutableStateOf("") }
+
     ScreenColumn(scroll = true) {
         AppHeader(title = "设置", subtitle = "云端、分享与应用")
         SectionLabel("云端")
@@ -540,6 +583,15 @@ private fun SettingsScreen(
             title = "服务器地址",
             subtitle = state.apiBaseUrl.removePrefix("https://").removePrefix("http://"),
             onClick = null,
+        )
+        SettingsRow(
+            icon = Icons.Default.Check,
+            title = "访问 Token",
+            subtitle = apiTokenSubtitle(state.preferences.apiToken),
+            onClick = {
+                tokenDraft = state.preferences.apiToken
+                tokenDialogOpen = true
+            },
         )
         SettingsRow(
             icon = Icons.Default.Info,
@@ -576,6 +628,37 @@ private fun SettingsScreen(
             onClick = onOpenAbout,
         )
         Spacer(Modifier.height(20.dp))
+    }
+
+    if (tokenDialogOpen) {
+        AlertDialog(
+            onDismissRequest = { tokenDialogOpen = false },
+            title = { Text("访问 Token") },
+            text = {
+                OutlinedTextField(
+                    value = tokenDraft,
+                    onValueChange = { tokenDraft = it },
+                    label = { Text("Bearer Token") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onApiTokenChange(tokenDraft)
+                        tokenDialogOpen = false
+                    },
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { tokenDialogOpen = false }) { Text("取消") }
+            },
+        )
     }
 }
 
@@ -867,7 +950,7 @@ private fun AboutScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        InfoBlock("接口不做登录与鉴权，所有保存的链接都按公开数据处理。不要提交包含私密信息的链接。")
+        InfoBlock("接口使用部署侧访问 Token 保护。这个应用只保存 Token 并随请求发送，不提供账号体系。")
         SettingsRow(
             icon = Icons.Default.Share,
             title = "源码仓库",
@@ -1744,6 +1827,22 @@ private fun libraryEmptyText(state: CairnLinksUiState): String =
         LinkFilter.All -> "还没有收藏链接。"
         LinkFilter.Unlearned -> "没有待学习链接。分享新链接后会出现在这里。"
         LinkFilter.Learned -> "没有已学习链接。"
+    }
+
+private fun apiTokenSubtitle(token: String): String {
+    val trimmed = token.trim()
+    return if (trimmed.isBlank()) {
+        "未配置 · API 请求会被拒绝"
+    } else {
+        "已保存 · ${maskedToken(trimmed)}"
+    }
+}
+
+private fun maskedToken(token: String): String =
+    if (token.length <= 10) {
+        "••••"
+    } else {
+        "${token.take(4)}••••${token.takeLast(4)}"
     }
 
 private fun updateSettingSubtitle(state: CairnLinksUiState): String =

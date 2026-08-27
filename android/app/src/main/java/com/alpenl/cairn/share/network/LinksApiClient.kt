@@ -63,18 +63,19 @@ internal class LinksApiClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
-    fun list(filter: LinkFilter, query: String): LinkListResult =
-        listAll(filter, query)
+    fun list(filter: LinkFilter, query: String, apiToken: String): LinkListResult =
+        listAll(filter, query, apiToken)
 
     fun listAll(
         filter: LinkFilter,
         query: String,
+        apiToken: String,
         maxPages: Int = 50,
     ): LinkListResult {
         val collected = mutableListOf<SavedLink>()
         var beforeId: Int? = null
         repeat(maxPages) {
-            when (val result = listPage(filter, query, beforeId)) {
+            when (val result = listPage(filter, query, apiToken, beforeId)) {
                 is LinkPageResult.Failed -> return LinkListResult.Failed(result.kind)
                 is LinkPageResult.Loaded -> {
                     collected += result.page.items
@@ -88,19 +89,19 @@ internal class LinksApiClient(
         return LinkListResult.Failed(FailureKind.Server)
     }
 
-    fun listPage(filter: LinkFilter, query: String, beforeId: Int? = null): LinkPageResult {
+    fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null): LinkPageResult {
         val endpoint = URL(listUrl(filter, query, beforeId))
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
-            configure(connection)
+            configure(connection, apiToken)
 
             val status = connection.responseCode
             val body = responseBody(connection)
-            if (status == HttpURLConnection.HTTP_OK) {
-                LinkPageResult.Loaded(LinkJson.decodePage(body))
-            } else {
-                LinkPageResult.Failed(FailureKind.Server)
+            when (status) {
+                HttpURLConnection.HTTP_OK -> LinkPageResult.Loaded(LinkJson.decodePage(body))
+                HttpURLConnection.HTTP_UNAUTHORIZED -> LinkPageResult.Failed(FailureKind.Unauthorized)
+                else -> LinkPageResult.Failed(FailureKind.Server)
             }
         } catch (_: SocketTimeoutException) {
             LinkPageResult.Failed(FailureKind.Timeout)
@@ -113,18 +114,19 @@ internal class LinksApiClient(
         }
     }
 
-    fun get(id: Int): LinkGetResult {
+    fun get(id: Int, apiToken: String): LinkGetResult {
         val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id")
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
-            configure(connection)
+            configure(connection, apiToken)
 
             val status = connection.responseCode
             val body = responseBody(connection)
             when (status) {
                 HttpURLConnection.HTTP_OK -> LinkGetResult.Loaded(LinkJson.decodeLink(JSONObject(body)))
                 HttpURLConnection.HTTP_NOT_FOUND -> LinkGetResult.NotFound
+                HttpURLConnection.HTTP_UNAUTHORIZED -> LinkGetResult.Failed(FailureKind.Unauthorized)
                 else -> LinkGetResult.Failed(FailureKind.Server)
             }
         } catch (_: SocketTimeoutException) {
@@ -138,13 +140,13 @@ internal class LinksApiClient(
         }
     }
 
-    fun create(url: String, note: String): LinkCreateResult {
+    fun create(url: String, note: String, apiToken: String): LinkCreateResult {
         val endpoint = URL("${baseUrl.trimEnd('/')}/api/links")
         val body = LinkRequestJson.encode(url, note).toByteArray(StandardCharsets.UTF_8)
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "POST"
-            configure(connection)
+            configure(connection, apiToken)
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             connection.setFixedLengthStreamingMode(body.size)
@@ -152,10 +154,10 @@ internal class LinksApiClient(
 
             val status = connection.responseCode
             val response = responseBody(connection)
-            if (status == HttpURLConnection.HTTP_CREATED) {
-                LinkCreateResult.Created(LinkJson.decodeLink(JSONObject(response)))
-            } else {
-                LinkCreateResult.Failed(FailureKind.Server)
+            when (status) {
+                HttpURLConnection.HTTP_CREATED -> LinkCreateResult.Created(LinkJson.decodeLink(JSONObject(response)))
+                HttpURLConnection.HTTP_UNAUTHORIZED -> LinkCreateResult.Failed(FailureKind.Unauthorized)
+                else -> LinkCreateResult.Failed(FailureKind.Server)
             }
         } catch (_: SocketTimeoutException) {
             LinkCreateResult.Failed(FailureKind.Timeout)
@@ -173,13 +175,14 @@ internal class LinksApiClient(
         url: String? = null,
         note: String? = null,
         learned: Boolean? = null,
+        apiToken: String,
     ): LinkMutationResult {
         val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id")
         val body = LinkJson.encodeUpdate(url, note, learned).toByteArray(StandardCharsets.UTF_8)
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "PATCH"
-            configure(connection)
+            configure(connection, apiToken)
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             connection.setFixedLengthStreamingMode(body.size)
@@ -187,10 +190,10 @@ internal class LinksApiClient(
 
             val status = connection.responseCode
             val response = responseBody(connection)
-            if (status == HttpURLConnection.HTTP_OK) {
-                LinkMutationResult.Updated(LinkJson.decodeLink(JSONObject(response)))
-            } else {
-                LinkMutationResult.Failed(FailureKind.Server)
+            when (status) {
+                HttpURLConnection.HTTP_OK -> LinkMutationResult.Updated(LinkJson.decodeLink(JSONObject(response)))
+                HttpURLConnection.HTTP_UNAUTHORIZED -> LinkMutationResult.Failed(FailureKind.Unauthorized)
+                else -> LinkMutationResult.Failed(FailureKind.Server)
             }
         } catch (_: SocketTimeoutException) {
             LinkMutationResult.Failed(FailureKind.Timeout)
@@ -203,18 +206,18 @@ internal class LinksApiClient(
         }
     }
 
-    fun delete(id: Int): LinkMutationResult {
+    fun delete(id: Int, apiToken: String): LinkMutationResult {
         val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id")
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "DELETE"
-            configure(connection)
+            configure(connection, apiToken)
             val status = connection.responseCode
             responseBody(connection)
-            if (status == HttpURLConnection.HTTP_NO_CONTENT) {
-                LinkMutationResult.Deleted
-            } else {
-                LinkMutationResult.Failed(FailureKind.Server)
+            when (status) {
+                HttpURLConnection.HTTP_NO_CONTENT -> LinkMutationResult.Deleted
+                HttpURLConnection.HTTP_UNAUTHORIZED -> LinkMutationResult.Failed(FailureKind.Unauthorized)
+                else -> LinkMutationResult.Failed(FailureKind.Server)
             }
         } catch (_: SocketTimeoutException) {
             LinkMutationResult.Failed(FailureKind.Timeout)
@@ -240,11 +243,14 @@ internal class LinksApiClient(
         return "${baseUrl.trimEnd('/')}/api/links?${params.joinToString("&")}"
     }
 
-    private fun configure(connection: HttpURLConnection) {
+    private fun configure(connection: HttpURLConnection, apiToken: String) {
         connection.connectTimeout = connectTimeoutMillis
         connection.readTimeout = readTimeoutMillis
         connection.setRequestProperty("Accept", "application/json")
         connection.setRequestProperty("User-Agent", userAgent)
+        if (apiToken.isNotBlank()) {
+            connection.setRequestProperty("Authorization", "Bearer ${apiToken.trim()}")
+        }
     }
 
     private fun responseBody(connection: HttpURLConnection): String {

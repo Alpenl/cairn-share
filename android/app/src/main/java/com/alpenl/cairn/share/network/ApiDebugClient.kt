@@ -33,7 +33,7 @@ internal class ApiDebugClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
-    fun send(method: ApiDebugMethod, path: String, body: String): ApiDebugResult {
+    fun send(method: ApiDebugMethod, path: String, body: String, apiToken: String): ApiDebugResult {
         val endpoint = endpointFor(path) ?: return ApiDebugResult.Failed("路径必须是当前服务器下的相对路径。")
         if (body.length > MAX_REQUEST_BODY_LENGTH) {
             return ApiDebugResult.Failed("请求体太长，最多 $MAX_REQUEST_BODY_LENGTH 字。")
@@ -54,6 +54,9 @@ internal class ApiDebugClient(
                 connection.readTimeout = readTimeoutMillis
                 connection.setRequestProperty("Accept", "application/json, text/plain, */*")
                 connection.setRequestProperty("User-Agent", userAgent)
+                if (apiToken.isNotBlank()) {
+                    connection.setRequestProperty("Authorization", "Bearer ${apiToken.trim()}")
+                }
 
                 if (method in setOf(ApiDebugMethod.POST, ApiDebugMethod.PATCH)) {
                     val bytes = body.ifBlank { "{}" }.toByteArray(StandardCharsets.UTF_8)

@@ -2,6 +2,8 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import worker, { type Env } from "../src/index";
 
+const TEST_TOKEN = "cairn_test_token_123456789";
+
 beforeEach(async () => {
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
@@ -35,10 +37,30 @@ describe("cairn-share worker", () => {
     expect(body).toContain("POST /api/links");
     expect(body).toContain("PATCH /api/links/:id");
     expect(body).toContain("DELETE /api/links/:id");
-    expect(body).toContain("公开无鉴权");
+    expect(body).toContain("访问 Token");
   });
 
-  it("saves a public link anonymously and preserves the exact URL and note", async () => {
+  it("requires a bearer token for link API requests", async () => {
+    const missing = await dispatch("/api/links", undefined, null);
+    expect(missing.status).toBe(401);
+    expect(missing.headers.get("www-authenticate")).toBe("Bearer");
+    await expect(missing.json()).resolves.toEqual({ error: "missing_auth" });
+
+    const invalid = await dispatch("/api/links", undefined, "wrong-token");
+    expect(invalid.status).toBe(401);
+    expect(invalid.headers.get("www-authenticate")).toBe("Bearer");
+    await expect(invalid.json()).resolves.toEqual({ error: "invalid_token" });
+
+    const unconfigured = await dispatch("/api/links", undefined, TEST_TOKEN, "");
+    expect(unconfigured.status).toBe(500);
+    await expect(unconfigured.json()).resolves.toEqual({ error: "auth_not_configured" });
+
+    const health = await dispatch("/health", undefined, null, "");
+    expect(health.status).toBe(200);
+    await expect(health.json()).resolves.toEqual({ ok: true });
+  });
+
+  it("saves a link with a valid bearer token and preserves the exact URL and note", async () => {
     const url = "HTTPS://Example.com/Article/Keep%2FCase?source=share#Section";
     const response = await dispatch("/api/links", {
       method: "POST",
@@ -192,14 +214,14 @@ describe("cairn-share worker", () => {
     await expectError(dispatch(`/api/links/${created.id}`), 404, "not_found");
   });
 
-  it("bypasses shared read cache when a request carries private headers", async () => {
+  it("bypasses shared read cache when a request carries cookie headers", async () => {
     const created = await create("https://example.com/private-cache", "private");
 
     const cached = await dispatch(`/api/links/${created.id}`);
     expect(cached.headers.get("x-cairn-cache")).toBe("MISS");
 
     const privateRead = await dispatch(`/api/links/${created.id}`, {
-      headers: { Authorization: "Bearer test" }
+      headers: { Cookie: "session=private" }
     });
     expect(privateRead.headers.get("x-cairn-cache")).toBe("BYPASS");
     expect(privateRead.headers.get("server-timing")).toContain('cache-state;desc="BYPASS"');
@@ -381,7 +403,22 @@ async function json(response: Response): Promise<any> {
   return response.json();
 }
 
-async function dispatch(path: string, init?: RequestInit): Promise<Response> {
-  const request = new Request(`https://cairn-share-api.example${path}`, init);
-  return worker.fetch(request, env);
+async function dispatch(
+  path: string,
+  init?: RequestInit,
+  token: string | null = TEST_TOKEN,
+  configuredToken: string = TEST_TOKEN,
+): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  if (token !== null) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const request = new Request(`https://cairn-share-api.example${path}`, {
+    ...init,
+    headers,
+  });
+  return worker.fetch(request, {
+    DB: env.DB,
+    CAIRN_API_TOKEN: configuredToken,
+  } satisfies Env);
 }

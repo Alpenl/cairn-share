@@ -181,13 +181,18 @@ class ShareActivity : ComponentActivity() {
             status = getString(R.string.share_note_too_long)
             return
         }
+        val apiToken = preferences.apiToken.trim()
+        if (apiToken.isBlank()) {
+            status = getString(R.string.share_missing_token)
+            return
+        }
 
         val generation = ++submitGeneration
         submitting = true
         status = getString(R.string.share_saving)
         submitJob = lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
-                ShareApiClient(apiBaseUrl).save(preparedUrl, note)
+                ShareApiClient(apiBaseUrl, apiToken).save(preparedUrl, note)
             }
             if (!isActive || generation != submitGeneration) return@launch
             submitting = false
@@ -220,6 +225,7 @@ class ShareActivity : ComponentActivity() {
 
     private fun failureMessage(kind: FailureKind): String =
         when (kind) {
+            FailureKind.Unauthorized -> getString(R.string.share_auth_failed)
             FailureKind.Network,
             FailureKind.Timeout,
             FailureKind.Server -> getString(R.string.share_failed)

@@ -1,5 +1,6 @@
 export interface Env {
   DB: D1Database;
+  CAIRN_API_TOKEN: string;
 }
 
 interface LinkRecord {
@@ -30,13 +31,16 @@ type ErrorCode =
   | "invalid_update"
   | "invalid_limit"
   | "invalid_before_id"
+  | "missing_auth"
+  | "invalid_token"
+  | "auth_not_configured"
   | "not_found"
   | "method_not_allowed";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -121,6 +125,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   }
 
   if (path === "/api/links") {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
     return routeMethod(request, ["GET", "POST"], () => {
       if (request.method === "POST") return createLink(request, env, timing);
       return listLinks(request, url, env, timing);
@@ -129,6 +135,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   const linkIdMatch = path.match(/^\/api\/links\/(\d+)$/);
   if (linkIdMatch !== null) {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
     return routeMethod(request, ["GET", "PATCH", "DELETE"], () => {
       const id = Number(linkIdMatch[1]);
       if (request.method === "PATCH") return updateLink(request, env, id, timing);
@@ -351,11 +359,51 @@ async function cachedJson(
 }
 
 function shouldBypassReadCache(request: Request): boolean {
-  if (request.headers.has("authorization") || request.headers.has("cookie")) {
+  if (request.headers.has("cookie")) {
     return true;
   }
   const cacheControl = request.headers.get("cache-control") ?? "";
   return /\bno-cache\b|\bno-store\b/i.test(cacheControl);
+}
+
+function requireApiToken(request: Request, env: Env): Response | null {
+  const expected = env.CAIRN_API_TOKEN?.trim();
+  if (!expected) {
+    return authError("auth_not_configured", 500);
+  }
+
+  const token = bearerToken(request.headers.get("authorization"));
+  if (token === null) {
+    return authError("missing_auth", 401);
+  }
+  if (!constantTimeEquals(token, expected)) {
+    return authError("invalid_token", 401);
+  }
+  return null;
+}
+
+function bearerToken(authorization: string | null): string | null {
+  if (authorization === null) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
+  return match?.[1]?.trim() || null;
+}
+
+function authError(code: "missing_auth" | "invalid_token" | "auth_not_configured", status: number): Response {
+  const headers: HeadersInit = status === 401 ? { "WWW-Authenticate": "Bearer" } : {};
+  return json({ error: code }, status, headers);
+}
+
+function constantTimeEquals(left: string, right: string): boolean {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  if (leftBytes.length !== rightBytes.length) return false;
+
+  let diff = 0;
+  for (let i = 0; i < leftBytes.length; i += 1) {
+    diff |= leftBytes[i] ^ rightBytes[i];
+  }
+  return diff === 0;
 }
 
 function cacheableJson(body: unknown, cacheState: CacheState): Response {
@@ -735,11 +783,25 @@ function apiDebugHtml(): string {
     <header>
       <p class="meta">Cairn Share · Cloudflare Worker + D1</p>
       <h1>API 调试台</h1>
-      <p class="lead">这个页面直接调用当前域名下的公开 API。可以创建、查询、搜索、修改和删除链接，用来验证 Android App 背后的 Cloudflare 接口。</p>
-      <div class="warning">公开无鉴权：这里提交和读取的数据对任何人开放。不要保存私密链接、访问令牌、Cookie、一次性签名地址或内部系统 URL。</div>
+      <p class="lead">这个页面直接调用当前域名下的 API。填写访问 Token 后，可以创建、查询、搜索、修改和删除链接，用来验证 Android App 背后的 Cloudflare 接口。</p>
+      <div class="warning">链接 API 已启用 Bearer Token 保护。不要在非可信设备上保存 Token，也不要把 Token 放进 URL 查询参数。</div>
     </header>
 
     <section class="grid">
+      <section class="card full">
+        <h2>访问 Token</h2>
+        <div class="row">
+          <label>API Token
+            <input id="api-token" type="password" autocomplete="off" placeholder="Authorization: Bearer ...">
+          </label>
+        </div>
+        <div class="actions">
+          <button type="button" id="save-token">保存到浏览器</button>
+          <button type="button" class="secondary" id="clear-token">清除</button>
+        </div>
+        <p class="meta">Token 只保存在当前浏览器的 localStorage 中。/health 不需要 Token，其它 /api/links 请求都会自动带上 Authorization 头。</p>
+      </section>
+
       <form class="card" id="create-form">
         <h2>创建链接</h2>
         <div class="row">
@@ -829,7 +891,7 @@ function apiDebugHtml(): string {
 
       <section class="card full">
         <h2>响应</h2>
-        <p class="meta">所有请求都从浏览器直接发往 <code id="origin"></code>，没有隐藏代理或鉴权。</p>
+        <p class="meta">所有请求都从浏览器直接发往 <code id="origin"></code>，没有隐藏代理。</p>
         <pre id="output">等待请求...</pre>
       </section>
     </section>
@@ -837,7 +899,10 @@ function apiDebugHtml(): string {
 
   <script>
     const out = document.getElementById("output");
+    const tokenInput = document.getElementById("api-token");
+    const tokenStorageKey = "cairn-share-api-token";
     document.getElementById("origin").textContent = location.origin;
+    tokenInput.value = localStorage.getItem(tokenStorageKey) || "";
 
     function value(id) {
       return document.getElementById(id).value.trim();
@@ -847,9 +912,19 @@ function apiDebugHtml(): string {
       out.textContent = JSON.stringify(payload, null, 2);
     }
 
+    function apiToken() {
+      return tokenInput.value.trim();
+    }
+
     async function send(method, path, body) {
       out.textContent = "请求中...";
       const options = { method, headers: { "Accept": "application/json" } };
+      if (path.startsWith("/api/")) {
+        const token = apiToken();
+        if (token) {
+          options.headers["Authorization"] = "Bearer " + token;
+        }
+      }
       if (body !== undefined) {
         options.headers["Content-Type"] = "application/json";
         options.body = JSON.stringify(body);
@@ -860,8 +935,27 @@ function apiDebugHtml(): string {
       try {
         parsed = text ? JSON.parse(text) : null;
       } catch (_) {}
-      show({ method, path, status: response.status, ok: response.ok, body: parsed });
+      show({
+        method,
+        path,
+        status: response.status,
+        ok: response.ok,
+        cache: response.headers.get("x-cairn-cache"),
+        serverTiming: response.headers.get("server-timing"),
+        body: parsed
+      });
     }
+
+    document.getElementById("save-token").addEventListener("click", function () {
+      localStorage.setItem(tokenStorageKey, apiToken());
+      show({ ok: true, message: "Token 已保存到当前浏览器。" });
+    });
+
+    document.getElementById("clear-token").addEventListener("click", function () {
+      localStorage.removeItem(tokenStorageKey);
+      tokenInput.value = "";
+      show({ ok: true, message: "Token 已清除。" });
+    });
 
     document.getElementById("create-form").addEventListener("submit", function (event) {
       event.preventDefault();
