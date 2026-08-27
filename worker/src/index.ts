@@ -58,7 +58,9 @@ const MAX_QUERY_LENGTH = 200;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const READ_CACHE_TTL_SECONDS = 15;
+const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}, s-maxage=${READ_CACHE_TTL_SECONDS}`;
 const MAX_TRACKED_LIST_CACHE_KEYS = 120;
+const CACHE_VERSION = "2";
 const CACHE_ORIGIN = "https://cairn-share-cache.internal";
 
 const trackedListCacheKeys = new Set<string>();
@@ -309,13 +311,14 @@ function shouldBypassReadCache(request: Request): boolean {
 
 function cacheableJson(body: unknown, cacheState: "MISS" | "HIT" | "BYPASS"): Response {
   return json(body, 200, {
-    "Cache-Control": `public, max-age=${READ_CACHE_TTL_SECONDS}`,
+    "Cache-Control": READ_CACHE_CONTROL,
     "X-Cairn-Cache": cacheState
   });
 }
 
 function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS"): Response {
   const headers = new Headers(response.headers);
+  headers.set("Cache-Control", READ_CACHE_CONTROL);
   headers.set("X-Cairn-Cache", cacheState);
   return new Response(response.body, {
     status: response.status,
@@ -357,6 +360,7 @@ function listCacheUrl(
   }
 ): string {
   const url = new URL("/api/links", CACHE_ORIGIN);
+  url.searchParams.set("v", CACHE_VERSION);
   url.searchParams.set("limit", String(parsed.limit));
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
@@ -367,6 +371,7 @@ function listCacheUrl(
 
 function detailCacheUrl(id: number, requestUrl: URL): string {
   const url = new URL(`/api/links/${id}`, CACHE_ORIGIN);
+  url.searchParams.set("v", CACHE_VERSION);
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
 }

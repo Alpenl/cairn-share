@@ -127,10 +127,12 @@ describe("cairn-share worker", () => {
 
     const firstRead = await dispatch("/api/links?q=cache&limit=20&learned=all");
     expect(firstRead.headers.get("x-cairn-cache")).toBe("MISS");
+    expect(firstRead.headers.get("cache-control")).toContain("max-age=15");
     expect((await json(firstRead)).items.map((item: LinkRecord) => item.id)).toEqual([first.id]);
 
     const reorderedRead = await dispatch("/api/links?learned=all&limit=20&q=cache");
     expect(reorderedRead.headers.get("x-cairn-cache")).toBe("HIT");
+    expect(reorderedRead.headers.get("cache-control")).toContain("max-age=15");
     expect((await json(reorderedRead)).items.map((item: LinkRecord) => item.id)).toEqual([first.id]);
 
     const second = await create("https://example.com/cache-list-2", "cache");
@@ -145,10 +147,12 @@ describe("cairn-share worker", () => {
 
     const firstRead = await dispatch(`/api/links/${created.id}`);
     expect(firstRead.headers.get("x-cairn-cache")).toBe("MISS");
+    expect(firstRead.headers.get("cache-control")).toContain("max-age=15");
     await expect(firstRead.json()).resolves.toMatchObject({ id: created.id, note: "old" });
 
     const cachedRead = await dispatch(`/api/links/${created.id}`);
     expect(cachedRead.headers.get("x-cairn-cache")).toBe("HIT");
+    expect(cachedRead.headers.get("cache-control")).toContain("max-age=15");
     await expect(cachedRead.json()).resolves.toMatchObject({ id: created.id, note: "old" });
 
     await patchJson(created.id, { note: "new" });
