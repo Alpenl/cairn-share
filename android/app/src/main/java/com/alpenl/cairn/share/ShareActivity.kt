@@ -1,6 +1,7 @@
 package com.alpenl.cairn.share
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,6 +16,8 @@ import com.alpenl.cairn.share.contract.UrlCandidateExtractor
 import com.alpenl.cairn.share.network.FailureKind
 import com.alpenl.cairn.share.network.ShareApiClient
 import com.alpenl.cairn.share.network.ShareSubmitResult
+import com.alpenl.cairn.share.network.UpdateApiClient
+import com.alpenl.cairn.share.network.UpdateCheckResult
 import com.alpenl.cairn.share.ui.theme.CairnShareTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,6 +29,7 @@ import kotlinx.coroutines.withContext
 class ShareActivity : ComponentActivity() {
     companion object {
         const val EXTRA_API_BASE_URL = "com.alpenl.cairn.share.extra.API_BASE_URL"
+        const val EXTRA_RELEASES_API_URL = "com.alpenl.cairn.share.extra.RELEASES_API_URL"
 
         private const val STATE_SELECTED_INDEX = "share.selected_index"
         private const val STATE_NOTE = "share.note"
@@ -42,6 +46,9 @@ class ShareActivity : ComponentActivity() {
     private var submitGeneration = 0
     private var submitJob: Job? = null
     private var apiBaseUrl = BuildConfig.CAIRN_SHARE_API_BASE_URL
+    private var releasesApiUrl = BuildConfig.CAIRN_SHARE_RELEASES_API_URL
+    private var updateState by mutableStateOf<AppUpdateState>(AppUpdateState.Hidden)
+    private var updateJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,6 +68,10 @@ class ShareActivity : ComponentActivity() {
                     onSelectRow = ::selectCandidate,
                     onNoteChange = ::changeNote,
                     onSave = ::submitSelected,
+                    updateState = updateState,
+                    currentVersionName = BuildConfig.VERSION_NAME,
+                    onCheckUpdate = ::checkForUpdates,
+                    onOpenUpdate = ::openUpdate,
                     onClose = ::finish,
                 )
             }
@@ -72,6 +83,8 @@ class ShareActivity : ComponentActivity() {
         setIntent(intent)
         submitJob?.cancel()
         submitJob = null
+        updateJob?.cancel()
+        updateJob = null
         submitGeneration += 1
         note = ""
         status = null
@@ -89,6 +102,7 @@ class ShareActivity : ComponentActivity() {
 
     override fun onDestroy() {
         submitJob?.cancel()
+        updateJob?.cancel()
         super.onDestroy()
     }
 
@@ -98,14 +112,20 @@ class ShareActivity : ComponentActivity() {
             ?.trimEnd('/')
             ?.takeIf(String::isNotEmpty)
             ?: BuildConfig.CAIRN_SHARE_API_BASE_URL
+        releasesApiUrl = intent.getStringExtra(EXTRA_RELEASES_API_URL)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: BuildConfig.CAIRN_SHARE_RELEASES_API_URL
 
         if (intent.action == Intent.ACTION_MAIN) {
             candidates = emptyList()
             selectedIndex = -1
             status = getString(R.string.share_installed)
+            checkForUpdates()
             return
         }
 
+        updateState = AppUpdateState.Hidden
         if (intent.action != Intent.ACTION_SEND || intent.type != "text/plain") {
             candidates = emptyList()
             selectedIndex = -1
@@ -182,6 +202,32 @@ class ShareActivity : ComponentActivity() {
                     status = failureMessage(result.kind)
                 }
             }
+        }
+    }
+
+    private fun checkForUpdates() {
+        if (updateState == AppUpdateState.Checking) return
+        updateJob?.cancel()
+        updateState = AppUpdateState.Checking
+        updateJob = lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                UpdateApiClient(releasesApiUrl).check()
+            }
+            if (!isActive) return@launch
+            updateState = when (result) {
+                is UpdateCheckResult.Available -> AppUpdateState.Available(result.update)
+                UpdateCheckResult.UpToDate -> AppUpdateState.UpToDate
+                UpdateCheckResult.Failed -> AppUpdateState.Failed
+            }
+        }
+    }
+
+    private fun openUpdate() {
+        val update = (updateState as? AppUpdateState.Available)?.update ?: return
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl)))
+        }.onFailure {
+            updateState = AppUpdateState.Failed
         }
     }
 

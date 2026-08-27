@@ -24,6 +24,9 @@ val apiBaseUrl = providers.gradleProperty("cairnShareApiBaseUrl")
     .orElse("https://share.alpenl.com")
     .get()
     .trimEnd('/')
+val releasesApiUrl = providers.gradleProperty("cairnShareReleasesApiUrl")
+    .orElse("https://api.github.com/repos/Alpenl/cairn-share/releases/latest")
+    .get()
 
 android {
     namespace = "com.alpenl.cairn.share"
@@ -38,6 +41,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "CAIRN_SHARE_API_BASE_URL", apiBaseUrl.asBuildConfigString())
+        buildConfigField("String", "CAIRN_SHARE_RELEASES_API_URL", releasesApiUrl.asBuildConfigString())
     }
 
     buildTypes {

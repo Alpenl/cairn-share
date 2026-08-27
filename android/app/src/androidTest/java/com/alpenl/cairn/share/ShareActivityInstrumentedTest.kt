@@ -141,16 +141,30 @@ class ShareActivityInstrumentedTest {
     }
 
     @Test
-    fun launcherEntryShowsInstalledGuidanceWithoutSubmitting() {
+    fun launcherEntryShowsInstalledGuidanceAndChecksUpdates() {
+        startServer()
+        server!!.enqueue(latestReleaseResponse())
         val intent = Intent(Intent.ACTION_MAIN)
             .addCategory(Intent.CATEGORY_LAUNCHER)
             .setClass(targetContext(), ShareActivity::class.java)
+            .putExtra(ShareActivity.EXTRA_RELEASES_API_URL, server!!.url("/latest").toString())
 
         ActivityScenario.launch<ShareActivity>(intent).use {
             compose.onNodeWithTag("status").assertTextContains("链接收集已安装", substring = true)
             compose.onNodeWithTag("status").assertTextContains("公开、无鉴权接口", substring = true)
+            compose.waitUntil(5_000) {
+                runCatching {
+                    compose.onNodeWithTag("update_title").assertTextContains("发现新版本 9.9.9", substring = true)
+                    true
+                }.getOrDefault(false)
+            }
+            compose.onNodeWithTag("download_update").assertIsEnabled()
             compose.onAllNodesWithTag("note").assertCountEquals(0)
             compose.onAllNodesWithTag("save").assertCountEquals(0)
+
+            val request = takeRequest()
+            assertEquals("/latest", request.path)
+            assertTrue(request.getHeader("User-Agent")!!.startsWith("CairnShareAndroid/"))
         }
     }
 
@@ -175,6 +189,24 @@ class ShareActivityInstrumentedTest {
         MockResponse()
             .setResponseCode(201)
             .setBody("""{"id":1,"url":"https://example.com","note":"","created_at":"2026-08-26T00:00:00.000Z"}""")
+
+    private fun latestReleaseResponse(): MockResponse =
+        MockResponse()
+            .setResponseCode(200)
+            .setBody(
+                """
+                    {
+                      "tag_name": "v9.9.9",
+                      "html_url": "https://github.com/Alpenl/cairn-share/releases/tag/v9.9.9",
+                      "assets": [
+                        {
+                          "name": "cairn-share-android-9.9.9.apk",
+                          "browser_download_url": "https://github.com/Alpenl/cairn-share/releases/download/v9.9.9/cairn-share-android-9.9.9.apk"
+                        }
+                      ]
+                    }
+                """.trimIndent(),
+            )
 
     private fun takeRequest(): okhttp3.mockwebserver.RecordedRequest {
         val request = server!!.takeRequest(5, TimeUnit.SECONDS)
