@@ -24,9 +24,11 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlinx.coroutines.runBlocking
 import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
@@ -35,6 +37,14 @@ class ShareActivityInstrumentedTest {
     val compose = createEmptyComposeRule()
 
     private var server: MockWebServer? = null
+
+    @Before
+    fun setUp() = runBlocking {
+        SharePreferencesStore(targetContext()).setApiToken(TEST_TOKEN)
+        SharePreferencesStore(targetContext()).setLastRoute("library")
+        SharePreferencesStore(targetContext()).setLastFilter("all")
+        SharePreferencesStore(targetContext()).setLastSearchQuery("")
+    }
 
     @After
     fun tearDown() {
@@ -52,7 +62,8 @@ class ShareActivityInstrumentedTest {
             assertEquals(0, server!!.requestCount)
 
             compose.onNodeWithTag("note").performTextInput("later")
-            compose.onNodeWithTag("save").assertIsEnabled().performClick()
+            waitForSaveEnabled()
+            compose.onNodeWithTag("save").performClick()
 
             val request = takeRequest()
             assertEquals("/api/links", request.path)
@@ -74,6 +85,7 @@ class ShareActivityInstrumentedTest {
             compose.onNodeWithTag("selected_label").assertTextContains("example.com/a")
 
             compose.onNodeWithTag("note").performTextInput("second")
+            waitForSaveEnabled()
             compose.onNodeWithTag("save").performClick()
 
             val body = JSONObject(takeRequest().body.readUtf8())
@@ -96,6 +108,7 @@ class ShareActivityInstrumentedTest {
             compose.onNodeWithTag("note").assertTextContains("draft")
             assertEquals(0, server!!.requestCount)
 
+            waitForSaveEnabled()
             compose.onNodeWithTag("save").performClick()
             val body = JSONObject(takeRequest().body.readUtf8())
             assertEquals("https://example.com/a?x=1#fragment", body.getString("url"))
@@ -111,6 +124,7 @@ class ShareActivityInstrumentedTest {
 
         ActivityScenario.launch<ShareActivity>(shareIntent("https://example.com/retry", api)).use {
             compose.onNodeWithTag("note").performTextInput("retry note")
+            waitForSaveEnabled()
             compose.onNodeWithTag("save").performClick()
             takeRequest()
 
@@ -120,7 +134,8 @@ class ShareActivityInstrumentedTest {
                     true
                 }.getOrDefault(false)
             }
-            compose.onNodeWithTag("save").assertIsEnabled().performClick()
+            waitForSaveEnabled()
+            compose.onNodeWithTag("save").performClick()
 
             val body = JSONObject(takeRequest().body.readUtf8())
             assertEquals("https://example.com/retry", body.getString("url"))
@@ -228,6 +243,8 @@ class ShareActivityInstrumentedTest {
                 val path = request.path.orEmpty()
                 return when {
                     path == "/latest" -> latestReleaseResponse()
+                    path.startsWith("/api/links") && request.getHeader("Authorization") != "Bearer $TEST_TOKEN" ->
+                        MockResponse().setResponseCode(401).setBody("""{"error":"invalid_token"}""")
                     request.method == "GET" && path.startsWith("/api/links") -> linksResponse(path)
                     request.method == "PATCH" && path == "/api/links/1" -> updatedLinkResponse()
                     request.method == "DELETE" && path == "/api/links/1" -> MockResponse().setResponseCode(204)
@@ -338,6 +355,7 @@ class ShareActivityInstrumentedTest {
         val request = server!!.takeRequest(5, TimeUnit.SECONDS)
         assertNotNull(request)
         assertTrue(server!!.requestCount >= 1)
+        assertAuthorizedApiRequest(request!!)
         return request!!
     }
 
@@ -352,5 +370,24 @@ class ShareActivityInstrumentedTest {
         error("No $method $path request was sent")
     }
 
+    private fun waitForSaveEnabled() {
+        compose.waitUntil(5_000) {
+            runCatching {
+                compose.onNodeWithTag("save").assertIsEnabled()
+                true
+            }.getOrDefault(false)
+        }
+    }
+
+    private fun assertAuthorizedApiRequest(request: RecordedRequest) {
+        if (request.path.orEmpty().startsWith("/api/links")) {
+            assertEquals("Bearer $TEST_TOKEN", request.getHeader("Authorization"))
+        }
+    }
+
     private fun targetContext() = InstrumentationRegistry.getInstrumentation().targetContext
+
+    private companion object {
+        const val TEST_TOKEN = "instrumented-test-token"
+    }
 }

@@ -44,6 +44,7 @@ class ShareActivity : ComponentActivity() {
     private var status by mutableStateOf<String?>(null)
     private var submitting by mutableStateOf(false)
     private var preferences by mutableStateOf(SharePreferences())
+    private var preferencesLoaded by mutableStateOf(false)
     private var submitGeneration = 0
     private var submitJob: Job? = null
     private var settingsJob: Job? = null
@@ -66,6 +67,7 @@ class ShareActivity : ComponentActivity() {
                     note = note,
                     statusText = status.orEmpty(),
                     submitting = submitting,
+                    settingsLoaded = preferencesLoaded,
                     preserveCompleteUrl = preferences.preserveCompleteUrl,
                     onSelectCandidate = ::selectCandidate,
                     onNoteChange = ::changeNote,
@@ -147,6 +149,7 @@ class ShareActivity : ComponentActivity() {
         settingsJob = lifecycleScope.launch {
             SharePreferencesStore(this@ShareActivity).preferences.collect {
                 preferences = it
+                preferencesLoaded = true
             }
         }
     }
@@ -168,6 +171,10 @@ class ShareActivity : ComponentActivity() {
     private fun submitSelected() {
         val candidate = ShareCandidatePresenter.selectedCandidate(candidates, selectedIndex) ?: return
         if (submitting) return
+        if (!preferencesLoaded) {
+            status = getString(R.string.share_loading_settings)
+            return
+        }
         val preparedUrl = if (preferences.preserveCompleteUrl) {
             candidate.submissionValue
         } else {

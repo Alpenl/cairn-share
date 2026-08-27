@@ -10,6 +10,7 @@
     <string name="share_cancel">关闭</string>
     <string name="share_saving">保存中&#8230;</string>
     <string name="share_saved">已保存</string>
+    <string name="share_loading_settings">正在读取设置，请稍后重试。</string>
     <string name="share_failed">保存失败。请检查网络后重试。</string>
     <string name="share_missing_token">需要先在主应用设置访问 Token。</string>
     <string name="share_auth_failed">Token 无效，请在主应用设置中重新填写。</string>
