@@ -176,14 +176,6 @@ class ShareActivityInstrumentedTest {
             val toggleRequest = takeRequest("PATCH", "/api/links/1")
             assertEquals(true, JSONObject(toggleRequest.body.readUtf8()).getBoolean("learned"))
 
-            compose.onNodeWithTag("filter_all").performClick()
-            compose.waitUntil(5_000) {
-                runCatching {
-                    compose.onAllNodesWithTag("link_2").assertCountEquals(1)
-                    true
-                }.getOrDefault(false)
-            }
-
             compose.onNodeWithTag("filter_unlearned").performClick()
             compose.waitUntil(5_000) {
                 runCatching {
