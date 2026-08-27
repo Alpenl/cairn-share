@@ -494,24 +494,27 @@ internal class CairnLinksViewModel(
 }
 
 internal fun CairnLinksUiState.visibleLibraryLinks(): List<SavedLink> {
-    val filtered = links.asSequence().filter { link ->
+    return links.asSequence().filter { link ->
         when (filter) {
             LinkFilter.All -> true
             LinkFilter.Unlearned -> !link.learned
             LinkFilter.Learned -> link.learned
         }
-    }
+    }.sortedByDescending { it.id }.toList()
+}
+
+internal fun CairnLinksUiState.searchResultLinks(): List<SavedLink> {
     val query = searchQuery.trim()
-    val searched = if (query.isEmpty()) {
-        filtered
-    } else {
-        filtered.filter {
+    if (query.isEmpty()) return emptyList()
+    return links.asSequence()
+        .filter {
             it.url.contains(query, ignoreCase = true) ||
                 it.note.contains(query, ignoreCase = true) ||
-                it.hostLabel().contains(query, ignoreCase = true)
+                it.hostLabel().contains(query, ignoreCase = true) ||
+                it.displayTitle().contains(query, ignoreCase = true)
         }
-    }
-    return searched.sortedByDescending { it.id }.toList()
+        .sortedByDescending { it.id }
+        .toList()
 }
 
 internal fun CairnLinksUiState.queueLinks(): List<SavedLink> =

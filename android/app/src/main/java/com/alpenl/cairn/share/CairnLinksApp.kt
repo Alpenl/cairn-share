@@ -1,7 +1,6 @@
 package com.alpenl.cairn.share
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -56,8 +55,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -80,11 +77,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -109,6 +102,7 @@ private object Routes {
     const val Library = "library"
     const val Queue = "queue"
     const val Settings = "settings"
+    const val Search = "search"
     const val Detail = "detail/{id}"
     const val Edit = "edit/{id}"
     const val Update = "update"
@@ -202,10 +196,8 @@ internal fun CairnLinksApp(
             composable(Routes.Library) {
                 LibraryScreen(
                     state = state,
-                    onSearchQueryChange = viewModel::setSearchQuery,
                     onFilterChange = viewModel::setFilter,
-                    onRefresh = viewModel::refreshLinks,
-                    onOpenSettings = { navController.navigateTop(Routes.Settings) },
+                    onOpenSearch = { navController.navigate(Routes.Search) },
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
             }
@@ -224,6 +216,14 @@ internal fun CairnLinksApp(
                     onOpenConsole = { navController.navigate(Routes.Console) },
                     onOpenUpdate = { navController.navigate(Routes.Update) },
                     onOpenAbout = { navController.navigate(Routes.About) },
+                )
+            }
+            composable(Routes.Search) {
+                SearchScreen(
+                    state = state,
+                    onBack = { navController.popBackStack() },
+                    onSearchQueryChange = viewModel::setSearchQuery,
+                    onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
             }
             composable(
@@ -327,22 +327,89 @@ private fun CairnBottomBar(
     pendingCount: Int,
     onNavigate: (String) -> Unit,
 ) {
-    NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceVariant) {
-        TopDestinations.forEach { destination ->
-            NavigationBarItem(
-                selected = currentRoute == destination.route,
-                onClick = { onNavigate(destination.route) },
-                icon = {
-                    BadgedIcon(
-                        icon = destination.icon,
-                        contentDescription = destination.label,
-                        badge = if (destination.route == Routes.Queue && pendingCount > 0) pendingCount else null,
-                    )
-                },
-                label = { Text(destination.label) },
-                modifier = Modifier.testTag("nav_${destination.route}"),
-            )
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .height(52.dp)
+                .padding(horizontal = 18.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TopDestinations.forEach { destination ->
+                CompactNavItem(
+                    destination = destination,
+                    selected = currentRoute == destination.route,
+                    badge = if (destination.route == Routes.Queue && pendingCount > 0) pendingCount else null,
+                    onClick = { onNavigate(destination.route) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("nav_${destination.route}"),
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun CompactNavItem(
+    destination: TopDestination,
+    selected: Boolean,
+    badge: Int?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val contentColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(role = Role.Tab, onClick = onClick)
+            .padding(vertical = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .height(24.dp)
+                .width(46.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                destination.icon,
+                contentDescription = destination.label,
+                tint = contentColor,
+                modifier = Modifier.size(19.dp),
+            )
+            if (badge != null) {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    contentColor = MaterialTheme.colorScheme.onTertiary,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .sizeIn(minWidth = 16.dp, minHeight = 16.dp),
+                ) {
+                    Text(
+                        badge.coerceAtMost(99).toString(),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
+                }
+            }
+        }
+        Text(
+            destination.label,
+            style = MaterialTheme.typography.labelSmall,
+            color = contentColor,
+            maxLines = 1,
+        )
     }
 }
 
@@ -359,10 +426,8 @@ private fun NavHostController.navigateTop(route: String) {
 @Composable
 private fun LibraryScreen(
     state: CairnLinksUiState,
-    onSearchQueryChange: (String) -> Unit,
     onFilterChange: (LinkFilter) -> Unit,
-    onRefresh: () -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenSearch: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
     val stats = state.stats()
@@ -372,19 +437,10 @@ private fun LibraryScreen(
             title = "链接库",
             subtitle = "${stats.total} 条收藏 · ${stats.pending} 条待读",
             actions = {
-                IconButton(onClick = onRefresh, enabled = !state.loading, modifier = Modifier.testTag("refresh_links")) {
-                    Icon(Icons.Default.Check, contentDescription = "刷新")
-                }
-                IconButton(onClick = onOpenSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = "设置")
+                IconButton(onClick = onOpenSearch, modifier = Modifier.testTag("open_search")) {
+                    Icon(Icons.Default.Search, contentDescription = "搜索")
                 }
             },
-        )
-        SummaryCard(stats = stats, loading = state.loading)
-        SearchField(
-            value = state.searchQuery,
-            onValueChange = onSearchQueryChange,
-            enabled = !state.loading,
         )
         FilterRow(
             selected = state.filter,
@@ -392,11 +448,34 @@ private fun LibraryScreen(
             enabled = !state.loading,
             onFilterChange = onFilterChange,
         )
-        StatusText(state.statusText, "library_status")
         LinkList(
             items = items,
             loading = state.loading,
             emptyText = libraryEmptyText(state),
+            onOpenLinkDetail = onOpenLinkDetail,
+        )
+    }
+}
+
+@Composable
+private fun SearchScreen(
+    state: CairnLinksUiState,
+    onBack: () -> Unit,
+    onSearchQueryChange: (String) -> Unit,
+    onOpenLinkDetail: (SavedLink) -> Unit,
+) {
+    val results = state.searchResultLinks()
+    ScreenColumn {
+        DetailTopBar(title = "搜索", onBack = onBack)
+        SearchField(
+            value = state.searchQuery,
+            onValueChange = onSearchQueryChange,
+            enabled = !state.loading,
+        )
+        LinkList(
+            items = results,
+            loading = state.loading,
+            emptyText = if (state.searchQuery.isBlank()) "输入关键词搜索链接、备注或站点。" else "没有匹配的链接。",
             onOpenLinkDetail = onOpenLinkDetail,
         )
     }
@@ -798,10 +877,10 @@ private fun ScreenColumn(
         .fillMaxSize()
         .statusBarsPadding()
         .padding(horizontal = 16.dp)
-        .padding(top = 6.dp, bottom = 10.dp)
+        .padding(top = 0.dp, bottom = 8.dp)
     Column(
         modifier = if (scroll) base.verticalScroll(rememberScrollState()) else base,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
         content = content,
     )
 }
@@ -864,71 +943,6 @@ private fun DetailTopBar(
             overflow = TextOverflow.Ellipsis,
         )
         Row(content = actions)
-    }
-}
-
-@Composable
-private fun SummaryCard(stats: LinkStats, loading: Boolean) {
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            ProgressRing(stats.progress)
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    text = if (loading) "正在同步云端链接" else "本周读完 ${stats.weekDone} 条",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = stats.oldestPending?.let {
-                        "还有 ${stats.pending} 条排在待学习里，最早一条来自 ${it.createdAt.shortDateTime()}。"
-                    } ?: "所有链接都已经读完。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ProgressRing(progress: Float) {
-    Box(modifier = Modifier.size(44.dp), contentAlignment = Alignment.Center) {
-        val trackColor = MaterialTheme.colorScheme.outlineVariant
-        val valueColor = MaterialTheme.colorScheme.primary
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val strokeWidth = 4.dp.toPx()
-            val diameter = size.minDimension - strokeWidth
-            val topLeft = Offset((size.width - diameter) / 2f, (size.height - diameter) / 2f)
-            val arcSize = Size(diameter, diameter)
-            drawCircle(
-                color = trackColor,
-                radius = diameter / 2f,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-            )
-            drawArc(
-                color = valueColor,
-                startAngle = -90f,
-                sweepAngle = 360f * progress.coerceIn(0f, 1f),
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-            )
-        }
-        Text(
-            text = "${(progress.coerceIn(0f, 1f) * 100).toInt()}%",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            fontFamily = FontFamily.Monospace,
-        )
     }
 }
 
@@ -1659,14 +1673,10 @@ private fun avatarTone(host: String): AvatarTone {
 }
 
 private fun libraryEmptyText(state: CairnLinksUiState): String =
-    if (state.searchQuery.isNotBlank()) {
-        "没有匹配的链接。"
-    } else {
-        when (state.filter) {
-            LinkFilter.All -> "还没有收藏链接。"
-            LinkFilter.Unlearned -> "没有待学习链接。分享新链接后会出现在这里。"
-            LinkFilter.Learned -> "没有已学习链接。"
-        }
+    when (state.filter) {
+        LinkFilter.All -> "还没有收藏链接。"
+        LinkFilter.Unlearned -> "没有待学习链接。分享新链接后会出现在这里。"
+        LinkFilter.Learned -> "没有已学习链接。"
     }
 
 private fun updateSettingSubtitle(state: CairnLinksUiState): String =
