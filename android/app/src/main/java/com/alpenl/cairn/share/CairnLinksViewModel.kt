@@ -14,10 +14,13 @@ import com.alpenl.cairn.share.network.LinkFilter
 import com.alpenl.cairn.share.network.LinkGetResult
 import com.alpenl.cairn.share.network.LinkListResult
 import com.alpenl.cairn.share.network.LinkMutationResult
+import com.alpenl.cairn.share.network.LinkPageResult
 import com.alpenl.cairn.share.network.SavedLink
 import com.alpenl.cairn.share.network.UpdateApiClient
 import com.alpenl.cairn.share.network.UpdateCheckResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -36,6 +39,10 @@ internal data class CairnLinksUiState(
     val statusText: String = "",
     val filter: LinkFilter = LinkFilter.All,
     val searchQuery: String = "",
+    val searchResults: List<SavedLink> = emptyList(),
+    val searchLoading: Boolean = false,
+    val searchNextBeforeId: Int? = null,
+    val searchStatusText: String = "",
     val busyIds: Set<Int> = emptySet(),
     val detailLoads: Map<Int, DetailLoadState> = emptyMap(),
     val editDraft: EditDraft? = null,
@@ -120,6 +127,7 @@ internal class CairnLinksViewModel(
         private set
 
     private var messageId = 0L
+    private var searchJob: Job? = null
 
     init {
         observeSettings()
@@ -129,7 +137,11 @@ internal class CairnLinksViewModel(
 
     fun refreshLinks() {
         if (uiState.loading) return
-        uiState = uiState.copy(loading = true, statusText = "正在同步云端链接...")
+        val hadLinks = uiState.links.isNotEmpty()
+        uiState = uiState.copy(
+            loading = true,
+            statusText = if (hadLinks) "正在刷新链接..." else "正在同步云端链接...",
+        )
         viewModelScope.launch {
             when (val result = withContext(Dispatchers.IO) { repository.loadAll() }) {
                 is LinkListResult.Loaded -> {
@@ -143,6 +155,11 @@ internal class CairnLinksViewModel(
                     uiState = uiState.copy(
                         loading = false,
                         statusText = "加载失败。请检查网络后重试。",
+                        message = if (uiState.links.isNotEmpty()) {
+                            nextMessage("同步失败，已保留当前列表。")
+                        } else {
+                            uiState.message
+                        },
                     )
                 }
             }
@@ -154,7 +171,40 @@ internal class CairnLinksViewModel(
     }
 
     fun setSearchQuery(value: String) {
-        uiState = uiState.copy(searchQuery = value)
+        searchJob?.cancel()
+        val query = value.trim()
+        uiState = if (query.isEmpty()) {
+            uiState.copy(
+                searchQuery = value,
+                searchResults = emptyList(),
+                searchLoading = false,
+                searchNextBeforeId = null,
+                searchStatusText = "",
+            )
+        } else {
+            uiState.copy(
+                searchQuery = value,
+                searchResults = emptyList(),
+                searchLoading = true,
+                searchNextBeforeId = null,
+                searchStatusText = "正在搜索...",
+            )
+        }
+        if (query.isEmpty()) return
+        searchJob = viewModelScope.launch {
+            delay(250)
+            loadSearchPage(query = query, beforeId = null, append = false)
+        }
+    }
+
+    fun loadMoreSearchResults() {
+        val query = uiState.searchQuery.trim()
+        val beforeId = uiState.searchNextBeforeId
+        if (query.isEmpty() || beforeId == null || uiState.searchLoading) return
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            loadSearchPage(query = query, beforeId = beforeId, append = true)
+        }
     }
 
     fun ensureLink(id: Int) {
@@ -458,6 +508,39 @@ internal class CairnLinksViewModel(
         }
     }
 
+    private suspend fun loadSearchPage(query: String, beforeId: Int?, append: Boolean) {
+        uiState = uiState.copy(
+            searchLoading = true,
+            searchStatusText = if (append) "正在加载更多..." else "正在搜索...",
+        )
+        when (val result = withContext(Dispatchers.IO) { repository.searchPage(query, beforeId) }) {
+            is LinkPageResult.Loaded -> {
+                if (uiState.searchQuery.trim() != query) return
+                val nextItems = if (append) {
+                    (uiState.searchResults + result.page.items)
+                        .distinctBy { it.id }
+                        .sortedByDescending { it.id }
+                } else {
+                    result.page.items.sortedByDescending { it.id }
+                }
+                uiState = uiState.copy(
+                    searchResults = nextItems,
+                    searchLoading = false,
+                    searchNextBeforeId = result.page.nextBeforeId,
+                    searchStatusText = if (nextItems.isEmpty()) "没有匹配的链接。" else "找到 ${nextItems.size} 条结果。",
+                )
+            }
+            is LinkPageResult.Failed -> {
+                if (uiState.searchQuery.trim() != query) return
+                uiState = uiState.copy(
+                    searchLoading = false,
+                    searchStatusText = if (append) "加载更多失败。" else "搜索失败。请检查网络后重试。",
+                    message = nextMessage(if (append) "加载更多失败。" else "搜索失败。请检查网络。"),
+                )
+            }
+        }
+    }
+
     private fun validateLinkDraft(url: String, note: String): String? =
         when {
             url.length > MAX_URL_LENGTH -> "链接太长，最多 $MAX_URL_LENGTH 字。"
@@ -504,17 +587,7 @@ internal fun CairnLinksUiState.visibleLibraryLinks(): List<SavedLink> {
 }
 
 internal fun CairnLinksUiState.searchResultLinks(): List<SavedLink> {
-    val query = searchQuery.trim()
-    if (query.isEmpty()) return emptyList()
-    return links.asSequence()
-        .filter {
-            it.url.contains(query, ignoreCase = true) ||
-                it.note.contains(query, ignoreCase = true) ||
-                it.hostLabel().contains(query, ignoreCase = true) ||
-                it.displayTitle().contains(query, ignoreCase = true)
-        }
-        .sortedByDescending { it.id }
-        .toList()
+    return searchResults.sortedByDescending { it.id }
 }
 
 internal fun CairnLinksUiState.queueLinks(): List<SavedLink> =

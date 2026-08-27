@@ -8,9 +8,27 @@ beforeEach(async () => {
 });
 
 describe("cairn-share worker", () => {
+  it("applies performance migrations for learned pagination and cache generation", async () => {
+    const index = await env.DB.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?"
+    )
+      .bind("links_learned_id_idx")
+      .first<{ sql: string }>();
+    expect(index?.sql).toContain("learned");
+    expect(index?.sql).toContain("id DESC");
+
+    const generation = await env.DB.prepare(
+      "SELECT value FROM cache_metadata WHERE key = ?"
+    )
+      .bind("links_generation")
+      .first<{ value: number }>();
+    expect(generation?.value).toBe(1);
+  });
+
   it("serves an API debugging interface at the root path", async () => {
     const response = await dispatch("/");
     expect(response.status).toBe(200);
+    expect(response.headers.get("server-timing")).toContain("total;dur=");
     expect(response.headers.get("content-type")).toContain("text/html");
     const body = await response.text();
     expect(body).toContain("API 调试台");
@@ -122,43 +140,51 @@ describe("cairn-share worker", () => {
     expect(noMatches.items).toEqual([]);
   });
 
-  it("caches equivalent list reads and invalidates tracked list entries after writes", async () => {
+  it("caches equivalent list reads and advances generation after writes", async () => {
     const first = await create("https://example.com/cache-list-1", "cache");
 
     const firstRead = await dispatch("/api/links?q=cache&limit=20&learned=all");
     expect(firstRead.headers.get("x-cairn-cache")).toBe("MISS");
     expect(firstRead.headers.get("cache-control")).toContain("max-age=15");
+    expect(firstRead.headers.get("server-timing")).toContain('cache-state;desc="MISS"');
+    expect(firstRead.headers.get("server-timing")).toContain("generation;dur=");
+    expect(firstRead.headers.get("server-timing")).toContain("db;dur=");
     expect((await json(firstRead)).items.map((item: LinkRecord) => item.id)).toEqual([first.id]);
 
     const reorderedRead = await dispatch("/api/links?learned=all&limit=20&q=cache");
     expect(reorderedRead.headers.get("x-cairn-cache")).toBe("HIT");
     expect(reorderedRead.headers.get("cache-control")).toContain("max-age=15");
+    expect(reorderedRead.headers.get("server-timing")).toContain('cache-state;desc="HIT"');
     expect((await json(reorderedRead)).items.map((item: LinkRecord) => item.id)).toEqual([first.id]);
 
     const second = await create("https://example.com/cache-list-2", "cache");
 
     const afterWrite = await dispatch("/api/links?q=cache&limit=20&learned=all");
     expect(afterWrite.headers.get("x-cairn-cache")).toBe("MISS");
+    expect(afterWrite.headers.get("server-timing")).toContain('cache-state;desc="MISS"');
     expect((await json(afterWrite)).items.map((item: LinkRecord) => item.id)).toEqual([second.id, first.id]);
   });
 
-  it("caches detail reads and evicts the exact detail cache after update and delete", async () => {
+  it("caches detail reads and advances generation after update and delete", async () => {
     const created = await create("https://example.com/cache-detail", "old");
 
     const firstRead = await dispatch(`/api/links/${created.id}`);
     expect(firstRead.headers.get("x-cairn-cache")).toBe("MISS");
     expect(firstRead.headers.get("cache-control")).toContain("max-age=15");
+    expect(firstRead.headers.get("server-timing")).toContain('cache-state;desc="MISS"');
     await expect(firstRead.json()).resolves.toMatchObject({ id: created.id, note: "old" });
 
     const cachedRead = await dispatch(`/api/links/${created.id}`);
     expect(cachedRead.headers.get("x-cairn-cache")).toBe("HIT");
     expect(cachedRead.headers.get("cache-control")).toContain("max-age=15");
+    expect(cachedRead.headers.get("server-timing")).toContain('cache-state;desc="HIT"');
     await expect(cachedRead.json()).resolves.toMatchObject({ id: created.id, note: "old" });
 
     await patchJson(created.id, { note: "new" });
 
     const afterPatch = await dispatch(`/api/links/${created.id}`);
     expect(afterPatch.headers.get("x-cairn-cache")).toBe("MISS");
+    expect(afterPatch.headers.get("server-timing")).toContain('cache-state;desc="MISS"');
     await expect(afterPatch.json()).resolves.toMatchObject({ id: created.id, note: "new" });
 
     const deleted = await dispatch(`/api/links/${created.id}`, { method: "DELETE" });
@@ -176,6 +202,7 @@ describe("cairn-share worker", () => {
       headers: { Authorization: "Bearer test" }
     });
     expect(privateRead.headers.get("x-cairn-cache")).toBe("BYPASS");
+    expect(privateRead.headers.get("server-timing")).toContain('cache-state;desc="BYPASS"');
     await expect(privateRead.json()).resolves.toMatchObject({ id: created.id, note: "private" });
   });
 

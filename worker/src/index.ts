@@ -59,51 +59,88 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const READ_CACHE_TTL_SECONDS = 15;
 const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}, s-maxage=${READ_CACHE_TTL_SECONDS}`;
-const MAX_TRACKED_LIST_CACHE_KEYS = 120;
 const CACHE_VERSION = "2";
 const CACHE_ORIGIN = "https://cairn-share-cache.internal";
+const LINKS_CACHE_GENERATION_KEY = "links_generation";
 
-const trackedListCacheKeys = new Set<string>();
+type CacheState = "MISS" | "HIT" | "BYPASS";
+
+class TimingCollector {
+  private readonly started = performance.now();
+  private readonly entries: Array<{ name: string; duration: number }> = [];
+  private cacheState: CacheState | null = null;
+
+  async measure<T>(name: string, operation: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    try {
+      return await operation();
+    } finally {
+      this.entries.push({ name, duration: performance.now() - started });
+    }
+  }
+
+  setCacheState(cacheState: CacheState): void {
+    this.cacheState = cacheState;
+  }
+
+  headerValue(): string {
+    const total = performance.now() - this.started;
+    const metrics = [`total;dur=${formatDuration(total)}`];
+    if (this.cacheState !== null) {
+      metrics.push(`cache-state;desc="${this.cacheState}"`);
+    }
+    for (const entry of this.entries) {
+      metrics.push(`${entry.name};dur=${formatDuration(entry.duration)}`);
+    }
+    return metrics.join(", ");
+  }
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
-    }
-
-    const url = new URL(request.url);
-    const path = trimTrailingSlash(url.pathname);
-
-    if (path === "/" || path === "/debug") {
-      return routeMethod(request, ["GET"], () => html(apiDebugHtml()));
-    }
-
-    if (path === "/health") {
-      return routeMethod(request, ["GET"], () => json({ ok: true }));
-    }
-
-    if (path === "/api/links") {
-      return routeMethod(request, ["GET", "POST"], () => {
-        if (request.method === "POST") return createLink(request, env);
-        return listLinks(request, url, env);
-      });
-    }
-
-    const linkIdMatch = path.match(/^\/api\/links\/(\d+)$/);
-    if (linkIdMatch !== null) {
-      return routeMethod(request, ["GET", "PATCH", "DELETE"], () => {
-        const id = Number(linkIdMatch[1]);
-        if (request.method === "PATCH") return updateLink(request, env, id);
-        if (request.method === "DELETE") return deleteLink(request, env, id);
-        return getLink(request, url, id, env);
-      });
-    }
-
-    return json({ error: "not_found" }, 404);
+    const timing = new TimingCollector();
+    const response = await handleRequest(request, env, timing);
+    return withServerTiming(response, timing);
   }
 };
 
-async function createLink(request: Request, env: Env): Promise<Response> {
+async function handleRequest(request: Request, env: Env, timing: TimingCollector): Promise<Response> {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+
+  const url = new URL(request.url);
+  const path = trimTrailingSlash(url.pathname);
+
+  if (path === "/" || path === "/debug") {
+    return routeMethod(request, ["GET"], () => html(apiDebugHtml()));
+  }
+
+  if (path === "/health") {
+    return routeMethod(request, ["GET"], () => json({ ok: true }));
+  }
+
+  if (path === "/api/links") {
+    return routeMethod(request, ["GET", "POST"], () => {
+      if (request.method === "POST") return createLink(request, env, timing);
+      return listLinks(request, url, env, timing);
+    });
+  }
+
+  const linkIdMatch = path.match(/^\/api\/links\/(\d+)$/);
+  if (linkIdMatch !== null) {
+    return routeMethod(request, ["GET", "PATCH", "DELETE"], () => {
+      const id = Number(linkIdMatch[1]);
+      if (request.method === "PATCH") return updateLink(request, env, id, timing);
+      if (request.method === "DELETE") return deleteLink(env, id, timing);
+      return getLink(request, url, id, env, timing);
+    });
+  }
+
+  return json({ error: "not_found" }, 404);
+}
+
+async function createLink(request: Request, env: Env, timing: TimingCollector): Promise<Response> {
   const contentType = request.headers.get("content-type") ?? "";
   if (contentType.toLowerCase().split(";")[0].trim() !== "application/json") {
     return error("invalid_content_type");
@@ -121,23 +158,25 @@ async function createLink(request: Request, env: Env): Promise<Response> {
   }
 
   const createdAt = new Date().toISOString();
-  const row = await env.DB.prepare(
-    `INSERT INTO links (url, note, created_at)
-      VALUES (?, ?, ?)
-      RETURNING id, url, note, created_at, learned, learned_at`
-  )
-    .bind(validation.url, validation.note, createdAt)
-    .first<LinkRow>();
+  const row = await timing.measure("db", () =>
+    env.DB.prepare(
+      `INSERT INTO links (url, note, created_at)
+        VALUES (?, ?, ?)
+        RETURNING id, url, note, created_at, learned, learned_at`
+    )
+      .bind(validation.url, validation.note, createdAt)
+      .first<LinkRow>()
+  );
 
   if (row === null) {
     return json({ error: "not_found" }, 500);
   }
 
-  await invalidateListCaches();
+  await bumpLinksCacheGeneration(env, timing);
   return json(mapLink(row), 201);
 }
 
-async function listLinks(request: Request, url: URL, env: Env): Promise<Response> {
+async function listLinks(request: Request, url: URL, env: Env, timing: TimingCollector): Promise<Response> {
   const limit = parseBoundedInt(url.searchParams.get("limit"), DEFAULT_LIMIT, MAX_LIMIT);
   if (limit === null) return error("invalid_limit");
 
@@ -150,8 +189,7 @@ async function listLinks(request: Request, url: URL, env: Env): Promise<Response
   const query = parseSearchQuery(url.searchParams.get("q"));
   if (query === null) return error("invalid_query");
 
-  const cacheUrl = listCacheUrl(url, { limit, beforeId, learned, query });
-  return cachedJson(request, cacheUrl, true, async () => {
+  return cachedJson(request, env, timing, (generation) => listCacheUrl(url, { limit, beforeId, learned, query }, generation), async () => {
     const pageSize = limit + 1;
     const select = "SELECT id, url, note, created_at, learned, learned_at FROM links";
     const order = "ORDER BY id DESC LIMIT ?";
@@ -175,7 +213,7 @@ async function listLinks(request: Request, url: URL, env: Env): Promise<Response
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
     const statement = env.DB.prepare(`${select}${where} ${order}`).bind(...bindings, pageSize);
 
-    const result = await statement.all<LinkRow>();
+    const result = await timing.measure("db", () => statement.all<LinkRow>());
     const rows = result.results ?? [];
     const items = rows.slice(0, limit);
     const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
@@ -183,13 +221,15 @@ async function listLinks(request: Request, url: URL, env: Env): Promise<Response
   });
 }
 
-async function getLink(request: Request, url: URL, id: number, env: Env): Promise<Response> {
-  return cachedJson(request, detailCacheUrl(id, url), false, async () => {
-    const row = await env.DB.prepare(
-      "SELECT id, url, note, created_at, learned, learned_at FROM links WHERE id = ?"
-    )
-      .bind(id)
-      .first<LinkRow>();
+async function getLink(request: Request, url: URL, id: number, env: Env, timing: TimingCollector): Promise<Response> {
+  return cachedJson(request, env, timing, (generation) => detailCacheUrl(id, url, generation), async () => {
+    const row = await timing.measure("db", () =>
+      env.DB.prepare(
+        "SELECT id, url, note, created_at, learned, learned_at FROM links WHERE id = ?"
+      )
+        .bind(id)
+        .first<LinkRow>()
+    );
 
     if (row === null) {
       return null;
@@ -198,7 +238,7 @@ async function getLink(request: Request, url: URL, id: number, env: Env): Promis
   });
 }
 
-async function updateLink(request: Request, env: Env, id: number): Promise<Response> {
+async function updateLink(request: Request, env: Env, id: number, timing: TimingCollector): Promise<Response> {
   const contentType = request.headers.get("content-type") ?? "";
   if (contentType.toLowerCase().split(";")[0].trim() !== "application/json") {
     return error("invalid_content_type");
@@ -246,58 +286,67 @@ async function updateLink(request: Request, env: Env, id: number): Promise<Respo
   }
 
   bindings.push(id);
-  const row = await env.DB.prepare(
-    `UPDATE links
-      SET ${updates.join(", ")}
-      WHERE id = ?
-      RETURNING id, url, note, created_at, learned, learned_at`
-  )
-    .bind(...bindings)
-    .first<LinkRow>();
+  const row = await timing.measure("db", () =>
+    env.DB.prepare(
+      `UPDATE links
+        SET ${updates.join(", ")}
+        WHERE id = ?
+        RETURNING id, url, note, created_at, learned, learned_at`
+    )
+      .bind(...bindings)
+      .first<LinkRow>()
+  );
 
   if (row === null) {
     return error("not_found", 404);
   }
-  await invalidateReadCaches(id, new URL(request.url));
+  await bumpLinksCacheGeneration(env, timing);
   return json(mapLink(row));
 }
 
-async function deleteLink(request: Request, env: Env, id: number): Promise<Response> {
-  const row = await env.DB.prepare("DELETE FROM links WHERE id = ? RETURNING id")
-    .bind(id)
-    .first<{ id: number }>();
+async function deleteLink(env: Env, id: number, timing: TimingCollector): Promise<Response> {
+  const row = await timing.measure("db", () =>
+    env.DB.prepare("DELETE FROM links WHERE id = ? RETURNING id")
+      .bind(id)
+      .first<{ id: number }>()
+  );
 
   if (row === null) {
     return error("not_found", 404);
   }
-  await invalidateReadCaches(id, new URL(request.url));
+  await bumpLinksCacheGeneration(env, timing);
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
 async function cachedJson(
   request: Request,
-  cacheUrl: string,
-  trackAsList: boolean,
+  env: Env,
+  timing: TimingCollector,
+  cacheUrlForGeneration: (generation: number) => string,
   producer: () => Promise<unknown | null>
 ): Promise<Response> {
   if (shouldBypassReadCache(request)) {
+    timing.setCacheState("BYPASS");
     const body = await producer();
     if (body === null) return error("not_found", 404);
     return json(body, 200, { "X-Cairn-Cache": "BYPASS" });
   }
 
+  const generation = await readLinksCacheGeneration(env, timing);
+  const cacheUrl = cacheUrlForGeneration(generation);
   const cacheRequest = new Request(cacheUrl, { method: "GET" });
-  const cached = await caches.default.match(cacheRequest);
+  const cached = await timing.measure("cache", () => caches.default.match(cacheRequest));
   if (cached !== undefined) {
+    timing.setCacheState("HIT");
     return withCacheHeader(cached, "HIT");
   }
 
+  timing.setCacheState("MISS");
   const body = await producer();
   if (body === null) return error("not_found", 404);
 
   const response = cacheableJson(body, "MISS");
-  if (trackAsList) rememberListCacheKey(cacheUrl);
-  await caches.default.put(cacheRequest, response.clone());
+  await timing.measure("cache-put", () => caches.default.put(cacheRequest, response.clone()));
   return response;
 }
 
@@ -309,7 +358,7 @@ function shouldBypassReadCache(request: Request): boolean {
   return /\bno-cache\b|\bno-store\b/i.test(cacheControl);
 }
 
-function cacheableJson(body: unknown, cacheState: "MISS" | "HIT" | "BYPASS"): Response {
+function cacheableJson(body: unknown, cacheState: CacheState): Response {
   return json(body, 200, {
     "Cache-Control": READ_CACHE_CONTROL,
     "X-Cairn-Cache": cacheState
@@ -327,27 +376,42 @@ function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS"): Resp
   });
 }
 
-async function invalidateReadCaches(id: number, url: URL): Promise<void> {
-  const cache = caches.default;
-  const deletes = [...trackedListCacheKeys].map((key) => cache.delete(new Request(key, { method: "GET" })));
-  deletes.push(cache.delete(new Request(detailCacheUrl(id, url), { method: "GET" })));
-  trackedListCacheKeys.clear();
-  await Promise.allSettled(deletes);
+function withServerTiming(response: Response, timing: TimingCollector): Response {
+  const headers = new Headers(response.headers);
+  headers.set("Server-Timing", timing.headerValue());
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
 }
 
-async function invalidateListCaches(): Promise<void> {
-  const cache = caches.default;
-  const deletes = [...trackedListCacheKeys].map((key) => cache.delete(new Request(key, { method: "GET" })));
-  trackedListCacheKeys.clear();
-  await Promise.allSettled(deletes);
+function formatDuration(duration: number): string {
+  return Math.max(0, duration).toFixed(1);
 }
 
-function rememberListCacheKey(cacheUrl: string): void {
-  trackedListCacheKeys.add(cacheUrl);
-  if (trackedListCacheKeys.size <= MAX_TRACKED_LIST_CACHE_KEYS) return;
+async function readLinksCacheGeneration(env: Env, timing: TimingCollector): Promise<number> {
+  const row = await timing.measure("generation", () =>
+    env.DB.prepare("SELECT value FROM cache_metadata WHERE key = ?")
+      .bind(LINKS_CACHE_GENERATION_KEY)
+      .first<{ value: number | string }>()
+  );
+  const value = Number(row?.value ?? 1);
+  return Number.isSafeInteger(value) && value > 0 ? value : 1;
+}
 
-  const oldest = trackedListCacheKeys.values().next().value;
-  if (typeof oldest === "string") trackedListCacheKeys.delete(oldest);
+async function bumpLinksCacheGeneration(env: Env, timing: TimingCollector): Promise<void> {
+  await timing.measure("generation", () =>
+    env.DB.prepare(
+      `INSERT INTO cache_metadata (key, value, updated_at)
+        VALUES (?, 1, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value = cache_metadata.value + 1,
+          updated_at = excluded.updated_at`
+    )
+      .bind(LINKS_CACHE_GENERATION_KEY, new Date().toISOString())
+      .run()
+  );
 }
 
 function listCacheUrl(
@@ -357,10 +421,12 @@ function listCacheUrl(
     beforeId: number | undefined;
     learned: boolean | undefined;
     query: string | undefined;
-  }
+  },
+  generation: number
 ): string {
   const url = new URL("/api/links", CACHE_ORIGIN);
   url.searchParams.set("v", CACHE_VERSION);
+  url.searchParams.set("g", String(generation));
   url.searchParams.set("limit", String(parsed.limit));
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
@@ -369,9 +435,10 @@ function listCacheUrl(
   return url.toString();
 }
 
-function detailCacheUrl(id: number, requestUrl: URL): string {
+function detailCacheUrl(id: number, requestUrl: URL, generation: number): string {
   const url = new URL(`/api/links/${id}`, CACHE_ORIGIN);
   url.searchParams.set("v", CACHE_VERSION);
+  url.searchParams.set("g", String(generation));
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
 }

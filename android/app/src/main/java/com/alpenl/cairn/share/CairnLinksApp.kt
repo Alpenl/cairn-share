@@ -225,6 +225,7 @@ internal fun CairnLinksApp(
                     state = state,
                     onBack = { navController.popBackStack() },
                     onSearchQueryChange = viewModel::setSearchQuery,
+                    onLoadMoreSearchResults = viewModel::loadMoreSearchResults,
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
             }
@@ -458,6 +459,7 @@ private fun LibraryScreen(
             loading = state.loading,
             emptyText = libraryEmptyText(state),
             onOpenLinkDetail = onOpenLinkDetail,
+            refreshing = state.loading && items.isNotEmpty(),
         )
     }
 }
@@ -467,6 +469,7 @@ private fun SearchScreen(
     state: CairnLinksUiState,
     onBack: () -> Unit,
     onSearchQueryChange: (String) -> Unit,
+    onLoadMoreSearchResults: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
     val results = state.searchResultLinks()
@@ -475,13 +478,20 @@ private fun SearchScreen(
         SearchField(
             value = state.searchQuery,
             onValueChange = onSearchQueryChange,
-            enabled = !state.loading,
+            enabled = true,
         )
         LinkList(
             items = results,
-            loading = state.loading,
-            emptyText = if (state.searchQuery.isBlank()) "输入关键词搜索链接、备注或站点。" else "没有匹配的链接。",
+            loading = state.searchLoading && results.isEmpty(),
+            emptyText = when {
+                state.searchQuery.isBlank() -> "输入关键词搜索链接、备注或站点。"
+                state.searchLoading -> "正在搜索..."
+                else -> "没有匹配的链接。"
+            },
             onOpenLinkDetail = onOpenLinkDetail,
+            hasMore = state.searchNextBeforeId != null,
+            loadingMore = state.searchLoading && results.isNotEmpty(),
+            onLoadMore = onLoadMoreSearchResults,
         )
     }
 }
@@ -1055,6 +1065,10 @@ private fun ColumnScope.LinkList(
     emptyText: String,
     onOpenLinkDetail: (SavedLink) -> Unit,
     fifo: Boolean = false,
+    refreshing: Boolean = false,
+    hasMore: Boolean = false,
+    loadingMore: Boolean = false,
+    onLoadMore: (() -> Unit)? = null,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -1063,6 +1077,15 @@ private fun ColumnScope.LinkList(
         verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(bottom = 92.dp),
     ) {
+        if (refreshing) {
+            item {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("list_refreshing"),
+                )
+            }
+        }
         if (loading && items.isEmpty()) {
             item { LoadingState("正在加载链接...") }
         } else if (items.isEmpty()) {
@@ -1074,6 +1097,26 @@ private fun ColumnScope.LinkList(
                 fifo = fifo,
                 onClick = { onOpenLinkDetail(link) },
             )
+        }
+        if (loadingMore) {
+            item {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("list_loading_more"),
+                )
+            }
+        } else if (hasMore && onLoadMore != null) {
+            item {
+                OutlinedButton(
+                    onClick = onLoadMore,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("load_more"),
+                ) {
+                    Text("加载更多")
+                }
+            }
         }
     }
 }

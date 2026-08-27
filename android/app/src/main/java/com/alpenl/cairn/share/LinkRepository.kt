@@ -1,16 +1,21 @@
 package com.alpenl.cairn.share
 
 import com.alpenl.cairn.share.network.LinkCreateResult
+import com.alpenl.cairn.share.network.LinkFilter
 import com.alpenl.cairn.share.network.LinkGetResult
 import com.alpenl.cairn.share.network.LinkListResult
 import com.alpenl.cairn.share.network.LinkMutationResult
+import com.alpenl.cairn.share.network.LinkPageResult
 import com.alpenl.cairn.share.network.LinksApiClient
 
 internal class LinkRepository(apiBaseUrl: String) {
     private val client = LinksApiClient(apiBaseUrl)
 
     fun loadAll(): LinkListResult =
-        client.listAll(com.alpenl.cairn.share.network.LinkFilter.All, "")
+        client.listAll(LinkFilter.All, "")
+
+    fun searchPage(query: String, beforeId: Int? = null): LinkPageResult =
+        client.listPage(LinkFilter.All, query, beforeId)
 
     fun get(id: Int): LinkGetResult =
         client.get(id)
