@@ -1,0 +1,1086 @@
+<title>链接收集 改版原型</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wdth,wght@8..144,75..125,300..800&family=Roboto+Mono:wght@400;500&family=Noto+Serif+SC:wght@500;600&display=swap">
+<style>
+:root{
+  /* app tokens — light */
+  --primary:#145C52; --on-primary:#FFFFFF;
+  --primary-container:#CDE2DB; --on-primary-container:#05231E;
+  --surface:#F8F9F7; --surface-container:#EFF1ED; --surface-container-high:#E8EBE6;
+  --surface-container-highest:#E0E4DE;
+  --on-surface:#151A18; --on-surface-variant:#4B544F; --outline:#7B857F; --outline-variant:#D3D9D3;
+  --hairline:rgba(21,26,24,.09);
+  --warn:#7C4A12; --warn-container:#EFDCC3; --on-warn-container:#2C1A05;
+  --error:#8F2B22; --error-container:#F1DAD6;
+  --scrim:rgba(14,20,18,.4);
+  /* page tokens */
+  --page-bg:#EAEBE6; --page-panel:#F8F9F7; --page-ink:#151A18; --page-dim:#5A635E; --page-rule:rgba(21,26,24,.12);
+  --page-accent:#145C52;
+  --frame:#0A0C0B; --frame-edge:#333936;
+  --elev3:0 18px 38px -18px rgba(10,25,20,.45),0 2px 6px rgba(10,25,20,.12);
+  --ez:cubic-bezier(.2,0,0,1);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --primary:#83CBB9; --on-primary:#00332C;
+    --primary-container:#1D4A42; --on-primary-container:#B4E3D6;
+    --surface:#0F1312; --surface-container:#161B19; --surface-container-high:#1D2321;
+    --surface-container-highest:#252C29;
+    --on-surface:#E2E6E3; --on-surface-variant:#B2BCB7; --outline:#7C8781; --outline-variant:#39413D;
+    --hairline:rgba(226,230,227,.1);
+    --warn:#DFB483; --warn-container:#42311B; --on-warn-container:#F3DCBE;
+    --error:#F0A69C; --error-container:#4A1B15;
+    --scrim:rgba(0,0,0,.62);
+    --page-bg:#0A0D0C; --page-panel:#0F1312; --page-ink:#E2E6E3; --page-dim:#8F9A95; --page-rule:rgba(226,230,227,.13);
+    --page-accent:#83CBB9;
+    --frame:#000; --frame-edge:#2C3331;
+    --elev3:0 24px 60px -24px rgba(0,0,0,.9),0 2px 8px rgba(0,0,0,.5);
+  }
+}
+:root[data-theme="dark"]{
+  --primary:#83CBB9; --on-primary:#00332C;
+  --primary-container:#1D4A42; --on-primary-container:#B4E3D6;
+  --surface:#0F1312; --surface-container:#161B19; --surface-container-high:#1D2321;
+  --surface-container-highest:#252C29;
+  --on-surface:#E2E6E3; --on-surface-variant:#B2BCB7; --outline:#7C8781; --outline-variant:#39413D;
+  --hairline:rgba(226,230,227,.1);
+  --warn:#DFB483; --warn-container:#42311B; --on-warn-container:#F3DCBE;
+  --error:#F0A69C; --error-container:#4A1B15;
+  --scrim:rgba(0,0,0,.62);
+  --page-bg:#0A0D0C; --page-panel:#0F1312; --page-ink:#E2E6E3; --page-dim:#8F9A95; --page-rule:rgba(226,230,227,.13);
+  --page-accent:#83CBB9;
+  --frame:#000; --frame-edge:#2C3331;
+  --elev3:0 24px 60px -24px rgba(0,0,0,.9),0 2px 8px rgba(0,0,0,.5);
+}
+*{box-sizing:border-box}
+body{
+  margin:0;color:var(--page-ink);
+  background:
+    radial-gradient(120% 80% at 12% -10%, color-mix(in srgb,var(--page-accent) 12%,transparent), transparent 62%),
+    var(--page-bg);
+  font-family:"Roboto Flex","Roboto","Noto Sans SC","PingFang SC",system-ui,sans-serif;
+  font-variation-settings:"opsz" 20;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1200px;margin:0 auto;padding:clamp(28px,6vw,72px) clamp(18px,4vw,32px) 80px;display:flex;flex-direction:column;gap:clamp(32px,5vw,56px)}
+
+/* ---------- masthead ---------- */
+.masthead{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:28px 48px;align-items:end}
+@media (max-width:760px){.masthead{grid-template-columns:1fr}}
+.eyebrow{
+  display:inline-flex;align-items:center;gap:9px;margin:0 0 18px;
+  font-family:"Roboto Mono",ui-monospace,monospace;font-size:10.5px;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--page-dim);
+}
+.eyebrow::before{content:"";width:26px;height:1px;background:var(--page-accent)}
+.masthead h1{
+  margin:0;font-family:"Noto Serif SC","Songti SC",serif;font-weight:600;
+  font-size:clamp(38px,6.4vw,68px);line-height:1;letter-spacing:.01em;text-wrap:balance;
+}
+.masthead h1 em{font-style:normal;color:var(--page-accent)}
+.masthead .lede{margin:20px 0 0;max-width:52ch;font-size:15px;line-height:1.75;color:var(--page-dim)}
+.factlist{display:flex;flex-direction:column;gap:0;min-width:210px}
+.fact{display:flex;justify-content:space-between;gap:20px;padding:9px 0;border-top:1px solid var(--page-rule);font-size:13px}
+.fact:last-child{border-bottom:1px solid var(--page-rule)}
+.fact dt{color:var(--page-dim);font-family:"Roboto Mono",monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.fact dd{margin:0;font-variation-settings:"wght" 500;font-variant-numeric:tabular-nums}
+
+/* ---------- stage ---------- */
+.stage{display:grid;grid-template-columns:392px minmax(0,1fr);gap:clamp(28px,4vw,64px);align-items:start}
+@media (max-width:940px){.stage{grid-template-columns:1fr}}
+.device-col{position:sticky;top:36px;display:flex;flex-direction:column;align-items:center;gap:18px}
+@media (max-width:940px){.device-col{position:static}}
+.phone{
+  position:relative;width:372px;height:788px;border-radius:46px;background:var(--frame);
+  padding:10px;flex:none;
+  box-shadow:0 0 0 1px var(--frame-edge),0 2px 0 rgba(255,255,255,.06) inset,
+             0 46px 90px -40px rgba(6,20,16,.7),0 12px 30px -18px rgba(6,20,16,.4);
+}
+.phone::after{
+  content:"";position:absolute;inset:10px;border-radius:36px;pointer-events:none;z-index:20;
+  box-shadow:0 0 0 1px rgba(255,255,255,.07) inset;
+}
+@media (max-width:430px){.phone{width:100%;max-width:372px;height:min(788px,168vw)}}
+.viewport{
+  position:relative;width:100%;height:100%;border-radius:36px;overflow:hidden;
+  background:var(--surface);color:var(--on-surface);display:flex;flex-direction:column;font-size:14px;
+}
+.statusbar{
+  flex:none;height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;
+  font-size:12px;font-variation-settings:"wght" 600;font-variant-numeric:tabular-nums;
+}
+.statusbar .sys{display:flex;gap:6px;align-items:center;opacity:.85}
+.statusbar svg{width:13px;height:13px;fill:currentColor}
+.screens{position:relative;flex:1;min-height:0}
+.screen{position:absolute;inset:0;display:none;flex-direction:column;background:var(--surface)}
+.screen.active{display:flex}
+.screen.enter-fwd{animation:fwd .38s var(--ez) both}
+.screen.enter-back{animation:back .32s var(--ez) both}
+@keyframes fwd{from{opacity:0;transform:translateX(22px)}to{opacity:1;transform:none}}
+@keyframes back{from{opacity:0;transform:translateX(-14px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.screen.enter-fwd,.screen.enter-back{animation:none}}
+
+/* app bar */
+.appbar{flex:none;padding:4px 6px 0;transition:background .2s,box-shadow .2s}
+.appbar-row{display:flex;align-items:center;gap:2px;min-height:48px;padding:0 4px}
+.appbar-title{flex:1;padding-inline:8px;font-size:15.5px;font-variation-settings:"wght" 600;letter-spacing:.005em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.appbar-large{
+  padding:6px 22px 18px;font-size:30px;line-height:1.1;letter-spacing:-.012em;
+  font-variation-settings:"opsz" 48,"wght" 500,"wdth" 103;
+}
+.appbar-large small{display:block;margin-top:7px;font-size:12.5px;letter-spacing:.02em;color:var(--on-surface-variant);
+  font-variation-settings:"opsz" 14,"wght" 400,"wdth" 100}
+.appbar.scrolled{background:var(--surface-container);box-shadow:0 1px 0 var(--hairline)}
+.iconbtn{
+  width:40px;height:40px;border-radius:20px;border:0;background:transparent;color:var(--on-surface-variant);
+  display:grid;place-items:center;cursor:pointer;flex:none;transition:background .16s,color .16s;
+}
+.iconbtn:hover{background:color-mix(in srgb,var(--on-surface) 7%,transparent);color:var(--on-surface)}
+.iconbtn svg{width:21px;height:21px;fill:currentColor}
+.body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none}
+.body::-webkit-scrollbar{width:0}
+
+/* summary */
+.summary{
+  margin:0 16px 18px;padding:16px 18px;border-radius:22px;background:var(--surface-container);
+  display:flex;align-items:center;gap:16px;
+}
+.ring{width:52px;height:52px;flex:none;position:relative}
+.ring svg{transform:rotate(-90deg)}
+.ring circle{fill:none;stroke-width:5;stroke-linecap:round}
+.ring .track{stroke:var(--surface-container-highest)}
+.ring .val{stroke:var(--primary);transition:stroke-dasharray .5s var(--ez)}
+.ring b{position:absolute;inset:0;display:grid;place-items:center;font-size:13px;font-variation-settings:"wght" 600;
+  font-variant-numeric:tabular-nums}
+.summary .txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.summary .t1{font-size:14px;font-variation-settings:"wght" 500}
+.summary .t2{font-size:12px;color:var(--on-surface-variant);line-height:1.5}
+
+/* search + chips */
+.searchbar{
+  display:flex;align-items:center;gap:11px;height:50px;border-radius:26px;background:var(--surface-container);
+  padding:0 16px;color:var(--on-surface-variant);margin:0 16px 14px;
+  border:1px solid transparent;transition:border-color .18s,background .18s;
+}
+.searchbar:focus-within{border-color:var(--primary);background:var(--surface)}
+.searchbar svg{width:19px;height:19px;fill:currentColor;flex:none}
+.searchbar input{border:0;background:transparent;outline:none;flex:1;min-width:0;color:var(--on-surface);font:inherit;font-size:14.5px}
+.searchbar input::placeholder{color:var(--on-surface-variant)}
+.chiprow{display:flex;gap:8px;padding:0 16px 16px;overflow-x:auto;scrollbar-width:none}
+.chiprow::-webkit-scrollbar{display:none}
+.chip{
+  flex:none;height:34px;padding:0 15px;border-radius:10px;border:1px solid var(--outline-variant);
+  background:transparent;color:var(--on-surface-variant);font:inherit;font-size:13px;
+  font-variation-settings:"wght" 500;display:flex;align-items:center;gap:7px;cursor:pointer;
+  transition:background .16s,color .16s,border-color .16s;
+}
+.chip .n{font-family:"Roboto Mono",monospace;font-size:11px;opacity:.72;font-variant-numeric:tabular-nums}
+.chip[aria-selected="true"]{background:var(--primary-container);color:var(--on-primary-container);border-color:transparent}
+.chip[aria-selected="true"] .n{opacity:.85}
+
+/* list */
+.list{display:flex;flex-direction:column;padding:0 8px 10px}
+.item{
+  position:relative;display:flex;gap:14px;padding:15px 12px;border-radius:20px;cursor:pointer;
+  background:transparent;border:0;text-align:left;color:inherit;font:inherit;width:100%;
+  transition:background .16s;
+}
+.item + .item::before{content:"";position:absolute;top:0;left:66px;right:12px;height:1px;background:var(--hairline)}
+.item:hover{background:var(--surface-container)}
+.item:hover::before,.item:hover + .item::before{opacity:0}
+.avatar{
+  width:40px;height:40px;border-radius:14px;flex:none;display:grid;place-items:center;
+  font-family:"Roboto Mono",monospace;font-size:14px;font-weight:500;letter-spacing:.02em;
+}
+.item-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.item-title{font-size:14.5px;font-variation-settings:"wght" 500;line-height:1.42;letter-spacing:.002em;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.item-sub{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--on-surface-variant);
+  font-family:"Roboto Mono",monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item-sub .dot{width:3px;height:3px;border-radius:50%;background:currentColor;opacity:.5;flex:none}
+.item-note{font-size:12.5px;color:var(--on-surface-variant);line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.flag{width:7px;height:7px;border-radius:50%;background:var(--warn);flex:none;margin:8px 2px 0 0;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 18%,transparent)}
+.flag.done{background:transparent;box-shadow:none;width:7px}
+.state{
+  height:24px;padding:0 10px;border-radius:8px;display:inline-flex;align-items:center;gap:6px;
+  font-size:11.5px;font-variation-settings:"wght" 600;letter-spacing:.02em;
+}
+.state i{width:6px;height:6px;border-radius:50%;background:currentColor;display:block}
+.state.todo{background:var(--warn-container);color:var(--on-warn-container)}
+.state.done{background:var(--primary-container);color:var(--on-primary-container)}
+.sectionlabel{
+  padding:20px 22px 8px;font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;
+  font-family:"Roboto Mono",monospace;color:var(--on-surface-variant);display:flex;justify-content:space-between;
+}
+.divider{height:1px;background:var(--hairline);margin:8px 22px}
+.empty{display:flex;flex-direction:column;align-items:center;gap:12px;padding:62px 40px;text-align:center;color:var(--on-surface-variant)}
+.empty .glyph{width:56px;height:56px;border-radius:20px;background:var(--surface-container);display:grid;place-items:center}
+.empty svg{width:26px;height:26px;fill:var(--outline)}
+.empty p{margin:0;font-size:13px;line-height:1.7}
+
+/* fab + nav */
+.fab{
+  position:absolute;right:18px;bottom:114px;height:56px;padding:0 22px;border-radius:20px;border:0;
+  background:var(--primary);color:var(--on-primary);
+  box-shadow:0 10px 24px -10px color-mix(in srgb,var(--primary) 75%,transparent),0 2px 6px rgba(0,0,0,.2);
+  display:flex;align-items:center;gap:10px;font:inherit;font-size:14px;font-variation-settings:"wght" 600;
+  cursor:pointer;transition:transform .22s var(--ez),box-shadow .22s;
+}
+.fab:hover{transform:translateY(-2px);box-shadow:0 16px 30px -12px color-mix(in srgb,var(--primary) 80%,transparent)}
+.fab svg{width:21px;height:21px;fill:currentColor}
+.navbar{
+  flex:none;height:74px;display:flex;align-items:center;padding:8px 8px 12px;
+  background:var(--surface-container);border-top:1px solid var(--hairline);
+}
+.navitem{
+  flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;background:transparent;border:0;
+  color:var(--on-surface-variant);font:inherit;font-size:11px;font-variation-settings:"wght" 500;
+  letter-spacing:.03em;cursor:pointer;
+}
+.navpill{width:62px;height:32px;border-radius:16px;display:grid;place-items:center;transition:background .22s var(--ez)}
+.navitem svg{width:22px;height:22px;fill:currentColor}
+.navitem[aria-selected="true"]{color:var(--on-surface)}
+.navitem[aria-selected="true"] .navpill{background:var(--primary-container);color:var(--on-primary-container)}
+.navbadge{position:relative}
+.navbadge::after{
+  content:attr(data-count);position:absolute;top:-1px;right:8px;min-width:15px;height:15px;padding:0 4px;
+  border-radius:8px;background:var(--primary);color:var(--on-primary);font-size:9.5px;line-height:15px;
+  text-align:center;font-variation-settings:"wght" 700;font-family:"Roboto Mono",monospace;
+}
+.gesturebar{flex:none;height:20px;display:grid;place-items:center;background:var(--surface)}
+.screen.tabbed .gesturebar{background:var(--surface-container)}
+.gesturebar span{width:104px;height:4px;border-radius:2px;background:var(--on-surface);opacity:.32}
+
+/* detail */
+.hero{padding:2px 22px 20px;display:flex;flex-direction:column;gap:14px}
+.hero .state{align-self:flex-start}
+.hero h2{margin:0;font-size:24px;line-height:1.32;letter-spacing:-.006em;
+  font-variation-settings:"opsz" 36,"wght" 600,"wdth" 101;text-wrap:balance}
+.linkcard{
+  margin:0 22px;border-radius:20px;border:1px solid var(--outline-variant);overflow:hidden;background:var(--surface);
+}
+.linkcard .strip{display:flex;align-items:center;gap:11px;padding:13px 15px;background:var(--surface-container)}
+.linkcard .strip .avatar{width:30px;height:30px;border-radius:10px;font-size:12px}
+.linkcard .strip .h{flex:1;min-width:0;font-family:"Roboto Mono",monospace;font-size:12px;color:var(--on-surface);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.linkcard .full{padding:13px 15px;font-family:"Roboto Mono",monospace;font-size:11.5px;line-height:1.7;
+  word-break:break-all;color:var(--on-surface-variant)}
+.actionrow{display:flex;gap:10px;padding:18px 22px 0}
+.btn{
+  height:50px;border-radius:25px;border:0;padding:0 24px;font:inherit;font-size:14.5px;
+  font-variation-settings:"wght" 600;letter-spacing:.01em;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;gap:9px;white-space:nowrap;
+  transition:filter .16s,background .16s;
+}
+.btn svg{width:19px;height:19px;fill:currentColor}
+.btn.filled{background:var(--primary);color:var(--on-primary);flex:1}
+.btn.filled:hover{filter:brightness(1.1)}
+.btn.tonal{background:var(--surface-container-high);color:var(--on-surface)}
+.btn.tonal:hover{background:var(--surface-container-highest)}
+.btn.outlined{background:transparent;color:var(--primary);border:1px solid var(--outline-variant)}
+.btn.text{background:transparent;color:var(--primary);padding:0 14px;height:40px}
+.btn.danger{background:transparent;color:var(--error);border:1px solid var(--outline-variant)}
+.notecard{margin:20px 22px 0;border-radius:20px;background:var(--surface-container);padding:17px 18px;
+  display:flex;flex-direction:column;gap:8px}
+.k{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--on-surface-variant);font-family:"Roboto Mono",monospace}
+.notecard .v{font-size:14.5px;line-height:1.68}
+.metagrid{display:grid;grid-template-columns:1fr 1fr;margin:20px 22px 0;border-top:1px solid var(--hairline)}
+.metagrid div{padding:14px 2px;display:flex;flex-direction:column;gap:5px;border-bottom:1px solid var(--hairline)}
+.metagrid div:nth-child(odd){padding-right:14px}
+.metagrid div:nth-child(even){padding-left:16px;border-left:1px solid var(--hairline)}
+.metagrid .v{font-size:13.5px;font-variation-settings:"wght" 500;font-variant-numeric:tabular-nums}
+
+/* fields */
+.field{position:relative;margin:0 22px}
+.field label{position:absolute;top:-8px;left:14px;padding:0 6px;background:var(--surface);font-size:11px;
+  letter-spacing:.06em;color:var(--primary);font-variation-settings:"wght" 500}
+.field textarea,.field .fakeinput{
+  width:100%;border:1.5px solid var(--primary);border-radius:16px;background:transparent;color:var(--on-surface);
+  font:inherit;font-size:14.5px;padding:16px 15px;resize:none;outline:none;line-height:1.6;
+}
+.field.rest textarea,.field.rest .fakeinput{border-color:var(--outline-variant)}
+.field.rest label{color:var(--on-surface-variant)}
+.field .mono{font-family:"Roboto Mono",monospace;font-size:12.5px;word-break:break-all;line-height:1.7}
+.helper{display:flex;justify-content:space-between;padding:8px 18px 0;font-size:11px;color:var(--on-surface-variant);
+  font-family:"Roboto Mono",monospace;font-variant-numeric:tabular-nums}
+
+/* rows */
+.row{display:flex;align-items:center;gap:16px;padding:15px 22px;background:transparent;border:0;width:100%;
+  text-align:left;color:inherit;font:inherit;cursor:pointer;transition:background .16s}
+.row:hover{background:var(--surface-container)}
+.row .rowicon{width:22px;height:22px;fill:var(--on-surface-variant);flex:none}
+.row .rowmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.row .rowtitle{font-size:14.5px;font-variation-settings:"wght" 500}
+.row .rowsub{font-size:12px;color:var(--on-surface-variant);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-family:"Roboto Mono",monospace;letter-spacing:-.01em}
+.row .rowsub.cn{font-family:inherit;letter-spacing:0}
+.chevron{width:18px;height:18px;fill:var(--outline);flex:none}
+.switch{width:50px;height:30px;border-radius:15px;background:var(--surface-container-highest);position:relative;flex:none;
+  border:1.5px solid var(--outline);transition:background .22s var(--ez),border-color .22s}
+.switch::after{content:"";position:absolute;top:50%;left:6px;width:14px;height:14px;border-radius:50%;
+  background:var(--outline);transform:translateY(-50%);transition:all .22s var(--ez)}
+.switch.on{background:var(--primary);border-color:var(--primary)}
+.switch.on::after{left:24px;width:22px;height:22px;background:var(--on-primary)}
+
+/* update */
+.updatecard{margin:0 22px;border-radius:26px;padding:24px;display:flex;flex-direction:column;gap:15px;
+  background:linear-gradient(150deg,var(--primary-container),color-mix(in srgb,var(--primary-container) 45%,var(--surface-container)));
+  color:var(--on-primary-container)}
+.updatecard h3{margin:0;font-size:20px;font-variation-settings:"wght" 600;letter-spacing:-.005em}
+.updatecard p{margin:0;font-size:13px;line-height:1.7;opacity:.82}
+.versionpill{align-self:flex-start;font-family:"Roboto Mono",monospace;font-size:11px;letter-spacing:.08em;
+  padding:5px 10px;border-radius:8px;background:color-mix(in srgb,var(--on-primary-container) 12%,transparent)}
+.progress{height:6px;border-radius:3px;background:color-mix(in srgb,var(--on-primary-container) 15%,transparent);overflow:hidden}
+.progress i{display:block;height:100%;border-radius:3px;background:var(--on-primary-container);width:62%;
+  animation:grow 2.4s var(--ez) infinite alternate}
+@keyframes grow{from{width:22%}to{width:90%}}
+@media (prefers-reduced-motion:reduce){.progress i{animation:none}}
+.changelog{padding:0 22px;display:flex;flex-direction:column}
+.change{display:grid;grid-template-columns:14px 1fr;gap:12px;padding:11px 0;border-bottom:1px solid var(--hairline);
+  font-size:13px;line-height:1.65;color:var(--on-surface-variant)}
+.change span:first-child{color:var(--primary);font-family:"Roboto Mono",monospace;font-size:11px;padding-top:3px}
+
+/* console */
+.console{margin:0 22px;border-radius:18px;border:1px solid var(--outline-variant);background:var(--surface-container);
+  padding:15px;font-family:"Roboto Mono",monospace;font-size:11px;line-height:1.75;color:var(--on-surface-variant);
+  overflow-x:auto;white-space:pre}
+.console b{color:var(--primary);font-weight:500}
+.methodrow{display:flex;gap:7px;padding:0 22px 14px;flex-wrap:wrap}
+.method{font-family:"Roboto Mono",monospace;font-size:11px;letter-spacing:.06em;padding:6px 11px;border-radius:9px;
+  border:1px solid var(--outline-variant);color:var(--on-surface-variant);cursor:pointer;background:transparent;
+  transition:background .16s,color .16s}
+.method[aria-selected="true"]{background:var(--primary);color:var(--on-primary);border-color:transparent}
+
+/* overlays */
+.scrim{position:absolute;inset:0;background:var(--scrim);opacity:0;pointer-events:none;transition:opacity .26s var(--ez);z-index:5;
+  backdrop-filter:blur(1.5px)}
+.scrim.show{opacity:1;pointer-events:auto}
+.sheet{
+  position:absolute;left:0;right:0;bottom:0;z-index:6;background:var(--surface-container);
+  border-radius:30px 30px 0 0;padding:10px 0 22px;transform:translateY(103%);
+  transition:transform .36s var(--ez);max-height:84%;display:flex;flex-direction:column;
+  box-shadow:0 -20px 50px -30px rgba(0,0,0,.6);
+}
+.sheet.show{transform:none}
+.handle{width:30px;height:4px;border-radius:2px;background:var(--outline);margin:0 auto 14px;opacity:.5}
+.sheet h3{margin:0;padding:0 22px 4px;font-size:20px;font-variation-settings:"wght" 600;letter-spacing:-.005em}
+.sheet p.sub{margin:0;padding:4px 22px 14px;font-size:12.5px;color:var(--on-surface-variant);line-height:1.6}
+.pick{display:flex;gap:13px;align-items:flex-start;padding:13px 22px;cursor:pointer;transition:background .16s}
+.pick:hover{background:var(--surface-container-high)}
+.radio{width:19px;height:19px;border-radius:10px;border:1.5px solid var(--outline);flex:none;margin-top:3px;position:relative}
+.pick[aria-selected="true"] .radio{border-color:var(--primary)}
+.pick[aria-selected="true"] .radio::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--primary)}
+.pick .t{font-size:14px;font-variation-settings:"wght" 500;display:block;margin-bottom:3px}
+.pick .u{font-family:"Roboto Mono",monospace;font-size:11px;word-break:break-all;line-height:1.6;color:var(--on-surface-variant)}
+.snackbar{
+  position:absolute;left:18px;right:18px;bottom:104px;z-index:9;border-radius:14px;padding:15px 17px;
+  background:#222A27;color:#EEF2EF;font-size:13.5px;display:flex;align-items:center;gap:12px;
+  box-shadow:var(--elev3);transform:translateY(240px);transition:transform .32s var(--ez);
+}
+:root[data-theme="dark"] .snackbar{background:#E2E6E3;color:#151A18}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .snackbar{background:#E2E6E3;color:#151A18}}
+.snackbar.show{transform:none}
+.snackbar b{margin-left:auto;color:var(--primary);cursor:pointer;font-variation-settings:"wght" 600;font-size:13px}
+.dialog{
+  position:absolute;left:26px;right:26px;top:50%;transform:translateY(-46%) scale(.96);opacity:0;pointer-events:none;
+  z-index:7;background:var(--surface-container-high);border-radius:30px;padding:26px;
+  transition:opacity .2s,transform .26s var(--ez);box-shadow:var(--elev3);
+}
+.dialog.show{opacity:1;transform:translateY(-50%);pointer-events:auto}
+.dialog h3{margin:0 0 10px;font-size:19px;font-variation-settings:"wght" 600}
+.dialog p{margin:0 0 22px;font-size:13px;line-height:1.7;color:var(--on-surface-variant)}
+.dialog .acts{display:flex;justify-content:flex-end;gap:6px}
+
+/* ---------- notes ---------- */
+.notes{display:flex;flex-direction:column;gap:clamp(30px,4vw,44px);min-width:0}
+.sec{margin:0 0 18px;display:flex;align-items:baseline;gap:14px}
+.sec h2{margin:0;font-family:"Noto Serif SC",serif;font-weight:500;font-size:20px;letter-spacing:.02em}
+.sec .rule{flex:1;height:1px;background:var(--page-rule)}
+.sec .num{font-family:"Roboto Mono",monospace;font-size:10.5px;letter-spacing:.18em;color:var(--page-dim)}
+.lead{margin:0 0 20px;font-size:14.5px;line-height:1.8;color:var(--page-dim);max-width:62ch}
+.lead code{font-family:"Roboto Mono",monospace;font-size:12.5px;color:var(--page-ink)}
+.flow{display:grid;grid-template-columns:repeat(auto-fill,minmax(176px,1fr));gap:0;
+  border-top:1px solid var(--page-rule);border-left:1px solid var(--page-rule)}
+.flowcard{
+  text-align:left;background:transparent;border:0;border-right:1px solid var(--page-rule);border-bottom:1px solid var(--page-rule);
+  padding:15px 16px;cursor:pointer;color:inherit;font:inherit;display:flex;flex-direction:column;gap:6px;
+  transition:background .2s,color .2s;
+}
+.flowcard:hover{background:color-mix(in srgb,var(--page-accent) 9%,transparent)}
+.flowcard[aria-current="true"]{background:var(--page-accent);color:var(--page-bg)}
+.flowcard .n{font-family:"Roboto Mono",monospace;font-size:10px;letter-spacing:.2em;opacity:.7}
+.flowcard .t{font-size:14.5px;font-variation-settings:"wght" 600}
+.flowcard .d{font-size:12px;line-height:1.55;opacity:.72}
+.palette{display:grid;grid-template-columns:repeat(5,1fr);border:1px solid var(--page-rule);border-radius:16px;overflow:hidden}
+@media (max-width:620px){.palette{grid-template-columns:repeat(2,1fr)}}
+.sw{border-right:1px solid var(--page-rule);border-bottom:1px solid var(--page-rule)}
+.sw:last-child{border-right:0}
+.sw .chipc{height:66px}
+.sw .meta{padding:11px 13px;display:flex;flex-direction:column;gap:5px;background:var(--page-panel)}
+.sw .hex{font-family:"Roboto Mono",monospace;font-size:10.5px;letter-spacing:.06em;color:var(--page-dim)}
+.sw .use{font-size:12px;line-height:1.5}
+.speclist{display:flex;flex-direction:column;border-top:1px solid var(--page-rule)}
+.spec{display:grid;grid-template-columns:118px 1fr;gap:20px;padding:15px 0;border-bottom:1px solid var(--page-rule);align-items:baseline}
+@media (max-width:560px){.spec{grid-template-columns:1fr;gap:5px}}
+.spec dt{font-family:"Roboto Mono",monospace;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--page-accent)}
+.spec dd{margin:0;font-size:13.5px;line-height:1.75;color:var(--page-ink)}
+.spec dd em{font-style:normal;color:var(--page-dim)}
+.hint{font-size:11.5px;color:var(--page-dim);font-family:"Roboto Mono",monospace;letter-spacing:.08em;text-align:center}
+footer{border-top:1px solid var(--page-rule);padding-top:20px;font-size:12px;color:var(--page-dim);line-height:1.8;
+  font-family:"Roboto Mono",monospace;letter-spacing:.02em}
+:focus-visible{outline:2px solid var(--page-accent);outline-offset:3px;border-radius:8px}
+</style>
+
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-search" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></symbol>
+  <symbol id="i-add" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></symbol>
+  <symbol id="i-open" viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3z"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75z"/></symbol>
+  <symbol id="i-delete" viewBox="0 0 24 24"><path d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6zM19 4h-3.5l-1-1h-5l-1 1H5v2h14z"/></symbol>
+  <symbol id="i-library" viewBox="0 0 24 24"><path d="M4 6H2v14a2 2 0 0 0 2 2h14v-2H4zm16-4H8a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2m-1 9H9V9h10zm-4 4H9v-2h6zm4-8H9V5h10z"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2m0 12h-4a3 3 0 0 1-6 0H5V5h14z"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M19.14 12.94a7.5 7.5 0 0 0 0-1.88l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7 7 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.73 8.87a.49.49 0 0 0 .12.61l2.03 1.58a7.5 7.5 0 0 0 0 1.88l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.38.3.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.04.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61zM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7zM5 18v2h14v-2z"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2m0 14H4V8h16zM6.5 15.5l3-3-3-3L7.9 8l4.4 4.5-4.4 4.5zM13 16h5v1.5h-5z"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M8.59 16.59 13.17 12 8.59 7.41 10 6l6 6-6 6z"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M19.35 10.04A7.5 7.5 0 0 0 5.2 8.06 6 6 0 0 0 6 20h13a5 5 0 0 0 .35-9.96"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20m1 15h-2v-6h2zm0-8h-2V7h2z"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><path d="M18 16.08a2.9 2.9 0 0 0-1.96.77L8.91 12.7a3 3 0 0 0 0-1.4l7.05-4.11A3 3 0 1 0 15 5c0 .24.03.47.08.7L8.04 9.81a3 3 0 1 0 0 4.38l7.12 4.16c-.05.21-.08.43-.08.65a2.92 2.92 0 1 0 2.92-2.92"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62A7.98 7.98 0 0 1 20 16l2.36-.78A10.02 10.02 0 0 0 12.5 8"/></symbol>
+  <symbol id="i-sort" viewBox="0 0 24 24"><path d="M3 18h6v-2H3zM3 6v2h18V6zm0 7h12v-2H3z"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2m0 16H8V7h11z"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M12 21 1 8a17 17 0 0 1 22 0z"/></symbol>
+  <symbol id="i-battery" viewBox="0 0 24 24"><path d="M15.67 4H14V2h-4v2H8.33C7.6 4 7 4.6 7 5.33v15.34C7 21.4 7.6 22 8.33 22h7.34c.73 0 1.33-.6 1.33-1.33V5.33C17 4.6 16.4 4 15.67 4"/></symbol>
+  <symbol id="i-signal" viewBox="0 0 24 24"><path d="M2 22h20V2z"/></symbol>
+</svg>
+
+<div class="wrap">
+  <header class="masthead">
+    <div>
+      <p class="eyebrow">Cairn Share · Android 客户端改版</p>
+      <h1>链接<em>收集</em></h1>
+      <p class="lede">从系统分享菜单接住一条链接，再把它读完。改版把原来的单页表单拆成一套完整的 Material 3 应用：底部导航的三个主页面、可下钻的详情与编辑页、系统分享的模态弹窗，以及设置里的更新与调试台。下面这台手机可以直接点。</p>
+    </div>
+    <dl class="factlist">
+      <div class="fact"><dt>版本</dt><dd>1.4.0 · minSdk 26</dd></div>
+      <div class="fact"><dt>体系</dt><dd>Material 3 Expressive</dd></div>
+      <div class="fact"><dt>页面</dt><dd>8 屏 · 1 弹窗</dd></div>
+      <div class="fact"><dt>主题</dt><dd>浅色 / 深色</dd></div>
+    </dl>
+  </header>
+
+  <div class="stage">
+    <div class="device-col">
+      <div class="phone">
+        <div class="viewport" id="vp">
+          <div class="statusbar">
+            <span id="clock">14:23</span>
+            <span class="sys">
+              <svg><use href="#i-signal"></use></svg>
+              <svg><use href="#i-wifi"></use></svg>
+              <svg><use href="#i-battery"></use></svg>
+            </span>
+          </div>
+
+          <div class="screens" id="screens">
+
+            <!-- 1 链接库 -->
+            <section class="screen tabbed active" id="s-library">
+              <div class="appbar">
+                <div class="appbar-row">
+                  <div class="appbar-title" style="opacity:0">链接库</div>
+                  <button class="iconbtn" data-act="sort" aria-label="排序"><svg><use href="#i-sort"></use></svg></button>
+                  <button class="iconbtn" data-go="s-settings" aria-label="设置"><svg><use href="#i-settings"></use></svg></button>
+                </div>
+                <div class="appbar-large">链接库<small id="lib-sub">7 条收藏 · 4 条待读</small></div>
+              </div>
+              <div class="body">
+                <div class="summary">
+                  <span class="ring">
+                    <svg width="52" height="52" viewBox="0 0 52 52">
+                      <circle class="track" cx="26" cy="26" r="21.5"></circle>
+                      <circle class="val" id="ring-val" cx="26" cy="26" r="21.5" stroke-dasharray="60 135"></circle>
+                    </svg>
+                    <b id="ring-num">43%</b>
+                  </span>
+                  <span class="txt">
+                    <span class="t1">本周读完 3 条</span>
+                    <span class="t2" id="sum-sub">还有 4 条排在待学习里，最早的一条来自 8 月 22 日。</span>
+                  </span>
+                </div>
+                <div class="searchbar" role="search">
+                  <svg><use href="#i-search"></use></svg>
+                  <input id="q" placeholder="搜索链接、备注或站点" aria-label="搜索链接、备注或站点">
+                </div>
+                <div class="chiprow" role="tablist" id="filters">
+                  <button class="chip" role="tab" data-filter="all" aria-selected="true">全部<span class="n" data-count="all">7</span></button>
+                  <button class="chip" role="tab" data-filter="todo" aria-selected="false">待学习<span class="n" data-count="todo">4</span></button>
+                  <button class="chip" role="tab" data-filter="done" aria-selected="false">已学习<span class="n" data-count="done">3</span></button>
+                </div>
+                <div class="list" id="list"></div>
+              </div>
+              <button class="fab" data-act="newlink"><svg><use href="#i-add"></use></svg>添加链接</button>
+              <nav class="navbar" data-nav></nav>
+              <div class="gesturebar"><span></span></div>
+            </section>
+
+            <!-- 2 待学习 -->
+            <section class="screen tabbed" id="s-queue">
+              <div class="appbar">
+                <div class="appbar-row">
+                  <div class="appbar-title" style="opacity:0">待学习</div>
+                  <button class="iconbtn" data-act="markall" aria-label="全部标记为已学习"><svg><use href="#i-check"></use></svg></button>
+                </div>
+                <div class="appbar-large">待学习<small id="q-sub">按收藏先后排队，先进先读</small></div>
+              </div>
+              <div class="body">
+                <div class="list" id="queue"></div>
+              </div>
+              <nav class="navbar" data-nav></nav>
+              <div class="gesturebar"><span></span></div>
+            </section>
+
+            <!-- 3 设置 -->
+            <section class="screen tabbed" id="s-settings">
+              <div class="appbar">
+                <div class="appbar-large" style="padding-top:18px">设置<small>云端、分享与应用</small></div>
+              </div>
+              <div class="body">
+                <div class="sectionlabel"><span>云端</span></div>
+                <button class="row" data-act="server">
+                  <svg class="rowicon"><use href="#i-cloud"></use></svg>
+                  <span class="rowmain"><span class="rowtitle">服务器地址</span><span class="rowsub">share.alpenl.com</span></span>
+                  <svg class="chevron"><use href="#i-chevron"></use></svg>
+                </button>
+                <button class="row" data-go="s-console">
+                  <svg class="rowicon"><use href="#i-terminal"></use></svg>
+                  <span class="rowmain"><span class="rowtitle">API 调试台</span><span class="rowsub cn">直接对 /api/links 发请求并查看原始响应</span></span>
+                  <svg class="chevron"><use href="#i-chevron"></use></svg>
+                </button>
+                <div class="divider"></div>
+                <div class="sectionlabel"><span>分享</span></div>
+                <button class="row" data-act="toggle">
+                  <svg class="rowicon"><use href="#i-share"></use></svg>
+                  <span class="rowmain"><span class="rowtitle">保存后立即关闭</span><span class="rowsub cn">保存成功就退出分享弹窗，不停留</span></span>
+                  <span class="switch on"></span>
+                </button>
+                <button class="row" data-act="toggle">
+                  <svg class="rowicon"><use href="#i-open"></use></svg>
+                  <span class="rowmain"><span class="rowtitle">保留完整链接</span><span class="rowsub cn">不删除 query 与 fragment</span></span>
+                  <span class="switch on"></span>
+                </button>
+                <div class="divider"></div>
+                <div class="sectionlabel"><span>应用</span></div>
+                <button class="row" data-go="s-update">
+                  <svg class="rowicon"><use href="#i-download"></use></svg>
+                  <span class="rowmain"><span class="rowtitle">检查更新</span><span class="rowsub cn">当前 1.4.0 · 来源 GitHub Release</span></span>
+                  <svg class="chevron"><use href="#i-chevron"></use></svg>
+                </button>
+                <button class="row" data-go="s-about">
+                  <svg class="rowicon"><use href="#i-info"></use></svg>
+                  <span class="rowmain"><span class="rowtitle">关于</span><span class="rowsub cn">版本、开源许可与数据说明</span></span>
+                  <svg class="chevron"><use href="#i-chevron"></use></svg>
+                </button>
+                <div style="height:20px"></div>
+              </div>
+              <nav class="navbar" data-nav></nav>
+              <div class="gesturebar"><span></span></div>
+            </section>
+
+            <!-- 4 详情 -->
+            <section class="screen" id="s-detail">
+              <div class="appbar">
+                <div class="appbar-row">
+                  <button class="iconbtn" data-back aria-label="返回"><svg><use href="#i-back"></use></svg></button>
+                  <div class="appbar-title" id="d-id">链接 #128</div>
+                  <button class="iconbtn" data-go="s-edit" aria-label="编辑"><svg><use href="#i-edit"></use></svg></button>
+                  <button class="iconbtn" data-act="delete" aria-label="删除"><svg><use href="#i-delete"></use></svg></button>
+                </div>
+              </div>
+              <div class="body">
+                <div class="hero">
+                  <span class="state todo" id="d-state"><i></i>待学习</span>
+                  <h2 id="d-title">标题</h2>
+                </div>
+                <div class="linkcard">
+                  <div class="strip">
+                    <span class="avatar" id="d-avatar">D</span>
+                    <span class="h" id="d-host">developer.android.com</span>
+                    <button class="iconbtn" data-act="copy" aria-label="复制链接" style="width:34px;height:34px"><svg style="width:17px;height:17px"><use href="#i-copy"></use></svg></button>
+                  </div>
+                  <div class="full" id="d-url">https://example.com</div>
+                </div>
+                <div class="actionrow">
+                  <button class="btn filled" data-act="open"><svg><use href="#i-open"></use></svg>打开链接</button>
+                  <button class="btn tonal" data-act="toggle-learn" id="d-learnbtn"><svg><use href="#i-check"></use></svg></button>
+                </div>
+                <div class="notecard">
+                  <span class="k">备注</span>
+                  <span class="v" id="d-note">—</span>
+                </div>
+                <div class="metagrid">
+                  <div><span class="k">收藏于</span><span class="v" id="d-created">—</span></div>
+                  <div><span class="k">学习于</span><span class="v" id="d-learned">—</span></div>
+                  <div><span class="k">记录 ID</span><span class="v" id="d-rawid">—</span></div>
+                  <div><span class="k">来源</span><span class="v" id="d-src">系统分享</span></div>
+                </div>
+                <div style="height:28px"></div>
+              </div>
+              <div class="gesturebar"><span></span></div>
+            </section>
+
+            <!-- 5 编辑 -->
+            <section class="screen" id="s-edit">
+              <div class="appbar">
+                <div class="appbar-row">
+                  <button class="iconbtn" data-back aria-label="取消"><svg><use href="#i-back"></use></svg></button>
+                  <div class="appbar-title">编辑链接</div>
+                  <button class="btn text" data-act="saveedit">保存</button>
+                </div>
+              </div>
+              <div class="body">
+                <div style="height:18px"></div>
+                <div class="field rest">
+                  <label for="e-url">链接</label>
+                  <textarea id="e-url" class="mono" rows="3"></textarea>
+                </div>
+                <div class="helper"><span>必须以 http:// 或 https:// 开头</span><span id="e-urlcount">0 / 8192</span></div>
+                <div style="height:26px"></div>
+                <div class="field">
+                  <label for="e-note">备注</label>
+                  <textarea id="e-note" rows="4" placeholder="稍后阅读、项目资料…"></textarea>
+                </div>
+                <div class="helper"><span>可留空</span><span id="e-notecount">0 / 2000</span></div>
+                <div style="height:30px"></div>
+                <div class="actionrow" style="padding-top:0"><button class="btn danger" style="flex:1" data-act="delete"><svg><use href="#i-delete"></use></svg>删除这条链接</button></div>
+              </div>
+              <div class="gesturebar"><span></span></div>
+            </section>
+
+            <!-- 6 更新 -->
+            <section class="screen" id="s-update">
+              <div class="appbar">
+                <div class="appbar-row">
+                  <button class="iconbtn" data-back aria-label="返回"><svg><use href="#i-back"></use></svg></button>
+                  <div class="appbar-title">检查更新</div>
+                </div>
+              </div>
+              <div class="body">
+                <div style="height:12px"></div>
+                <div class="updatecard">
+                  <span class="versionpill">1.5.0 · 4.8 MB · APK</span>
+                  <h3>有新版本可以装</h3>
+                  <p>当前 1.4.0。点击后在应用内下载，完成时打开系统安装器。普通应用不能静默安装 APK，这是 Android 的限制。</p>
+                  <div class="progress" id="u-progress" style="display:none"><i></i></div>
+                  <div style="display:flex;gap:10px;margin-top:2px">
+                    <button class="btn filled" data-act="download"><svg><use href="#i-download"></use></svg>下载并安装</button>
+                    <button class="btn outlined" data-act="recheck" style="padding:0 18px;border-color:color-mix(in srgb,var(--on-primary-container) 30%,transparent);color:var(--on-primary-container)">重新检查</button>
+                  </div>
+                </div>
+                <div class="sectionlabel"><span>1.5.0 更新内容</span></div>
+                <div class="changelog">
+                  <div class="change"><span>01</span><span>链接库、待学习、设置拆成三个底部导航页面。</span></div>
+                  <div class="change"><span>02</span><span>详情页支持一键打开、复制、切换学习状态与删除。</span></div>
+                  <div class="change"><span>03</span><span>分享弹窗在多个链接时可以选择要保存的那一条。</span></div>
+                  <div class="change"><span>04</span><span>修复深色模式下状态标签对比度过低的问题。</span></div>
+                </div>
+                <div style="height:26px"></div>
+              </div>
+              <div class="gesturebar"><span></span></div>
+            </section>
+
+            <!-- 7 调试台 -->
+            <section class="screen" id="s-console">
+              <div class="appbar">
+                <div class="appbar-row">
+                  <button class="iconbtn" data-back aria-label="返回"><svg><use href="#i-back"></use></svg></button>
+                  <div class="appbar-title">API 调试台</div>
+                  <button class="iconbtn" data-act="send" aria-label="发送请求"><svg><use href="#i-open"></use></svg></button>
+                </div>
+              </div>
+              <div class="body">
+                <div style="height:14px"></div>
+                <div class="methodrow" id="methods">
+                  <button class="method" aria-selected="true">GET</button>
+                  <button class="method" aria-selected="false">POST</button>
+                  <button class="method" aria-selected="false">PATCH</button>
+                  <button class="method" aria-selected="false">DELETE</button>
+                </div>
+                <div class="field rest">
+                  <label for="c-path">路径</label>
+                  <div class="fakeinput mono" id="c-path">/api/links?limit=50&amp;learned=false</div>
+                </div>
+                <div class="sectionlabel"><span>响应</span><span>200 OK · 84 ms</span></div>
+                <div class="console"><b>GET</b> /api/links?limit=50&amp;learned=false
+
+[
+  {
+    "id": 128,
+    "url": "https://developer.android…",
+    "note": "预测性返回手势",
+    "created_at": "2026-08-26T09:12:04Z",
+    "learned": false,
+    "learned_at": null
+  },
+  … 11 条
+]</div>
+                <div style="height:26px"></div>
+              </div>
+              <div class="gesturebar"><span></span></div>
+            </section>
+
+            <!-- 8 关于 -->
+            <section class="screen" id="s-about">
+              <div class="appbar">
+                <div class="appbar-row">
+                  <button class="iconbtn" data-back aria-label="返回"><svg><use href="#i-back"></use></svg></button>
+                  <div class="appbar-title">关于</div>
+                </div>
+              </div>
+              <div class="body">
+                <div style="padding:24px 22px 22px;display:flex;flex-direction:column;align-items:center;gap:13px;text-align:center">
+                  <div style="width:72px;height:72px;border-radius:26px;background:var(--primary);color:var(--on-primary);display:grid;place-items:center">
+                    <svg style="width:34px;height:34px;fill:currentColor"><use href="#i-library"></use></svg>
+                  </div>
+                  <div style="font-size:19px;font-variation-settings:'wght' 600">链接收集</div>
+                  <div style="font-family:'Roboto Mono',monospace;font-size:11.5px;letter-spacing:.06em;color:var(--on-surface-variant)">1.4.0 (140) · Cairn Share</div>
+                </div>
+                <div class="notecard" style="margin-top:4px">
+                  <span class="k">数据说明</span>
+                  <span class="v" style="font-size:13px;line-height:1.75;color:var(--on-surface-variant)">接口不做登录与鉴权，所有保存的链接都按公开数据处理。不要提交包含私密信息的链接。</span>
+                </div>
+                <div style="height:14px"></div>
+                <button class="row"><svg class="rowicon"><use href="#i-open"></use></svg>
+                  <span class="rowmain"><span class="rowtitle">源码仓库</span><span class="rowsub">github.com/alpenl/cairn-share</span></span>
+                  <svg class="chevron"><use href="#i-chevron"></use></svg></button>
+                <button class="row"><svg class="rowicon"><use href="#i-info"></use></svg>
+                  <span class="rowmain"><span class="rowtitle">开源许可</span><span class="rowsub cn">MIT · 含第三方组件清单</span></span>
+                  <svg class="chevron"><use href="#i-chevron"></use></svg></button>
+              </div>
+              <div class="gesturebar"><span></span></div>
+            </section>
+          </div>
+
+          <div class="scrim" id="scrim"></div>
+          <div class="sheet" id="sheet">
+            <div class="handle"></div>
+            <h3>保存到链接库</h3>
+            <p class="sub">从「知乎」分享过来，发现 2 个链接。</p>
+            <div style="overflow-y:auto">
+              <div class="pick" data-pick aria-selected="true">
+                <span class="radio"></span>
+                <span><span class="t">Android 16 的预测性返回</span><span class="u">https://developer.android.com/guide/navigation/predictive-back-gesture?hl=zh-cn</span></span>
+              </div>
+              <div class="pick" data-pick aria-selected="false">
+                <span class="radio"></span>
+                <span><span class="t">分享来源页</span><span class="u">https://zhuanlan.zhihu.com/p/6712349?utm_source=share</span></span>
+              </div>
+              <div style="height:10px"></div>
+              <div class="field rest">
+                <label for="sh-note">备注</label>
+                <textarea id="sh-note" rows="2" placeholder="稍后阅读、项目资料…"></textarea>
+              </div>
+              <div class="helper"><span>可留空</span><span>0 / 2000</span></div>
+            </div>
+            <div style="display:flex;gap:10px;padding:20px 22px 0">
+              <button class="btn tonal" style="flex:1" data-act="closesheet">取消</button>
+              <button class="btn filled" style="flex:2" data-act="savesheet"><svg><use href="#i-check"></use></svg>保存</button>
+            </div>
+          </div>
+          <div class="dialog" id="dialog">
+            <h3>删除这条链接？</h3>
+            <p>删除后无法恢复，云端记录也会一起移除。</p>
+            <div class="acts">
+              <button class="btn text" data-act="closedialog">取消</button>
+              <button class="btn text" style="color:var(--error)" data-act="confirmdelete">删除</button>
+            </div>
+          </div>
+          <div class="snackbar" id="snackbar"><span id="snacktext">已保存</span><b data-act="undo">撤销</b></div>
+        </div>
+      </div>
+      <p class="hint">点手机里的任何东西 · 8 个页面已连通</p>
+    </div>
+
+    <div class="notes">
+      <section>
+        <div class="sec"><span class="num">01</span><h2>页面地图</h2><span class="rule"></span></div>
+        <p class="lead">底部导航固定三个主页面，横向切换不入栈；详情、编辑、更新、调试台、关于以栈的方式压在上层，返回箭头逐级回退。分享弹窗不属于导航栈，它由系统 <code>ACTION_SEND</code> 直接拉起。点下面任意一格可以跳过去。</p>
+        <div class="flow" id="flowmap"></div>
+      </section>
+
+      <section>
+        <div class="sec"><span class="num">02</span><h2>色彩</h2><span class="rule"></span></div>
+        <p class="lead">主色取深松绿，容器色刻意降到低饱和，避免整屏发甜；未学习用赭石作独立语义色，跟主色分工明确。中性色带一点绿偏，和主色同源。</p>
+        <div class="palette">
+          <div class="sw"><div class="chipc" style="background:#145C52"></div><div class="meta"><span class="hex">#145C52</span><span class="use">主色 · 按钮、FAB、进度</span></div></div>
+          <div class="sw"><div class="chipc" style="background:#CDE2DB"></div><div class="meta"><span class="hex">#CDE2DB</span><span class="use">容器 · 导航药丸、已学习</span></div></div>
+          <div class="sw"><div class="chipc" style="background:#EFDCC3"></div><div class="meta"><span class="hex">#EFDCC3</span><span class="use">赭石 · 待学习状态</span></div></div>
+          <div class="sw"><div class="chipc" style="background:#EFF1ED"></div><div class="meta"><span class="hex">#EFF1ED</span><span class="use">面 · 卡片、搜索、导航栏</span></div></div>
+          <div class="sw"><div class="chipc" style="background:#83CBB9"></div><div class="meta"><span class="hex">#83CBB9</span><span class="use">深色模式主色</span></div></div>
+        </div>
+      </section>
+
+      <section>
+        <div class="sec"><span class="num">03</span><h2>规格</h2><span class="rule"></span></div>
+        <dl class="speclist">
+          <div class="spec"><dt>字体</dt><dd>界面全部用 Roboto Flex，大标题走 <em>opsz 48 / wdth 103 / wght 500</em>，正文回到 opsz 20；链接、ID、时间戳一律 Roboto Mono，方便逐字核对 URL。</dd></div>
+          <div class="spec"><dt>层次</dt><dd>只用三层：底面、容器面、卡片描边。不堆阴影，分隔靠 <em>9% 不透明度的发丝线</em>，悬停时线消失、底色浮起。</dd></div>
+          <div class="spec"><dt>列表项</dt><dd>站点色相由域名哈希决定，同一站点永远同色；标题两行、备注一行、站点与时间同排；待学习只用一个小圆点提示，不铺满标签。</dd></div>
+          <div class="spec"><dt>形状</dt><dd>头像 14dp 圆角方块，列表项 20dp，卡片 20–26dp，弹窗 30dp，按钮全圆角，筛选 chip 10dp——每一档尺寸对应一个层级。</dd></div>
+          <div class="spec"><dt>动效</dt><dd>入栈 380ms、出栈 320ms，M3 emphasized 曲线；FAB 悬停抬升 2dp；全部尊重 <em>prefers-reduced-motion</em>。</dd></div>
+          <div class="spec"><dt>反馈</dt><dd>写操作走 snackbar 并给撤销；删除这类不可逆操作先弹确认对话框；筛选 chip 自带计数，空态各写各的文案。</dd></div>
+          <div class="spec"><dt>主题</dt><dd>浅色与深色两套完整令牌，跟随系统；状态标签与徽标在两套下分别校准过对比度。</dd></div>
+        </dl>
+      </section>
+    </div>
+  </div>
+
+  <footer>交互原型 · 数据为示例内容 · 接口契约沿用 GET/POST/PATCH/DELETE /api/links · 本次改动只在客户端表现层</footer>
+</div>
+
+<script>
+(function(){
+  const links=[
+    {id:128,title:"Android 16 的预测性返回手势",url:"https://developer.android.com/guide/navigation/predictive-back-gesture?hl=zh-cn",note:"Activity 侧要先 opt-in，回头对照我们的返回栈改一遍。",created:"08-26 17:12",learned:false,learnedAt:null},
+    {id:127,title:"Compose 中的状态提升与单向数据流",url:"https://developer.android.com/develop/ui/compose/state?hl=zh-cn#state-hoisting",note:"LinkLibraryModel 现在的写法基本对上了。",created:"08-26 09:40",learned:false,learnedAt:null},
+    {id:126,title:"Cloudflare D1 的批量写入与事务",url:"https://developers.cloudflare.com/d1/worker-api/d1-database/#batch",note:"以后要一次导入书签就用 batch。",created:"08-25 22:05",learned:false,learnedAt:null},
+    {id:125,title:"Material 3 Expressive 的动效规范",url:"https://m3.material.io/styles/motion/overview",note:"",created:"08-25 14:31",learned:false,learnedAt:null},
+    {id:124,title:"用 FileProvider 在应用内安装 APK",url:"https://developer.android.com/reference/androidx/core/content/FileProvider",note:"更新流程踩过的坑，权限那段要重读。",created:"08-24 20:18",learned:true,learnedAt:"08-25 08:02"},
+    {id:123,title:"URL 规范化：什么时候该保留 fragment",url:"https://url.spec.whatwg.org/#concept-url-fragment",note:"结论：分享入口一律不动原始串。",created:"08-23 11:47",learned:true,learnedAt:"08-24 19:20"},
+    {id:122,title:"Worker 里的 CORS 预检处理",url:"https://developers.cloudflare.com/workers/examples/cors-header-proxy/",note:"",created:"08-22 16:03",learned:true,learnedAt:"08-23 09:15"}
+  ];
+  const tabs=[
+    {id:"s-library",label:"链接库",icon:"i-library"},
+    {id:"s-queue",label:"待学习",icon:"i-inbox",badge:true},
+    {id:"s-settings",label:"设置",icon:"i-settings"}
+  ];
+  const pages=[
+    {id:"s-library",t:"链接库",d:"搜索、筛选、全部收藏"},
+    {id:"s-queue",t:"待学习",d:"按时间排的阅读队列"},
+    {id:"s-settings",t:"设置",d:"云端、分享、应用"},
+    {id:"s-detail",t:"链接详情",d:"打开、复制、标记、删除"},
+    {id:"s-edit",t:"编辑链接",d:"改 URL 与备注"},
+    {id:"s-update",t:"检查更新",d:"下载 APK 并安装"},
+    {id:"s-console",t:"API 调试台",d:"原始请求与响应"},
+    {id:"s-about",t:"关于",d:"版本与数据说明"}
+  ];
+  const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+  const state={filter:"all",q:"",current:"s-library",stack:[],currentId:128};
+
+  const host=u=>{try{return new URL(u).host.replace(/^www\./,"")}catch(e){return u}};
+  const get=id=>links.find(l=>l.id===id);
+  function hue(h){let n=0;for(const c of h)n=(n*31+c.charCodeAt(0))%360;return n}
+  function tone(h){
+    const dark=matchMedia("(prefers-color-scheme:dark)").matches&&document.documentElement.dataset.theme!=="light"
+      ||document.documentElement.dataset.theme==="dark";
+    const H=hue(h);
+    return dark
+      ? {bg:`hsl(${H} 26% 22%)`,fg:`hsl(${H} 42% 76%)`}
+      : {bg:`hsl(${H} 34% 90%)`,fg:`hsl(${H} 46% 30%)`};
+  }
+  const avatar=(u,cls)=>{const h=host(u),t=tone(h);
+    return `<span class="avatar ${cls||''}" style="background:${t.bg};color:${t.fg}">${h.charAt(0).toUpperCase()}</span>`};
+
+  function renderNav(){
+    const todo=links.filter(l=>!l.learned).length;
+    $$("[data-nav]").forEach(nav=>{
+      const owner=nav.closest(".screen").id;
+      nav.innerHTML=tabs.map(t=>`
+        <button class="navitem" data-tab="${t.id}" aria-selected="${t.id===owner}">
+          <span class="navpill ${t.badge&&todo?'navbadge':''}" ${t.badge&&todo?`data-count="${todo}"`:''}>
+            <svg><use href="#${t.icon}"></use></svg>
+          </span>${t.label}
+        </button>`).join("");
+    });
+  }
+  function renderFlow(){
+    $("#flowmap").innerHTML=pages.map((p,i)=>`
+      <button class="flowcard" data-jump="${p.id}" aria-current="${p.id===state.current}">
+        <span class="n">${String(i+1).padStart(2,"0")}</span>
+        <span class="t">${p.t}</span><span class="d">${p.d}</span>
+      </button>`).join("");
+  }
+  function itemHTML(l){
+    return `<button class="item" data-open="${l.id}">
+      ${avatar(l.url)}
+      <span class="item-main">
+        <span class="item-title">${l.title}</span>
+        <span class="item-sub">${host(l.url)}<i class="dot"></i>${l.created}</span>
+        ${l.note?`<span class="item-note">${l.note}</span>`:""}
+      </span>
+      <span class="flag ${l.learned?'done':''}"></span>
+    </button>`;
+  }
+  const emptyHTML=m=>`<div class="empty"><span class="glyph"><svg><use href="#i-inbox"></use></svg></span><p>${m}</p></div>`;
+
+  function renderStats(){
+    const total=links.length,done=links.filter(l=>l.learned).length,todo=total-done;
+    const pct=total?Math.round(done/total*100):0;
+    const c=2*Math.PI*21.5;
+    $("#ring-val").setAttribute("stroke-dasharray",`${(c*pct/100).toFixed(1)} ${c.toFixed(1)}`);
+    $("#ring-num").textContent=pct+"%";
+    $("#lib-sub").textContent=`${total} 条收藏 · ${todo} 条待读`;
+    $("#q-sub").textContent=todo?`${todo} 条排队中，先进先读`:"队列已清空";
+    const oldest=links.filter(l=>!l.learned).slice(-1)[0];
+    $("#sum-sub").textContent=todo?`还有 ${todo} 条排在待学习里，最早的一条来自 ${oldest.created.split(" ")[0]}。`:"待学习队列已经清空，随时可以再收藏。";
+    $("[data-count='all']").textContent=total;
+    $("[data-count='todo']").textContent=todo;
+    $("[data-count='done']").textContent=done;
+  }
+  function renderList(){
+    const q=state.q.trim().toLowerCase();
+    const rows=links.filter(l=>{
+      if(state.filter==="todo"&&l.learned)return false;
+      if(state.filter==="done"&&!l.learned)return false;
+      if(q&&!(l.title+l.url+l.note).toLowerCase().includes(q))return false;
+      return true;
+    });
+    $("#list").innerHTML=rows.length?rows.map(itemHTML).join("")
+      :emptyHTML(q?`没有匹配「${state.q}」的链接，换个关键词试试。`:state.filter==="todo"?"待学习的都读完了。":state.filter==="done"?"还没有标记过已学习的链接。":"还没有收藏链接，从任意应用分享一条试试。");
+    const queue=links.filter(l=>!l.learned).slice().reverse();
+    $("#queue").innerHTML=queue.length?queue.map(itemHTML).join(""):emptyHTML("队列清空了，新分享的链接会排到这里。");
+    renderStats(); renderNav();
+  }
+  function show(id,back){
+    const from=$("#"+state.current),to=$("#"+id);
+    if(!to||id===state.current)return;
+    from.classList.remove("active","enter-fwd","enter-back");
+    to.classList.add("active");to.classList.remove("enter-fwd","enter-back");
+    void to.offsetWidth;
+    to.classList.add(back?"enter-back":"enter-fwd");
+    const b=to.querySelector(".body");if(b)b.scrollTop=0;
+    const bar=to.querySelector(".appbar");if(bar)bar.classList.remove("scrolled");
+    state.current=id;renderFlow();
+  }
+  const push=id=>{state.stack.push(state.current);show(id,false)};
+  const pop=()=>show(state.stack.pop()||"s-library",true);
+  const goTab=id=>{state.stack=[];show(id,false)};
+
+  function fillDetail(){
+    const l=get(state.currentId);if(!l)return;
+    const h=host(l.url),t=tone(h);
+    $("#d-id").textContent="链接 #"+l.id;
+    $("#d-title").textContent=l.title;
+    $("#d-url").textContent=l.url;
+    $("#d-host").textContent=h;
+    const av=$("#d-avatar");av.textContent=h.charAt(0).toUpperCase();av.style.background=t.bg;av.style.color=t.fg;
+    $("#d-note").textContent=l.note||"没有备注";
+    $("#d-note").style.color=l.note?"":"var(--on-surface-variant)";
+    $("#d-created").textContent=l.created;
+    $("#d-learned").textContent=l.learnedAt||"—";
+    $("#d-rawid").textContent="#"+l.id;
+    const st=$("#d-state");
+    st.className="state "+(l.learned?"done":"todo");
+    st.innerHTML=`<i></i>${l.learned?"已学习":"待学习"}`;
+    $("#d-learnbtn").innerHTML=`<svg><use href="#${l.learned?"i-undo":"i-check"}"></use></svg>`;
+    $("#d-learnbtn").setAttribute("aria-label",l.learned?"改回待学习":"标为已学习");
+    $("#e-url").value=l.url;$("#e-note").value=l.note;counts();
+  }
+  const counts=()=>{
+    $("#e-urlcount").textContent=$("#e-url").value.length+" / 8192";
+    $("#e-notecount").textContent=$("#e-note").value.length+" / 2000";
+  };
+  let timer;
+  function snack(text,undo){
+    $("#snacktext").textContent=text;
+    $("[data-act='undo']").style.display=undo?"":"none";
+    $("#snackbar").classList.add("show");
+    clearTimeout(timer);timer=setTimeout(()=>$("#snackbar").classList.remove("show"),2800);
+  }
+  const openSheet=()=>{$("#sheet").classList.add("show");$("#scrim").classList.add("show")};
+  const closeSheet=()=>{$("#sheet").classList.remove("show");$("#scrim").classList.remove("show")};
+  const openDialog=()=>{$("#dialog").classList.add("show");$("#scrim").classList.add("show")};
+  const closeDialog=()=>{$("#dialog").classList.remove("show");$("#scrim").classList.remove("show")};
+
+  document.addEventListener("click",e=>{
+    const t=e.target.closest("[data-open],[data-tab],[data-go],[data-back],[data-act],[data-jump],[data-filter],[data-pick],.method");
+    if(!t)return;
+    if(t.dataset.jump){
+      const id=t.dataset.jump;
+      if(tabs.some(x=>x.id===id))goTab(id);else{state.stack=["s-library"];show(id,false)}
+      return;
+    }
+    if(t.dataset.open){state.currentId=+t.dataset.open;fillDetail();push("s-detail");return}
+    if(t.dataset.tab){goTab(t.dataset.tab);return}
+    if(t.dataset.go){push(t.dataset.go);return}
+    if(t.hasAttribute("data-back")){pop();return}
+    if(t.dataset.filter){
+      state.filter=t.dataset.filter;
+      $$("#filters .chip").forEach(c=>c.setAttribute("aria-selected",c===t));
+      renderList();return;
+    }
+    if(t.hasAttribute("data-pick")){$$("[data-pick]").forEach(p=>p.setAttribute("aria-selected",p===t));return}
+    if(t.classList.contains("method")){
+      $$(".method").forEach(m=>m.setAttribute("aria-selected",m===t));
+      $("#c-path").textContent={GET:"/api/links?limit=50&learned=false",POST:"/api/links",PATCH:"/api/links/128",DELETE:"/api/links/128"}[t.textContent];
+      return;
+    }
+    const l=get(state.currentId);
+    switch(t.dataset.act){
+      case "newlink":openSheet();break;
+      case "closesheet":closeSheet();break;
+      case "savesheet":{
+        closeSheet();
+        const sel=$$("[data-pick]").find(p=>p.getAttribute("aria-selected")==="true");
+        links.unshift({id:Math.max(...links.map(x=>x.id))+1,title:sel.querySelector(".t").textContent.trim(),
+          url:sel.querySelector(".u").textContent.trim(),note:$("#sh-note").value.trim(),created:"刚刚",learned:false,learnedAt:null});
+        $("#sh-note").value="";renderList();snack("已保存到链接库",true);break;
+      }
+      case "toggle-learn":
+        l.learned=!l.learned;l.learnedAt=l.learned?"刚刚":null;
+        fillDetail();renderList();snack(l.learned?"已标为已学习":"已改回待学习",true);break;
+      case "markall":{
+        const n=links.filter(x=>!x.learned).length;
+        if(!n){snack("队列已经是空的",false);break}
+        links.forEach(x=>{if(!x.learned){x.learned=true;x.learnedAt="刚刚"}});
+        renderList();snack(`已标记 ${n} 条为已学习`,true);break;
+      }
+      case "open":snack("已在浏览器中打开",false);break;
+      case "copy":snack("链接已复制",false);break;
+      case "delete":openDialog();break;
+      case "closedialog":closeDialog();break;
+      case "confirmdelete":{
+        closeDialog();
+        const i=links.findIndex(x=>x.id===state.currentId);
+        if(i>-1)links.splice(i,1);
+        state.stack=[];show("s-library",true);renderList();snack("已删除链接",true);break;
+      }
+      case "saveedit":{
+        const url=$("#e-url").value.trim();
+        if(!/^https?:\/\//i.test(url)){snack("链接必须以 http:// 或 https:// 开头",false);break}
+        l.url=url;l.note=$("#e-note").value.trim();
+        fillDetail();renderList();pop();snack("已保存修改",false);break;
+      }
+      case "sort":snack("已按收藏时间倒序",false);break;
+      case "server":snack("服务器地址：share.alpenl.com",false);break;
+      case "toggle":{
+        const sw=t.querySelector(".switch");sw.classList.toggle("on");
+        snack(sw.classList.contains("on")?"已开启":"已关闭",false);break;
+      }
+      case "download":
+        $("#u-progress").style.display="";snack("正在下载 1.5.0 APK…",false);
+        setTimeout(()=>{$("#u-progress").style.display="none";snack("系统安装器已打开",false)},2600);break;
+      case "recheck":snack("已是最新检查结果",false);break;
+      case "send":snack("请求已发送 · 200 OK",false);break;
+      case "undo":snack("已撤销",false);break;
+    }
+  });
+  $("#scrim").addEventListener("click",()=>{closeSheet();closeDialog()});
+  $("#q").addEventListener("input",e=>{state.q=e.target.value;renderList()});
+  $("#e-url").addEventListener("input",counts);
+  $("#e-note").addEventListener("input",counts);
+  $$(".body").forEach(b=>b.addEventListener("scroll",()=>{
+    const bar=b.parentElement.querySelector(".appbar");
+    if(bar)bar.classList.toggle("scrolled",b.scrollTop>6);
+  }));
+  matchMedia("(prefers-color-scheme:dark)").addEventListener("change",()=>{renderList();fillDetail()});
+
+  renderList();renderFlow();fillDetail();
+})();
+</script>

@@ -83,20 +83,34 @@ D1 使用参数化查询，MVP 允许重复链接，不做抓取或去重。直�
 
 Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，用户可见
 名称是 `链接收集`。Manifest 声明 `INTERNET`、`REQUEST_INSTALL_PACKAGES`、桌面启动
-入口、系统分享入口和用于 APK 安装的 `FileProvider`。
+入口、系统分享入口和用于 APK 安装的 `FileProvider`。界面设计基线在
+`design/cairn-links-app.html`，当前 Android 客户端按该原型实现 8 个页面和 1 个分享
+弹层。
+
+桌面启动入口打开完整应用壳：
+
+- 底部导航包含“链接库”“待学习”“设置”三个主页面，主页面之间切换不累积返回历史。
+- “链接详情”“编辑链接”“检查更新”“API 调试台”“关于”是独立下钻页面，应用栏返回和
+  系统返回逐级退出。
+- “链接库”提供总览、搜索、筛选、周进度、链接详情入口和手动添加 FAB。
+- “待学习”只展示未学习链接，按收藏时间先进先读，并支持批量标记已学习。
+- “设置”展示只读服务器地址、分享偏好、更新入口、API 调试台入口和关于入口。
+- 系统 `ACTION_SEND` 不进入应用壳，而是打开透明 Activity 上的 Material bottom sheet。
 
 分享流程：
 
 1. 接收 `Intent.ACTION_SEND` + `text/plain`。
 2. 从 intent data、ClipData URI、`EXTRA_TEXT` 和 ClipData text 中提取 HTTP(S) URL。
 3. 单链接自动选中但不自动提交；多链接先让用户选择。
-4. 用户填写可选备注后点击“保存”。
+4. 用户填写可选备注后点击“保存”。默认保留完整 URL；设置中关闭“保留完整链接”后，
+   提交前会移除 query 与 fragment 并在 UI 中展示实际提交值。
 5. App 直接通过 Android/Java 原生 HTTPS API POST 到 Cloudflare Worker。
-6. 成功后关闭；失败留在当前界面，用户可手动重试。
+6. 默认成功后关闭；设置中关闭“保存后立即关闭”后，成功状态会保留在弹层里。失败留在
+   当前界面，用户可手动重试。
 
-直接从桌面打开 App 时，不会自动提交任何数据，而是显示云端链接库。用户可以查看全部
-收藏，按未学习/已学习筛选，按链接或备注搜索，并对单条链接进行打开、改学习状态、编辑
-备注/URL 和删除。
+直接从桌面打开 App 时，不会自动提交任何数据。链接库和待学习页面共享同一份云端数据；
+详情页只通过链接 ID 进入，必要时调用 `GET /api/links/:id` 补齐记录。打开、复制、学习
+状态切换、编辑和删除都是真实网络操作；删除前必须确认，删除后不会伪造撤销。
 
 应用内更新：
 
@@ -108,8 +122,9 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 
 普通 Android 应用不能静默安装 APK，最终确认安装仍由系统安装器完成，这是系统安全边界。
 
-没有账号、token、server 设置页、本地队列、Room、WorkManager、Keystore、Todo、
-Reader、旧 Cairn/WebTag endpoint 或后台同步。
+仍然没有账号、token、可编辑 server、多服务器切换、Room、WorkManager、Keystore、
+Reader、旧 Cairn/WebTag endpoint 或后台同步。设置页中的服务器地址只读，生产用户不能
+切换到任意 API 主机；API 调试台也被限制在当前配置服务器下。
 
 ## 本地构建
 

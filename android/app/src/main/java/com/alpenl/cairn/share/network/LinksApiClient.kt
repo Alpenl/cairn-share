@@ -30,6 +30,27 @@ internal sealed interface LinkListResult {
     data class Failed(val kind: FailureKind) : LinkListResult
 }
 
+internal sealed interface LinkPageResult {
+    data class Loaded(val page: LinkPage) : LinkPageResult
+    data class Failed(val kind: FailureKind) : LinkPageResult
+}
+
+internal data class LinkPage(
+    val items: List<SavedLink>,
+    val nextBeforeId: Int?,
+)
+
+internal sealed interface LinkGetResult {
+    data class Loaded(val link: SavedLink) : LinkGetResult
+    data object NotFound : LinkGetResult
+    data class Failed(val kind: FailureKind) : LinkGetResult
+}
+
+internal sealed interface LinkCreateResult {
+    data class Created(val link: SavedLink) : LinkCreateResult
+    data class Failed(val kind: FailureKind) : LinkCreateResult
+}
+
 internal sealed interface LinkMutationResult {
     data class Updated(val link: SavedLink) : LinkMutationResult
     data object Deleted : LinkMutationResult
@@ -42,8 +63,33 @@ internal class LinksApiClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
-    fun list(filter: LinkFilter, query: String): LinkListResult {
-        val endpoint = URL(listUrl(filter, query))
+    fun list(filter: LinkFilter, query: String): LinkListResult =
+        listAll(filter, query)
+
+    fun listAll(
+        filter: LinkFilter,
+        query: String,
+        maxPages: Int = 50,
+    ): LinkListResult {
+        val collected = mutableListOf<SavedLink>()
+        var beforeId: Int? = null
+        repeat(maxPages) {
+            when (val result = listPage(filter, query, beforeId)) {
+                is LinkPageResult.Failed -> return LinkListResult.Failed(result.kind)
+                is LinkPageResult.Loaded -> {
+                    collected += result.page.items
+                    beforeId = result.page.nextBeforeId
+                    if (beforeId == null) {
+                        return LinkListResult.Loaded(collected)
+                    }
+                }
+            }
+        }
+        return LinkListResult.Failed(FailureKind.Server)
+    }
+
+    fun listPage(filter: LinkFilter, query: String, beforeId: Int? = null): LinkPageResult {
+        val endpoint = URL(listUrl(filter, query, beforeId))
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
@@ -52,16 +98,71 @@ internal class LinksApiClient(
             val status = connection.responseCode
             val body = responseBody(connection)
             if (status == HttpURLConnection.HTTP_OK) {
-                LinkListResult.Loaded(LinkJson.decodeList(body))
+                LinkPageResult.Loaded(LinkJson.decodePage(body))
             } else {
-                LinkListResult.Failed(FailureKind.Server)
+                LinkPageResult.Failed(FailureKind.Server)
             }
         } catch (_: SocketTimeoutException) {
-            LinkListResult.Failed(FailureKind.Timeout)
+            LinkPageResult.Failed(FailureKind.Timeout)
         } catch (_: IOException) {
-            LinkListResult.Failed(FailureKind.Network)
+            LinkPageResult.Failed(FailureKind.Network)
         } catch (_: JSONException) {
-            LinkListResult.Failed(FailureKind.Server)
+            LinkPageResult.Failed(FailureKind.Server)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    fun get(id: Int): LinkGetResult {
+        val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id")
+        val connection = endpoint.openConnection() as HttpURLConnection
+        return try {
+            connection.requestMethod = "GET"
+            configure(connection)
+
+            val status = connection.responseCode
+            val body = responseBody(connection)
+            when (status) {
+                HttpURLConnection.HTTP_OK -> LinkGetResult.Loaded(LinkJson.decodeLink(JSONObject(body)))
+                HttpURLConnection.HTTP_NOT_FOUND -> LinkGetResult.NotFound
+                else -> LinkGetResult.Failed(FailureKind.Server)
+            }
+        } catch (_: SocketTimeoutException) {
+            LinkGetResult.Failed(FailureKind.Timeout)
+        } catch (_: IOException) {
+            LinkGetResult.Failed(FailureKind.Network)
+        } catch (_: JSONException) {
+            LinkGetResult.Failed(FailureKind.Server)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    fun create(url: String, note: String): LinkCreateResult {
+        val endpoint = URL("${baseUrl.trimEnd('/')}/api/links")
+        val body = LinkRequestJson.encode(url, note).toByteArray(StandardCharsets.UTF_8)
+        val connection = endpoint.openConnection() as HttpURLConnection
+        return try {
+            connection.requestMethod = "POST"
+            configure(connection)
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            connection.setFixedLengthStreamingMode(body.size)
+            connection.outputStream.use { it.write(body) }
+
+            val status = connection.responseCode
+            val response = responseBody(connection)
+            if (status == HttpURLConnection.HTTP_CREATED) {
+                LinkCreateResult.Created(LinkJson.decodeLink(JSONObject(response)))
+            } else {
+                LinkCreateResult.Failed(FailureKind.Server)
+            }
+        } catch (_: SocketTimeoutException) {
+            LinkCreateResult.Failed(FailureKind.Timeout)
+        } catch (_: IOException) {
+            LinkCreateResult.Failed(FailureKind.Network)
+        } catch (_: JSONException) {
+            LinkCreateResult.Failed(FailureKind.Server)
         } finally {
             connection.disconnect()
         }
@@ -124,11 +225,14 @@ internal class LinksApiClient(
         }
     }
 
-    private fun listUrl(filter: LinkFilter, query: String): String {
+    private fun listUrl(filter: LinkFilter, query: String, beforeId: Int?): String {
         val params = mutableListOf(
             "limit=100",
             "learned=${filter.apiValue}",
         )
+        if (beforeId != null) {
+            params += "before_id=$beforeId"
+        }
         val trimmed = query.trim()
         if (trimmed.isNotEmpty()) {
             params += "q=${URLEncoder.encode(trimmed, "UTF-8")}"
@@ -161,10 +265,26 @@ internal object LinkJson {
     }
 
     fun decodeList(json: String): List<SavedLink> {
-        val items = JSONObject(json).optJSONArray("items") ?: JSONArray()
-        return List(items.length()) { index ->
-            decodeLink(items.getJSONObject(index))
-        }
+        return decodePage(json).items
+    }
+
+    fun decodePage(json: String): LinkPage {
+        val page = JSONObject(json)
+        val items = page.optJSONArray("items") ?: JSONArray()
+        return LinkPage(
+            items = List(items.length()) { index ->
+                decodeLink(items.getJSONObject(index))
+            },
+            nextBeforeId = page.opt("next_before_id")
+                ?.takeUnless { it == JSONObject.NULL }
+                ?.let {
+                    when (it) {
+                        is Number -> it.toInt()
+                        is String -> it.toIntOrNull()
+                        else -> null
+                    }
+                },
+        )
     }
 
     fun decodeLink(json: JSONObject): SavedLink =

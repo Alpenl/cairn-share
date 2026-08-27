@@ -7,7 +7,9 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ActivityScenario
@@ -68,7 +70,6 @@ class ShareActivityInstrumentedTest {
         ActivityScenario.launch<ShareActivity>(
             shareIntent("https://example.com/a?v=1 https://example.com/a?v=2", api),
         ).use {
-            compose.onAllNodesWithTag("note").assertCountEquals(0)
             compose.onNodeWithTag("candidate_1").performClick()
             compose.onNodeWithTag("selected_label").assertTextContains("example.com/a")
 
@@ -147,23 +148,32 @@ class ShareActivityInstrumentedTest {
         val api = startLibraryServer()
         val intent = Intent(Intent.ACTION_MAIN)
             .addCategory(Intent.CATEGORY_LAUNCHER)
-            .setClass(targetContext(), ShareActivity::class.java)
+            .setClass(targetContext(), LauncherActivity::class.java)
             .putExtra(ShareActivity.EXTRA_API_BASE_URL, api)
             .putExtra(ShareActivity.EXTRA_RELEASES_API_URL, server!!.url("/latest").toString())
 
-        ActivityScenario.launch<ShareActivity>(intent).use {
+        ActivityScenario.launch<LauncherActivity>(intent).use {
             compose.waitUntil(5_000) {
                 runCatching {
                     compose.onAllNodesWithTag("link_2").assertCountEquals(1)
+                    true
+                }.getOrDefault(false)
+            }
+            compose.onAllNodesWithTag("note").assertCountEquals(0)
+            compose.onAllNodesWithTag("save").assertCountEquals(0)
+
+            compose.onNodeWithTag("nav_settings").performClick()
+            compose.onNodeWithText("检查更新").performClick()
+            compose.waitUntil(5_000) {
+                runCatching {
                     compose.onNodeWithTag("update_title").assertTextContains("发现新版本 9.9.9", substring = true)
                     true
                 }.getOrDefault(false)
             }
-            compose.onNodeWithTag("library_status").assertTextContains("已加载", substring = true)
             compose.onNodeWithTag("download_update").assertIsEnabled()
-            compose.onAllNodesWithTag("note").assertCountEquals(0)
-            compose.onAllNodesWithTag("save").assertCountEquals(0)
 
+            compose.onNodeWithContentDescription("返回").performClick()
+            compose.onNodeWithTag("nav_library").performClick()
             compose.onNodeWithTag("filter_unlearned").performClick()
             compose.waitUntil(5_000) {
                 runCatching {
@@ -172,20 +182,12 @@ class ShareActivityInstrumentedTest {
                 }.getOrDefault(false)
             }
 
+            compose.onNodeWithTag("link_1").performClick()
             compose.onNodeWithTag("toggle_1").performClick()
             val toggleRequest = takeRequest("PATCH", "/api/links/1")
             assertEquals(true, JSONObject(toggleRequest.body.readUtf8()).getBoolean("learned"))
 
-            compose.onNodeWithTag("filter_unlearned").performClick()
-            compose.waitUntil(5_000) {
-                runCatching {
-                    compose.onAllNodesWithTag("link_1").assertCountEquals(1)
-                    true
-                }.getOrDefault(false)
-            }
-
-            compose.onNodeWithTag("edit_1").performClick()
-            compose.onAllNodesWithTag("edit_panel").assertCountEquals(1)
+            compose.onNodeWithContentDescription("编辑").performClick()
             compose.onNodeWithTag("edit_note").performTextInput(" / 更新")
             compose.onNodeWithTag("save_edit").performClick()
             val editRequest = takeRequest("PATCH", "/api/links/1")
@@ -195,17 +197,17 @@ class ShareActivityInstrumentedTest {
 
             compose.waitUntil(5_000) {
                 runCatching {
-                    compose.onNodeWithTag("library_status").assertTextContains("已保存修改", substring = true)
+                    compose.onNodeWithContentDescription("编辑").assertIsEnabled()
                     true
                 }.getOrDefault(false)
             }
-
-            compose.onNodeWithTag("edit_1").performClick()
+            compose.onNodeWithContentDescription("编辑").performClick()
             compose.onNodeWithTag("delete_editing").performClick()
+            compose.onNodeWithTag("confirm_delete").performClick()
             takeRequest("DELETE", "/api/links/1")
             compose.waitUntil(5_000) {
                 runCatching {
-                    compose.onNodeWithTag("library_status").assertTextContains("已删除链接", substring = true)
+                    compose.onAllNodesWithTag("link_1").assertCountEquals(0)
                     true
                 }.getOrDefault(false)
             }
