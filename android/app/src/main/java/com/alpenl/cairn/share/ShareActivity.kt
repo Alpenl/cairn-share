@@ -14,6 +14,11 @@ import androidx.lifecycle.lifecycleScope
 import com.alpenl.cairn.share.contract.UrlCandidate
 import com.alpenl.cairn.share.contract.UrlCandidateExtractor
 import com.alpenl.cairn.share.network.FailureKind
+import com.alpenl.cairn.share.network.LinkFilter
+import com.alpenl.cairn.share.network.LinkListResult
+import com.alpenl.cairn.share.network.LinkMutationResult
+import com.alpenl.cairn.share.network.LinksApiClient
+import com.alpenl.cairn.share.network.SavedLink
 import com.alpenl.cairn.share.network.ShareApiClient
 import com.alpenl.cairn.share.network.ShareSubmitResult
 import com.alpenl.cairn.share.network.UpdateApiClient
@@ -49,6 +54,17 @@ class ShareActivity : ComponentActivity() {
     private var releasesApiUrl = BuildConfig.CAIRN_SHARE_RELEASES_API_URL
     private var updateState by mutableStateOf<AppUpdateState>(AppUpdateState.Hidden)
     private var updateJob: Job? = null
+    private var libraryVisible by mutableStateOf(false)
+    private var linkFilter by mutableStateOf(LinkFilter.All)
+    private var linkSearchQuery by mutableStateOf("")
+    private var linkItems by mutableStateOf(emptyList<SavedLink>())
+    private var linkLoading by mutableStateOf(false)
+    private var linkStatus by mutableStateOf("")
+    private var editingLink by mutableStateOf<SavedLink?>(null)
+    private var editUrl by mutableStateOf("")
+    private var editNote by mutableStateOf("")
+    private var editSaving by mutableStateOf(false)
+    private var libraryJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +86,19 @@ class ShareActivity : ComponentActivity() {
                     onSave = ::submitSelected,
                     updateState = updateState,
                     currentVersionName = BuildConfig.VERSION_NAME,
+                    libraryModel = libraryModel(),
+                    onFilterChange = ::changeFilter,
+                    onSearchQueryChange = ::changeSearchQuery,
+                    onSearch = ::loadLinks,
+                    onRefreshLinks = ::loadLinks,
+                    onOpenLink = ::openLink,
+                    onToggleLearned = ::toggleLearned,
+                    onEditLink = ::startEdit,
+                    onEditUrlChange = ::changeEditUrl,
+                    onEditNoteChange = ::changeEditNote,
+                    onSaveEdit = ::saveEdit,
+                    onCancelEdit = ::cancelEdit,
+                    onDeleteEditing = ::deleteEditing,
                     onCheckUpdate = ::checkForUpdates,
                     onOpenUpdate = ::openUpdate,
                     onClose = ::finish,
@@ -85,6 +114,8 @@ class ShareActivity : ComponentActivity() {
         submitJob = null
         updateJob?.cancel()
         updateJob = null
+        libraryJob?.cancel()
+        libraryJob = null
         submitGeneration += 1
         note = ""
         status = null
@@ -103,6 +134,7 @@ class ShareActivity : ComponentActivity() {
     override fun onDestroy() {
         submitJob?.cancel()
         updateJob?.cancel()
+        libraryJob?.cancel()
         super.onDestroy()
     }
 
@@ -118,14 +150,19 @@ class ShareActivity : ComponentActivity() {
             ?: BuildConfig.CAIRN_SHARE_RELEASES_API_URL
 
         if (intent.action == Intent.ACTION_MAIN) {
+            libraryVisible = true
             candidates = emptyList()
             selectedIndex = -1
-            status = getString(R.string.share_installed)
+            status = null
+            editingLink = null
             checkForUpdates()
+            loadLinks()
             return
         }
 
+        libraryVisible = false
         updateState = AppUpdateState.Hidden
+        editingLink = null
         if (intent.action != Intent.ACTION_SEND || intent.type != "text/plain") {
             candidates = emptyList()
             selectedIndex = -1
@@ -203,6 +240,193 @@ class ShareActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun libraryModel(): LinkLibraryModel? {
+        if (!libraryVisible) return null
+        val editing = editingLink?.let { link ->
+            LinkEditModel(
+                link = link,
+                url = editUrl,
+                note = editNote,
+                saving = editSaving,
+            )
+        }
+        return LinkLibraryModel(
+            filter = linkFilter,
+            searchQuery = linkSearchQuery,
+            items = linkItems,
+            loading = linkLoading,
+            statusText = linkStatus,
+            editing = editing,
+        )
+    }
+
+    private fun changeFilter(filter: LinkFilter) {
+        if (linkFilter == filter && linkItems.isNotEmpty()) return
+        linkFilter = filter
+        editingLink = null
+        loadLinks()
+    }
+
+    private fun changeSearchQuery(value: String) {
+        linkSearchQuery = value
+    }
+
+    private fun loadLinks() {
+        if (!libraryVisible) return
+        libraryJob?.cancel()
+        linkLoading = true
+        linkStatus = getString(R.string.library_loading)
+        libraryJob = lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                LinksApiClient(apiBaseUrl).list(linkFilter, linkSearchQuery)
+            }
+            if (!isActive) return@launch
+            linkLoading = false
+            when (result) {
+                is LinkListResult.Loaded -> {
+                    linkItems = result.items
+                    linkStatus = loadedStatus(result.items.size)
+                }
+                is LinkListResult.Failed -> {
+                    linkStatus = getString(R.string.library_load_failed)
+                }
+            }
+        }
+    }
+
+    private fun loadedStatus(size: Int): String =
+        if (size > 0) {
+            getString(R.string.library_loaded_count, size)
+        } else if (linkSearchQuery.isBlank()) {
+            when (linkFilter) {
+                LinkFilter.Unlearned -> getString(R.string.library_empty_unlearned)
+                LinkFilter.Learned -> getString(R.string.library_empty_learned)
+                LinkFilter.All -> getString(R.string.library_empty_all)
+            }
+        } else {
+            getString(R.string.library_empty_search)
+        }
+
+    private fun openLink(link: SavedLink) {
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link.url)))
+        }.onFailure {
+            linkStatus = getString(R.string.library_open_failed)
+        }
+    }
+
+    private fun toggleLearned(link: SavedLink) {
+        mutateLinks(getString(R.string.library_saving)) {
+            LinksApiClient(apiBaseUrl).update(link.id, learned = !link.learned)
+        }
+    }
+
+    private fun startEdit(link: SavedLink) {
+        editingLink = link
+        editUrl = link.url
+        editNote = link.note
+        editSaving = false
+        linkStatus = ""
+    }
+
+    private fun changeEditUrl(value: String) {
+        editUrl = value
+    }
+
+    private fun changeEditNote(value: String) {
+        editNote = value
+        if (value.length <= MAX_NOTE_LENGTH && linkStatus == getString(R.string.share_note_too_long)) {
+            linkStatus = ""
+        }
+    }
+
+    private fun saveEdit() {
+        val link = editingLink ?: return
+        if (editNote.length > MAX_NOTE_LENGTH) {
+            linkStatus = getString(R.string.share_note_too_long)
+            return
+        }
+        val trimmedUrl = editUrl.trim()
+        val normalizedUrl = trimmedUrl.lowercase()
+        if (!normalizedUrl.startsWith("http://") && !normalizedUrl.startsWith("https://")) {
+            linkStatus = getString(R.string.library_invalid_url)
+            return
+        }
+
+        editSaving = true
+        mutateLinks(getString(R.string.library_saving), keepEditSaving = true) {
+            LinksApiClient(apiBaseUrl).update(
+                id = link.id,
+                url = trimmedUrl,
+                note = editNote,
+            )
+        }
+    }
+
+    private fun cancelEdit() {
+        editingLink = null
+        editSaving = false
+    }
+
+    private fun deleteEditing() {
+        val link = editingLink ?: return
+        editSaving = true
+        mutateLinks(getString(R.string.library_deleting), keepEditSaving = true) {
+            LinksApiClient(apiBaseUrl).delete(link.id)
+        }
+    }
+
+    private fun mutateLinks(
+        busyStatus: String,
+        keepEditSaving: Boolean = false,
+        block: () -> LinkMutationResult,
+    ) {
+        libraryJob?.cancel()
+        linkLoading = !keepEditSaving
+        linkStatus = busyStatus
+        libraryJob = lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { block() }
+            if (!isActive) return@launch
+            linkLoading = false
+            editSaving = false
+            when (result) {
+                LinkMutationResult.Deleted -> {
+                    val deletedId = editingLink?.id
+                    if (deletedId != null) {
+                        linkItems = linkItems.filterNot { it.id == deletedId }
+                    }
+                    editingLink = null
+                    linkStatus = getString(R.string.library_deleted)
+                }
+                is LinkMutationResult.Updated -> {
+                    val updated = result.link
+                    linkItems = if (matchesCurrentView(updated)) {
+                        linkItems.map { if (it.id == updated.id) updated else it }
+                    } else {
+                        linkItems.filterNot { it.id == updated.id }
+                    }
+                    editingLink = null
+                    linkStatus = getString(R.string.library_saved)
+                }
+                is LinkMutationResult.Failed -> {
+                    linkStatus = getString(R.string.library_save_failed)
+                }
+            }
+        }
+    }
+
+    private fun matchesCurrentView(link: SavedLink): Boolean {
+        val filterMatches = when (linkFilter) {
+            LinkFilter.Unlearned -> !link.learned
+            LinkFilter.Learned -> link.learned
+            LinkFilter.All -> true
+        }
+        if (!filterMatches) return false
+        val query = linkSearchQuery.trim()
+        if (query.isEmpty()) return true
+        return link.url.contains(query, ignoreCase = true) || link.note.contains(query, ignoreCase = true)
     }
 
     private fun checkForUpdates() {

@@ -93,6 +93,23 @@ describe("cairn-share worker", () => {
     expect(all.items.map((item: LinkRecord) => item.id)).toEqual([third.id, second.id, first.id]);
   });
 
+  it("searches URL and note while preserving learned filters", async () => {
+    const docs = await create("https://example.com/docs/cairn", "项目文档");
+    const recipe = await create("https://food.example/recipe", "Cairn 晚餐资料");
+    const other = await create("https://example.com/other", "无关");
+
+    await patchJson(recipe.id, { learned: true });
+
+    const allMatches = await json(await dispatch("/api/links?q=cairn"));
+    expect(allMatches.items.map((item: LinkRecord) => item.id)).toEqual([recipe.id, docs.id]);
+
+    const learnedMatches = await json(await dispatch("/api/links?q=Cairn&learned=true"));
+    expect(learnedMatches.items.map((item: LinkRecord) => item.id)).toEqual([recipe.id]);
+
+    const noMatches = await json(await dispatch(`/api/links?q=${encodeURIComponent("not " + other.id)}`));
+    expect(noMatches.items).toEqual([]);
+  });
+
   it("validates list query parameters", async () => {
     await expectError(dispatch("/api/links?limit=0"), 400, "invalid_limit");
     await expectError(dispatch("/api/links?limit=101"), 400, "invalid_limit");
@@ -100,6 +117,7 @@ describe("cairn-share worker", () => {
     await expectError(dispatch("/api/links?before_id=0"), 400, "invalid_before_id");
     await expectError(dispatch("/api/links?before_id=abc"), 400, "invalid_before_id");
     await expectError(dispatch("/api/links?learned=maybe"), 400, "invalid_learned");
+    await expectError(dispatch(`/api/links?q=${"q".repeat(201)}`), 400, "invalid_query");
   });
 
   it("reads individual records and hides missing rows behind JSON 404", async () => {
@@ -127,11 +145,47 @@ describe("cairn-share worker", () => {
     expect(readBack).toMatchObject(unlearned);
   });
 
+  it("updates URL, note and learned state in one PATCH", async () => {
+    const created = await create("https://example.com/original", "old");
+
+    const updated = await json(await patchJson(created.id, {
+      url: "  https://example.com/updated?x=1#frag  ",
+      note: "新的备注",
+      learned: true
+    }));
+
+    expect(updated).toMatchObject({
+      id: created.id,
+      url: "https://example.com/updated?x=1#frag",
+      note: "新的备注",
+      learned: true
+    });
+    expect(updated.learned_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const readBack = await json(await dispatch(`/api/links/${created.id}`));
+    expect(readBack).toMatchObject(updated);
+  });
+
+  it("deletes links and keeps missing deletes JSON shaped", async () => {
+    const created = await create("https://example.com/delete-me");
+
+    const deleted = await dispatch(`/api/links/${created.id}`, { method: "DELETE" });
+    expect(deleted.status).toBe(204);
+    expect(await deleted.text()).toBe("");
+
+    await expectError(dispatch(`/api/links/${created.id}`), 404, "not_found");
+    await expectError(dispatch(`/api/links/${created.id}`, { method: "DELETE" }), 404, "not_found");
+  });
+
   it("validates learned state writes", async () => {
     const created = await create("https://example.com/state-errors");
 
     await expectError(patchRaw(created.id, "{"), 400, "invalid_json");
     await expectError(patchJson(created.id, { learned: "true" }), 400, "invalid_learned");
+    await expectError(patchJson(created.id, {}), 400, "invalid_update");
+    await expectError(patchJson(created.id, { url: "ftp://example.com/file" }), 400, "invalid_url");
+    await expectError(patchJson(created.id, { note: 1 }), 400, "invalid_note");
+    await expectError(patchJson(created.id, { note: "n".repeat(2001) }), 400, "invalid_note");
     await expectError(patchJson(999, { learned: true }), 404, "not_found");
 
     const response = await dispatch(`/api/links/${created.id}`, {
@@ -159,8 +213,12 @@ describe("cairn-share worker", () => {
     await expect(deleted.json()).resolves.toEqual({ error: "method_not_allowed" });
 
     const deletedLink = await dispatch("/api/links/1", { method: "DELETE" });
-    expect(deletedLink.status).toBe(405);
-    expect(deletedLink.headers.get("allow")).toBe("GET, PATCH, OPTIONS");
+    expect(deletedLink.status).toBe(404);
+    await expect(deletedLink.json()).resolves.toEqual({ error: "not_found" });
+
+    const putLink = await dispatch("/api/links/1", { method: "PUT" });
+    expect(putLink.status).toBe(405);
+    expect(putLink.headers.get("allow")).toBe("GET, PATCH, DELETE, OPTIONS");
   });
 });
 

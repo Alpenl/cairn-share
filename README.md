@@ -31,9 +31,10 @@ curl -X POST https://share.alpenl.com/api/links \
 
 - `GET /health`
 - `POST /api/links`
-- `GET /api/links?limit=50&before_id=123&learned=false`
+- `GET /api/links?limit=50&before_id=123&learned=false&q=keyword`
 - `GET /api/links/:id`
 - `PATCH /api/links/:id`
+- `DELETE /api/links/:id`
 - `OPTIONS *`
 
 `POST /api/links` 只接受 `application/json`。`url` 必须是有 host、无 userinfo 的
@@ -51,22 +52,29 @@ code unit。创建成功后的记录会包含：
 }
 ```
 
-`GET /api/links` 支持 `learned` 查询参数：
+`GET /api/links` 支持 `learned` 和 `q` 查询参数：
 
 - 不传或传 `learned=all`：返回全部链接。
 - `learned=false` 或 `learned=0`：只返回未学习链接。
 - `learned=true` 或 `learned=1`：只返回已学习链接。
+- `q` 会在链接和备注中做大小写不敏感的模糊查询，最长 200 个 UTF-16 code unit。
 
-手动切换学习状态：
+手动修改链接：
 
 ```bash
 curl -X PATCH https://share.alpenl.com/api/links/1 \
   -H 'Content-Type: application/json' \
-  --data '{"learned":true}'
+  --data '{"url":"https://example.com/updated","note":"updated note","learned":true}'
 ```
 
-再次传 `{"learned":false}` 可以把已学习链接改回未学习。D1 使用参数化查询，MVP
-允许重复链接，不做抓取、去重或删除。
+`PATCH` 可单独或组合修改 `url`、`note`、`learned`。再次传 `{"learned":false}` 可以
+把已学习链接改回未学习。删除链接：
+
+```bash
+curl -X DELETE https://share.alpenl.com/api/links/1
+```
+
+D1 使用参数化查询，MVP 允许重复链接，不做抓取或去重。
 
 ## Android
 
@@ -82,7 +90,9 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 5. App 直接通过 Android/Java 原生 HTTPS API POST 到 Cloudflare Worker。
 6. 成功后关闭；失败留在当前界面，用户可手动重试。
 
-直接从桌面打开 App 时，不会提交任何数据，只显示使用说明和公开 API 风险提示。
+直接从桌面打开 App 时，不会自动提交任何数据，而是显示云端链接库。用户可以查看全部
+收藏，按未学习/已学习筛选，按链接或备注搜索，并对单条链接进行打开、改学习状态、编辑
+备注/URL 和删除。
 
 没有账号、token、server 设置页、本地队列、Room、WorkManager、Keystore、Todo、
 Reader、旧 Cairn/WebTag endpoint 或后台同步。
