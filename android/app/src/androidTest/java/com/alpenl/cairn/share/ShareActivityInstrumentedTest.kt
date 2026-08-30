@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.Intent
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -29,6 +30,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
@@ -41,9 +43,11 @@ class ShareActivityInstrumentedTest {
     @Before
     fun setUp() = runBlocking {
         SharePreferencesStore(targetContext()).setApiToken(TEST_TOKEN)
+        SharePreferencesStore(targetContext()).setCloseAfterSave(false)
         SharePreferencesStore(targetContext()).setLastRoute("library")
         SharePreferencesStore(targetContext()).setLastFilter("all")
         SharePreferencesStore(targetContext()).setLastSearchQuery("")
+        PendingUploadStore(targetContext()).clear()
     }
 
     @After
@@ -117,10 +121,9 @@ class ShareActivityInstrumentedTest {
     }
 
     @Test
-    fun failedPostLeavesScreenOpenAndAllowsRetry() {
+    fun failedPostIsKeptLocallyWithoutASecondSubmission() {
         val api = startServer()
         server!!.enqueue(MockResponse().setResponseCode(500).setBody("""{"error":"server"}"""))
-        server!!.enqueue(savedResponse())
 
         ActivityScenario.launch<ShareActivity>(shareIntent("https://example.com/retry", api)).use {
             compose.onNodeWithTag("note").performTextInput("retry note")
@@ -130,16 +133,16 @@ class ShareActivityInstrumentedTest {
 
             compose.waitUntil(5_000) {
                 runCatching {
-                    compose.onNodeWithTag("status").assertTextContains("保存失败", substring = true)
+                    compose.onNodeWithTag("status").assertTextContains("已保存到本地待上传队列", substring = true)
                     true
                 }.getOrDefault(false)
             }
-            waitForSaveEnabled()
-            compose.onNodeWithTag("save").performClick()
-
-            val body = JSONObject(takeRequest().body.readUtf8())
-            assertEquals("https://example.com/retry", body.getString("url"))
-            assertEquals("retry note", body.getString("note"))
+            compose.onNodeWithTag("save").assertIsNotEnabled()
+            val queued = runBlocking { PendingUploadStore(targetContext()).uploads.first() }
+            assertEquals(1, queued.size)
+            assertEquals("https://example.com/retry", queued.single().url)
+            assertEquals("retry note", queued.single().note)
+            assertEquals(1, server!!.requestCount)
         }
     }
 
@@ -186,6 +189,7 @@ class ShareActivityInstrumentedTest {
                 }.getOrDefault(false)
             }
             compose.onNodeWithTag("download_update").assertIsEnabled()
+            compose.onNodeWithText("- 新增离线上传队列").assertExists()
 
             compose.onNodeWithContentDescription("返回").performClick()
             compose.onNodeWithTag("nav_library").performClick()
@@ -229,6 +233,45 @@ class ShareActivityInstrumentedTest {
         }
     }
 
+    @Test
+    fun launcherAutomaticallyRetriesLocalQueueAndAllowsManualRetry() {
+        val queued = runBlocking {
+            PendingUploadStore(targetContext()).enqueue(
+                url = "https://example.com/offline",
+                note = "queued note",
+            )
+        }
+        val api = startLibraryServer(uploadResponseCode = 500)
+        val intent = Intent(Intent.ACTION_MAIN)
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+            .setClass(targetContext(), LauncherActivity::class.java)
+            .putExtra(ShareActivity.EXTRA_API_BASE_URL, api)
+            .putExtra(ShareActivity.EXTRA_RELEASES_API_URL, server!!.url("/latest").toString())
+
+        ActivityScenario.launch<LauncherActivity>(intent).use {
+            val automatic = takeRequest("POST", "/api/links")
+            assertEquals(queued.id, JSONObject(automatic.body.readUtf8()).getString("client_id"))
+            compose.waitUntil(5_000) {
+                runBlocking {
+                    PendingUploadStore(targetContext()).uploads.first().singleOrNull()?.attemptCount == 1
+                }
+            }
+
+            compose.onNodeWithTag("nav_settings").performClick()
+            compose.onNodeWithText("待上传队列").performClick()
+            compose.waitUntil(5_000) {
+                runCatching {
+                    compose.onNodeWithTag("retry_upload_${queued.id}").assertIsEnabled()
+                    true
+                }.getOrDefault(false)
+            }
+            compose.onNodeWithTag("retry_upload_${queued.id}").performClick()
+
+            val manual = takeRequest("POST", "/api/links")
+            assertEquals(queued.id, JSONObject(manual.body.readUtf8()).getString("client_id"))
+        }
+    }
+
     private fun startServer(): String {
         val mockWebServer = MockWebServer()
         mockWebServer.start()
@@ -236,7 +279,7 @@ class ShareActivityInstrumentedTest {
         return mockWebServer.url("/").toString()
     }
 
-    private fun startLibraryServer(): String {
+    private fun startLibraryServer(uploadResponseCode: Int = 201): String {
         val mockWebServer = MockWebServer()
         mockWebServer.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
@@ -245,6 +288,8 @@ class ShareActivityInstrumentedTest {
                     path == "/latest" -> latestReleaseResponse()
                     path.startsWith("/api/links") && request.getHeader("Authorization") != "Bearer $TEST_TOKEN" ->
                         MockResponse().setResponseCode(401).setBody("""{"error":"invalid_token"}""")
+                    request.method == "POST" && path == "/api/links" ->
+                        if (uploadResponseCode == 201) queuedUploadResponse() else MockResponse().setResponseCode(uploadResponseCode)
                     request.method == "GET" && path.startsWith("/api/links") -> linksResponse(path)
                     request.method == "PATCH" && path == "/api/links/1" -> updatedLinkResponse()
                     request.method == "DELETE" && path == "/api/links/1" -> MockResponse().setResponseCode(204)
@@ -280,12 +325,29 @@ class ShareActivityInstrumentedTest {
                     {
                       "tag_name": "v9.9.9",
                       "html_url": "https://github.com/Alpenl/cairn-share/releases/tag/v9.9.9",
+                      "body": "- 新增离线上传队列",
                       "assets": [
                         {
                           "name": "cairn-share-android-9.9.9.apk",
                           "browser_download_url": "https://github.com/Alpenl/cairn-share/releases/download/v9.9.9/cairn-share-android-9.9.9.apk"
                         }
                       ]
+                    }
+                """.trimIndent(),
+            )
+
+    private fun queuedUploadResponse(): MockResponse =
+        MockResponse()
+            .setResponseCode(201)
+            .setBody(
+                """
+                    {
+                      "id": 3,
+                      "url": "https://example.com/offline",
+                      "note": "queued note",
+                      "created_at": "2026-08-30T00:00:00.000Z",
+                      "learned": false,
+                      "learned_at": null
                     }
                 """.trimIndent(),
             )

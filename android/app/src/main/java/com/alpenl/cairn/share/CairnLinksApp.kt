@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
@@ -108,6 +109,7 @@ private object Routes {
     const val Detail = "detail/{id}"
     const val Edit = "edit/{id}"
     const val Update = "update"
+    const val Uploads = "uploads"
     const val Console = "console"
     const val About = "about"
 
@@ -189,6 +191,7 @@ internal fun CairnLinksApp(
                 CairnBottomBar(
                     currentRoute = currentRoute,
                     pendingCount = state.stats().pending,
+                    uploadCount = state.pendingUploads.size,
                     onNavigate = { route -> navController.navigateTop(route) },
                 )
             }
@@ -236,6 +239,7 @@ internal fun CairnLinksApp(
                     onCloseAfterSaveChange = viewModel::setCloseAfterSave,
                     onPreserveCompleteUrlChange = viewModel::setPreserveCompleteUrl,
                     onApiTokenChange = viewModel::setApiToken,
+                    onOpenUploads = { navController.navigate(Routes.Uploads) },
                     onOpenConsole = { navController.navigate(Routes.Console) },
                     onOpenUpdate = { navController.navigate(Routes.Update) },
                     onOpenAbout = { navController.navigate(Routes.About) },
@@ -305,6 +309,15 @@ internal fun CairnLinksApp(
                     onInstallUpdate = onInstallUpdate,
                 )
             }
+            composable(Routes.Uploads) {
+                PendingUploadsScreen(
+                    state = state,
+                    onBack = { navController.popBackStack() },
+                    onRetryAll = viewModel::retryAllPendingUploads,
+                    onRetry = viewModel::retryPendingUpload,
+                    onDiscard = viewModel::discardPendingUpload,
+                )
+            }
             composable(Routes.Console) {
                 ApiConsoleScreen(
                     state = state,
@@ -344,6 +357,7 @@ internal fun CairnLinksApp(
                 onNoteChange = viewModel::setManualNote,
                 statusText = state.manualAdd.statusText,
                 submitting = state.manualAdd.submitting,
+                completed = false,
                 submitEnabled = state.manualAdd.url.isNotBlank() && !state.manualAdd.submitting,
                 preserveCompleteUrl = state.preferences.preserveCompleteUrl,
                 onCancel = viewModel::closeManualAdd,
@@ -358,6 +372,7 @@ internal fun CairnLinksApp(
 private fun CairnBottomBar(
     currentRoute: String?,
     pendingCount: Int,
+    uploadCount: Int,
     onNavigate: (String) -> Unit,
 ) {
     Surface(
@@ -378,7 +393,11 @@ private fun CairnBottomBar(
                 CompactNavItem(
                     destination = destination,
                     selected = currentRoute == destination.route,
-                    badge = if (destination.route == Routes.Queue && pendingCount > 0) pendingCount else null,
+                    badge = when (destination.route) {
+                        Routes.Queue -> pendingCount.takeIf { it > 0 }
+                        Routes.Settings -> uploadCount.takeIf { it > 0 }
+                        else -> null
+                    },
                     onClick = { onNavigate(destination.route) },
                     modifier = Modifier
                         .weight(1f)
@@ -568,6 +587,7 @@ private fun SettingsScreen(
     onCloseAfterSaveChange: (Boolean) -> Unit,
     onPreserveCompleteUrlChange: (Boolean) -> Unit,
     onApiTokenChange: (String) -> Unit,
+    onOpenUploads: () -> Unit,
     onOpenConsole: () -> Unit,
     onOpenUpdate: () -> Unit,
     onOpenAbout: () -> Unit,
@@ -592,6 +612,17 @@ private fun SettingsScreen(
                 tokenDraft = state.preferences.apiToken
                 tokenDialogOpen = true
             },
+        )
+        SettingsRow(
+            icon = Icons.Default.Refresh,
+            title = "待上传队列",
+            subtitle = when {
+                !state.pendingUploadsLoaded -> "正在读取本地队列"
+                state.pendingUploads.isEmpty() -> "本地队列为空"
+                state.retryingUploads -> "正在重试 · ${state.pendingUploads.size} 条仍在本地"
+                else -> "${state.pendingUploads.size} 条保存在本地 · 点按查看或重试"
+            },
+            onClick = onOpenUploads,
         )
         SettingsRow(
             icon = Icons.Default.Info,
@@ -659,6 +690,165 @@ private fun SettingsScreen(
                 TextButton(onClick = { tokenDialogOpen = false }) { Text("取消") }
             },
         )
+    }
+}
+
+@Composable
+private fun PendingUploadsScreen(
+    state: CairnLinksUiState,
+    onBack: () -> Unit,
+    onRetryAll: () -> Unit,
+    onRetry: (String) -> Unit,
+    onDiscard: (String) -> Unit,
+) {
+    var discardId by rememberSaveable { mutableStateOf<String?>(null) }
+    ScreenColumn {
+        DetailTopBar(
+            title = "待上传队列",
+            onBack = onBack,
+            actions = {
+                IconButton(
+                    onClick = onRetryAll,
+                    enabled = state.pendingUploads.isNotEmpty() && !state.retryingUploads,
+                    modifier = Modifier.testTag("retry_all_uploads"),
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = "全部重试")
+                }
+            },
+        )
+        when {
+            !state.pendingUploadsLoaded -> LoadingState("正在读取本地队列...")
+            state.pendingUploads.isEmpty() -> EmptyState("没有待上传链接。网络不可用时，新链接会安全保存在这里。")
+            else -> {
+                Text(
+                    "${state.pendingUploads.size} 条链接保存在本机。每次打开应用都会自动尝试上传。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(state.pendingUploads, key = PendingUpload::id) { upload ->
+                        PendingUploadRow(
+                            upload = upload,
+                            busy = upload.id in state.uploadBusyIds,
+                            retryAllRunning = state.retryingUploads,
+                            tokenConfigured = state.preferences.apiToken.isNotBlank(),
+                            onRetry = { onRetry(upload.id) },
+                            onDiscard = { discardId = upload.id },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (discardId != null) {
+        AlertDialog(
+            onDismissRequest = { discardId = null },
+            title = { Text("移除本地链接？") },
+            text = { Text("这条链接尚未上传。移除后无法从本地队列恢复。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        discardId?.let(onDiscard)
+                        discardId = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.testTag("confirm_discard_upload"),
+                ) {
+                    Text("移除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { discardId = null }) { Text("取消") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun PendingUploadRow(
+    upload: PendingUpload,
+    busy: Boolean,
+    retryAllRunning: Boolean,
+    tokenConfigured: Boolean,
+    onRetry: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    Surface(
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("pending_upload_${upload.id}"),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                upload.url.hostLabel(),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                upload.url,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (upload.note.isNotBlank()) {
+                Text(
+                    upload.note,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Text(
+                "本地保存于 ${upload.createdAtEpochMillis.shortDateTime()} · ${pendingUploadStatus(upload, busy, tokenConfigured)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedButton(
+                    onClick = onRetry,
+                    enabled = !busy && !retryAllRunning,
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("retry_upload_${upload.id}"),
+                ) {
+                    if (busy) {
+                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
+                    } else {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (busy) "上传中" else "重试")
+                }
+                IconButton(onClick = onDiscard, enabled = !busy && !retryAllRunning) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = "从本地队列移除",
+                        tint = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -809,6 +999,17 @@ private fun UpdateScreen(
     onCheck: () -> Unit,
     onInstallUpdate: () -> Unit,
 ) {
+    val update = when (val updateState = state.updateState) {
+        is AppUpdateState.Available -> updateState.update
+        is AppUpdateState.Downloading -> updateState.update
+        is AppUpdateState.InstallFailed -> updateState.update
+        is AppUpdateState.InstallPermissionRequired -> updateState.update
+        is AppUpdateState.InstallStarted -> updateState.update
+        AppUpdateState.Checking,
+        AppUpdateState.Failed,
+        AppUpdateState.Hidden,
+        AppUpdateState.UpToDate -> null
+    }
     ScreenColumn(scroll = true) {
         DetailTopBar(title = "检查更新", onBack = onBack)
         UpdatePanel(
@@ -817,7 +1018,11 @@ private fun UpdateScreen(
             onCheck = onCheck,
             onInstallUpdate = onInstallUpdate,
         )
-        SectionLabel("更新说明")
+        if (update != null) {
+            SectionLabel("${update.versionName} 更新内容")
+            InfoBlock(update.releaseNotes)
+        }
+        SectionLabel("安装方式")
         InfoBlock("更新来源是 GitHub Release。下载完成后会打开系统安装器；普通应用不能静默安装 APK。")
     }
 }
@@ -950,7 +1155,7 @@ private fun AboutScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        InfoBlock("接口使用部署侧访问 Token 保护。这个应用只保存 Token 并随请求发送，不提供账号体系。")
+        InfoBlock("接口使用部署侧访问 Token 保护。Token 和尚未上传的链接保存在本机；本地链接上传成功后会从待上传队列移除。")
         SettingsRow(
             icon = Icons.Default.Share,
             title = "源码仓库",
@@ -1636,6 +1841,7 @@ internal fun ShareBottomSheetScreen(
     note: String,
     statusText: String,
     submitting: Boolean,
+    completed: Boolean = false,
     settingsLoaded: Boolean = true,
     preserveCompleteUrl: Boolean,
     onSelectCandidate: (Int) -> Unit,
@@ -1662,7 +1868,8 @@ internal fun ShareBottomSheetScreen(
             onNoteChange = onNoteChange,
             statusText = statusText,
             submitting = submitting,
-            submitEnabled = selected != null && settingsLoaded && !submitting,
+            completed = completed,
+            submitEnabled = selected != null && settingsLoaded && !submitting && !completed,
             preserveCompleteUrl = preserveCompleteUrl,
             onCancel = onCancel,
             onSave = onSave,
@@ -1685,6 +1892,7 @@ private fun SaveLinkSheetContent(
     onNoteChange: (String) -> Unit,
     statusText: String,
     submitting: Boolean,
+    completed: Boolean,
     submitEnabled: Boolean,
     preserveCompleteUrl: Boolean,
     onCancel: () -> Unit,
@@ -1707,7 +1915,7 @@ private fun SaveLinkSheetContent(
                 label = { Text("链接") },
                 placeholder = { Text("https://example.com/article") },
                 minLines = 2,
-                enabled = !submitting,
+                enabled = !submitting && !completed,
                 shape = RoundedCornerShape(18.dp),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1758,7 +1966,7 @@ private fun SaveLinkSheetContent(
             label = { Text("备注") },
             placeholder = { Text("稍后阅读、项目资料") },
             supportingText = { Text("${note.length} / $MAX_NOTE_LENGTH") },
-            enabled = !submitting,
+            enabled = !submitting && !completed,
             minLines = 2,
             shape = RoundedCornerShape(18.dp),
             modifier = Modifier
@@ -1830,10 +2038,21 @@ private fun libraryEmptyText(state: CairnLinksUiState): String =
         LinkFilter.Learned -> "没有已学习链接。"
     }
 
+private fun pendingUploadStatus(upload: PendingUpload, busy: Boolean, tokenConfigured: Boolean): String =
+    when {
+        busy -> "正在上传"
+        !tokenConfigured -> "等待配置 Token"
+        upload.lastFailure == null -> "等待首次上传"
+        upload.lastFailure == com.alpenl.cairn.share.network.FailureKind.Unauthorized -> "等待更新 Token"
+        upload.lastFailure == com.alpenl.cairn.share.network.FailureKind.Network -> "等待网络恢复"
+        upload.lastFailure == com.alpenl.cairn.share.network.FailureKind.Timeout -> "等待网络稳定"
+        else -> "等待服务恢复"
+    }
+
 private fun apiTokenSubtitle(token: String): String {
     val trimmed = token.trim()
     return if (trimmed.isBlank()) {
-        "未配置 · API 请求会被拒绝"
+        "未配置 · 新链接只保存在本地"
     } else {
         "已保存 · ${maskedToken(trimmed)}"
     }

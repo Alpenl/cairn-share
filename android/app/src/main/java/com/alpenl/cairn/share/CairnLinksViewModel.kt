@@ -50,6 +50,10 @@ internal data class CairnLinksUiState(
     val manualAdd: ManualAddState = ManualAddState(),
     val preferences: SharePreferences = SharePreferences(),
     val preferencesLoaded: Boolean = false,
+    val pendingUploads: List<PendingUpload> = emptyList(),
+    val pendingUploadsLoaded: Boolean = false,
+    val uploadBusyIds: Set<String> = emptySet(),
+    val retryingUploads: Boolean = false,
     val updateState: AppUpdateState = AppUpdateState.Hidden,
     val apiDebug: ApiDebugUiState = ApiDebugUiState(),
     val message: UiMessage? = null,
@@ -112,6 +116,7 @@ internal class CairnLinksViewModel(
     private val repository: LinkRepository,
     private val updateApiClient: UpdateApiClient,
     private val settingsStore: SharePreferencesStore,
+    private val pendingUploadStore: PendingUploadStore,
     private val apiDebugClient: ApiDebugClient,
     apiBaseUrl: String,
     releasesApiUrl: String,
@@ -130,10 +135,15 @@ internal class CairnLinksViewModel(
 
     private var messageId = 0L
     private var searchJob: Job? = null
+    private var pendingUploadsRetryJob: Job? = null
+    private var retryPendingUploadsAgain = false
+    private var retryPendingUploadsAgainWithSummary = false
     private var loadedPreferencesOnce = false
+    private var automaticUploadRetryStarted = false
 
     init {
         observeSettings()
+        observePendingUploads()
         checkForUpdates()
     }
 
@@ -291,29 +301,42 @@ internal class CairnLinksViewModel(
             return
         }
         val apiToken = currentApiToken()
-        if (apiToken.isBlank()) {
-            uiState = uiState.copy(manualAdd = draft.copy(statusText = "请先在设置中配置访问 Token。"))
-            return
-        }
-
-        uiState = uiState.copy(manualAdd = draft.copy(submitting = true, statusText = "保存中..."))
+        uiState = uiState.copy(manualAdd = draft.copy(submitting = true, statusText = "正在保存到本地..."))
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.create(preparedUrl, note, apiToken) }) {
+            val pending = runCatching { pendingUploadStore.enqueue(preparedUrl, note) }.getOrNull()
+            if (pending == null) {
+                uiState = uiState.copy(
+                    manualAdd = uiState.manualAdd.copy(
+                        submitting = false,
+                        statusText = "无法保存到本地，请检查设备存储空间。",
+                    ),
+                )
+                return@launch
+            }
+            uiState = uiState.copy(
+                manualAdd = ManualAddState(),
+                message = nextMessage(
+                    if (apiToken.isBlank()) {
+                        "已保存到本地待上传队列，配置 Token 后可重试。"
+                    } else {
+                        "已保存到本地，正在上传。"
+                    },
+                ),
+            )
+            if (apiToken.isBlank()) return@launch
+
+            when (val result = uploadPending(pending, apiToken)) {
                 is LinkCreateResult.Created -> {
                     uiState = uiState.copy(
-                        links = uiState.links.upsert(result.link),
-                        manualAdd = ManualAddState(),
                         message = nextMessage("已保存到链接库。"),
                     )
                 }
                 is LinkCreateResult.Failed -> {
                     uiState = uiState.copy(
-                        manualAdd = uiState.manualAdd.copy(
-                            submitting = false,
-                            statusText = failureText(result.kind, "保存失败。请检查网络后重试。"),
-                        ),
+                        message = nextMessage(pendingUploadRetainedText(result.kind)),
                     )
                 }
+                null -> Unit
             }
         }
     }
@@ -498,6 +521,44 @@ internal class CairnLinksViewModel(
         uiState = uiState.copy(preferences = uiState.preferences.copy(apiToken = token))
         viewModelScope.launch { settingsStore.setApiToken(token) }
         refreshLinks()
+        if (token.isNotBlank()) startPendingUploadRetry(showSummary = true)
+    }
+
+    fun retryPendingUpload(id: String) {
+        if (id in uiState.uploadBusyIds) return
+        val pending = uiState.pendingUploads.firstOrNull { it.id == id } ?: return
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            uiState = uiState.copy(message = nextMessage("链接仍保存在本地，请先配置访问 Token。"))
+            return
+        }
+        viewModelScope.launch {
+            when (val result = uploadPending(pending, apiToken)) {
+                is LinkCreateResult.Created -> {
+                    uiState = uiState.copy(message = nextMessage("已上传到链接库。"))
+                }
+                is LinkCreateResult.Failed -> {
+                    uiState = uiState.copy(message = nextMessage(pendingUploadRetainedText(result.kind)))
+                }
+                null -> Unit
+            }
+        }
+    }
+
+    fun retryAllPendingUploads() {
+        startPendingUploadRetry(showSummary = true)
+    }
+
+    fun discardPendingUpload(id: String) {
+        if (id in uiState.uploadBusyIds) return
+        viewModelScope.launch {
+            val removed = runCatching { pendingUploadStore.remove(id) }.isSuccess
+            uiState = uiState.copy(
+                message = nextMessage(
+                    if (removed) "已从本地待上传队列移除。" else "无法修改本地队列，请稍后重试。",
+                ),
+            )
+        }
     }
 
     fun setLastRoute(route: String) {
@@ -591,6 +652,7 @@ internal class CairnLinksViewModel(
                     if (firstLoad || previousToken != preferences.apiToken.trim()) {
                         refreshLinks()
                     }
+                    maybeStartAutomaticUploadRetry()
                     if (firstLoad && restoredQuery.isNotBlank()) {
                         searchJob?.cancel()
                         searchJob = viewModelScope.launch {
@@ -599,6 +661,105 @@ internal class CairnLinksViewModel(
                     }
                 }
         }
+    }
+
+    private fun observePendingUploads() {
+        viewModelScope.launch {
+            pendingUploadStore.uploads
+                .catch { emit(emptyList()) }
+                .collect { uploads ->
+                    uiState = uiState.copy(
+                        pendingUploads = uploads,
+                        pendingUploadsLoaded = true,
+                    )
+                    maybeStartAutomaticUploadRetry()
+                }
+        }
+    }
+
+    private fun maybeStartAutomaticUploadRetry() {
+        if (automaticUploadRetryStarted || !uiState.preferencesLoaded || !uiState.pendingUploadsLoaded) return
+        automaticUploadRetryStarted = true
+        if (currentApiToken().isNotBlank() && uiState.pendingUploads.isNotEmpty()) {
+            startPendingUploadRetry(showSummary = false)
+        }
+    }
+
+    private fun startPendingUploadRetry(showSummary: Boolean) {
+        if (pendingUploadsRetryJob?.isActive == true) {
+            retryPendingUploadsAgain = true
+            retryPendingUploadsAgainWithSummary = retryPendingUploadsAgainWithSummary || showSummary
+            return
+        }
+        val uploads = uiState.pendingUploads.filterNot { it.id in uiState.uploadBusyIds }
+        if (uploads.isEmpty()) {
+            if (showSummary) uiState = uiState.copy(message = nextMessage("本地待上传队列已经清空。"))
+            return
+        }
+        val apiToken = currentApiToken()
+        if (apiToken.isBlank()) {
+            if (showSummary) {
+                uiState = uiState.copy(message = nextMessage("链接已保存在本地，请先配置访问 Token。"))
+            }
+            return
+        }
+
+        pendingUploadsRetryJob = viewModelScope.launch {
+            uiState = uiState.copy(retryingUploads = true)
+            var uploaded = 0
+            var retained = 0
+            for (pending in uploads) {
+                when (uploadPending(pending, apiToken)) {
+                    is LinkCreateResult.Created -> uploaded += 1
+                    is LinkCreateResult.Failed,
+                    null -> retained += 1
+                }
+            }
+            val attemptedIds = uploads.mapTo(mutableSetOf(), PendingUpload::id)
+            val newlyQueued = uiState.pendingUploads.count { it.id !in attemptedIds }
+            val remaining = retained + newlyQueued
+            uiState = uiState.copy(
+                retryingUploads = false,
+                message = when {
+                    showSummary && remaining == 0 -> nextMessage("已上传 $uploaded 条本地链接，队列已清空。")
+                    showSummary -> nextMessage("已上传 $uploaded 条，另有 $remaining 条保存在本地。")
+                    uploaded > 0 -> nextMessage("已自动上传 $uploaded 条本地链接。")
+                    else -> uiState.message
+                },
+            )
+            val runAgain = retryPendingUploadsAgain
+            val runAgainWithSummary = retryPendingUploadsAgainWithSummary
+            retryPendingUploadsAgain = false
+            retryPendingUploadsAgainWithSummary = false
+            pendingUploadsRetryJob = null
+            if (runAgain) startPendingUploadRetry(showSummary = runAgainWithSummary)
+        }
+    }
+
+    private suspend fun uploadPending(pending: PendingUpload, apiToken: String): LinkCreateResult? {
+        if (pending.id in uiState.uploadBusyIds) return null
+        uiState = uiState.copy(uploadBusyIds = uiState.uploadBusyIds + pending.id)
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                repository.create(
+                    url = pending.url,
+                    note = pending.note,
+                    apiToken = apiToken,
+                    clientId = pending.id,
+                )
+            }.getOrElse { LinkCreateResult.Failed(FailureKind.Network) }
+        }
+        when (result) {
+            is LinkCreateResult.Created -> {
+                runCatching { pendingUploadStore.remove(pending.id) }
+                uiState = uiState.copy(links = uiState.links.upsert(result.link))
+            }
+            is LinkCreateResult.Failed -> {
+                runCatching { pendingUploadStore.recordFailure(pending.id, result.kind) }
+            }
+        }
+        uiState = uiState.copy(uploadBusyIds = uiState.uploadBusyIds - pending.id)
+        return result
     }
 
     private suspend fun loadSearchPage(query: String, beforeId: Int?, append: Boolean) {
@@ -661,6 +822,13 @@ internal class CairnLinksViewModel(
 
     private fun failureText(kind: FailureKind, fallback: String): String =
         if (kind == FailureKind.Unauthorized) "Token 无效，请在设置中重新填写。" else fallback
+
+    private fun pendingUploadRetainedText(kind: FailureKind): String =
+        if (kind == FailureKind.Unauthorized) {
+            "链接已保存在本地，请更新 Token 后重试。"
+        } else {
+            "链接已保存在本地待上传队列，联网后会再次尝试。"
+        }
 
     private fun validateLinkDraft(url: String, note: String): String? =
         when {
@@ -744,6 +912,7 @@ internal class CairnLinksViewModelFactory(
     private val repository: LinkRepository,
     private val updateApiClient: UpdateApiClient,
     private val settingsStore: SharePreferencesStore,
+    private val pendingUploadStore: PendingUploadStore,
     private val apiDebugClient: ApiDebugClient,
     private val apiBaseUrl: String,
     private val releasesApiUrl: String,
@@ -756,6 +925,7 @@ internal class CairnLinksViewModelFactory(
             repository = repository,
             updateApiClient = updateApiClient,
             settingsStore = settingsStore,
+            pendingUploadStore = pendingUploadStore,
             apiDebugClient = apiDebugClient,
             apiBaseUrl = apiBaseUrl,
             releasesApiUrl = releasesApiUrl,

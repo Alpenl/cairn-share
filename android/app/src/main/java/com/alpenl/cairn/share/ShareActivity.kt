@@ -36,6 +36,7 @@ class ShareActivity : ComponentActivity() {
         private const val STATE_NOTE = "share.note"
         private const val STATE_STATUS = "share.status"
         private const val STATE_SUBMITTING = "share.submitting"
+        private const val STATE_ACCEPTED = "share.accepted"
     }
 
     private var candidates by mutableStateOf(emptyList<UrlCandidate>())
@@ -43,17 +44,20 @@ class ShareActivity : ComponentActivity() {
     private var note by mutableStateOf("")
     private var status by mutableStateOf<String?>(null)
     private var submitting by mutableStateOf(false)
+    private var accepted by mutableStateOf(false)
     private var preferences by mutableStateOf(SharePreferences())
     private var preferencesLoaded by mutableStateOf(false)
     private var submitGeneration = 0
     private var submitJob: Job? = null
     private var settingsJob: Job? = null
     private var apiBaseUrl = BuildConfig.CAIRN_SHARE_API_BASE_URL
+    private lateinit var pendingUploadStore: PendingUploadStore
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         makeWindowTranslucent()
+        pendingUploadStore = PendingUploadStore(this)
         inspectIntent(intent)
         restoreState(savedInstanceState)
         observeSettings()
@@ -67,6 +71,7 @@ class ShareActivity : ComponentActivity() {
                     note = note,
                     statusText = status.orEmpty(),
                     submitting = submitting,
+                    completed = accepted,
                     settingsLoaded = preferencesLoaded,
                     preserveCompleteUrl = preferences.preserveCompleteUrl,
                     onSelectCandidate = ::selectCandidate,
@@ -87,6 +92,7 @@ class ShareActivity : ComponentActivity() {
         note = ""
         status = null
         submitting = false
+        accepted = false
         inspectIntent(intent)
     }
 
@@ -95,6 +101,7 @@ class ShareActivity : ComponentActivity() {
         outState.putString(STATE_NOTE, note)
         status?.let { outState.putString(STATE_STATUS, it) }
         outState.putBoolean(STATE_SUBMITTING, submitting)
+        outState.putBoolean(STATE_ACCEPTED, accepted)
         super.onSaveInstanceState(outState)
     }
 
@@ -137,10 +144,11 @@ class ShareActivity : ComponentActivity() {
         val restoredIndex = savedInstanceState.getInt(STATE_SELECTED_INDEX, selectedIndex)
         selectedIndex = if (restoredIndex in candidates.indices) restoredIndex else selectedIndex
         note = savedInstanceState.getString(STATE_NOTE).orEmpty()
-        status = if (savedInstanceState.getBoolean(STATE_SUBMITTING)) {
-            getString(R.string.share_interrupted)
-        } else {
-            savedInstanceState.getString(STATE_STATUS) ?: status
+        accepted = savedInstanceState.getBoolean(STATE_ACCEPTED)
+        status = when {
+            accepted -> savedInstanceState.getString(STATE_STATUS) ?: getString(R.string.share_queued)
+            savedInstanceState.getBoolean(STATE_SUBMITTING) -> getString(R.string.share_interrupted)
+            else -> savedInstanceState.getString(STATE_STATUS) ?: status
         }
         submitting = false
     }
@@ -155,13 +163,13 @@ class ShareActivity : ComponentActivity() {
     }
 
     private fun selectCandidate(index: Int) {
-        if (submitting || index !in candidates.indices) return
+        if (submitting || accepted || index !in candidates.indices) return
         selectedIndex = index
         status = null
     }
 
     private fun changeNote(value: String) {
-        if (submitting) return
+        if (submitting || accepted) return
         note = value
         if (value.length <= MAX_NOTE_LENGTH && status == getString(R.string.share_note_too_long)) {
             status = null
@@ -170,7 +178,7 @@ class ShareActivity : ComponentActivity() {
 
     private fun submitSelected() {
         val candidate = ShareCandidatePresenter.selectedCandidate(candidates, selectedIndex) ?: return
-        if (submitting) return
+        if (submitting || accepted) return
         if (!preferencesLoaded) {
             status = getString(R.string.share_loading_settings)
             return
@@ -189,31 +197,55 @@ class ShareActivity : ComponentActivity() {
             return
         }
         val apiToken = preferences.apiToken.trim()
-        if (apiToken.isBlank()) {
-            status = getString(R.string.share_missing_token)
-            return
-        }
 
         val generation = ++submitGeneration
         submitting = true
-        status = getString(R.string.share_saving)
+        status = getString(R.string.share_saving_locally)
         submitJob = lifecycleScope.launch {
+            val pending = runCatching { pendingUploadStore.enqueue(preparedUrl, note) }.getOrNull()
+            if (!isActive || generation != submitGeneration) return@launch
+            if (pending == null) {
+                submitting = false
+                status = getString(R.string.share_local_save_failed)
+                return@launch
+            }
+
+            accepted = true
+            status = if (apiToken.isBlank()) {
+                getString(R.string.share_queued_missing_token)
+            } else {
+                getString(R.string.share_uploading)
+            }
+            if (apiToken.isBlank()) {
+                submitting = false
+                closeAfterAccepted(generation)
+                return@launch
+            }
+
             val result = withContext(Dispatchers.IO) {
-                ShareApiClient(apiBaseUrl, apiToken).save(preparedUrl, note)
+                ShareApiClient(apiBaseUrl, apiToken).save(preparedUrl, note, pending.id)
             }
             if (!isActive || generation != submitGeneration) return@launch
             submitting = false
             when (result) {
                 ShareSubmitResult.Saved -> {
+                    runCatching { pendingUploadStore.remove(pending.id) }
                     status = getString(R.string.share_saved)
-                    if (preferences.closeAfterSave) {
-                        delay(300)
-                        if (isActive && generation == submitGeneration) finish()
-                    }
+                    closeAfterAccepted(generation)
                 }
-                is ShareSubmitResult.Failed -> status = failureMessage(result.kind)
+                is ShareSubmitResult.Failed -> {
+                    runCatching { pendingUploadStore.recordFailure(pending.id, result.kind) }
+                    status = queuedMessage(result.kind)
+                    closeAfterAccepted(generation)
+                }
             }
         }
+    }
+
+    private suspend fun closeAfterAccepted(generation: Int) {
+        if (!preferences.closeAfterSave) return
+        delay(300)
+        if (generation == submitGeneration) finish()
     }
 
     private fun shareSubtitle(): String =
@@ -230,11 +262,10 @@ class ShareActivity : ComponentActivity() {
         window.attributes = window.attributes.apply { dimAmount = 0.38f }
     }
 
-    private fun failureMessage(kind: FailureKind): String =
-        when (kind) {
-            FailureKind.Unauthorized -> getString(R.string.share_auth_failed)
-            FailureKind.Network,
-            FailureKind.Timeout,
-            FailureKind.Server -> getString(R.string.share_failed)
+    private fun queuedMessage(kind: FailureKind): String =
+        if (kind == FailureKind.Unauthorized) {
+            getString(R.string.share_queued_auth)
+        } else {
+            getString(R.string.share_queued)
         }
 }

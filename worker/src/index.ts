@@ -26,6 +26,7 @@ type ErrorCode =
   | "invalid_content_type"
   | "invalid_url"
   | "invalid_note"
+  | "invalid_client_id"
   | "invalid_learned"
   | "invalid_query"
   | "invalid_update"
@@ -59,6 +60,7 @@ const HTML_HEADERS = {
 const MAX_URL_LENGTH = 8192;
 const MAX_NOTE_LENGTH = 2000;
 const MAX_QUERY_LENGTH = 200;
+const CLIENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
 const READ_CACHE_TTL_SECONDS = 15;
@@ -168,11 +170,12 @@ async function createLink(request: Request, env: Env, timing: TimingCollector): 
   const createdAt = new Date().toISOString();
   const row = await timing.measure("db", () =>
     env.DB.prepare(
-      `INSERT INTO links (url, note, created_at)
-        VALUES (?, ?, ?)
+      `INSERT INTO links (url, note, created_at, client_id)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(client_id) DO UPDATE SET client_id = excluded.client_id
         RETURNING id, url, note, created_at, learned, learned_at`
     )
-      .bind(validation.url, validation.note, createdAt)
+      .bind(validation.url, validation.note, createdAt, validation.clientId)
       .first<LinkRow>()
   );
 
@@ -518,12 +521,17 @@ function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
-function validateLinkBodyForCreate(body: Record<string, unknown>): { url: string; note: string } | ErrorCode {
+function validateLinkBodyForCreate(
+  body: Record<string, unknown>
+): { url: string; note: string; clientId: string | null } | ErrorCode {
   if (typeof body.url !== "string") {
     return "invalid_url";
   }
   if (body.note !== undefined && typeof body.note !== "string") {
     return "invalid_note";
+  }
+  if (body.client_id !== undefined && (typeof body.client_id !== "string" || !CLIENT_ID_PATTERN.test(body.client_id))) {
+    return "invalid_client_id";
   }
 
   const url = body.url.trim();
@@ -534,7 +542,7 @@ function validateLinkBodyForCreate(body: Record<string, unknown>): { url: string
   if (url.length > MAX_URL_LENGTH || note.length > MAX_NOTE_LENGTH) {
     return url.length > MAX_URL_LENGTH ? "invalid_url" : "invalid_note";
   }
-  return { url, note };
+  return { url, note, clientId: body.client_id === undefined ? null : body.client_id };
 }
 
 async function readJson(request: Request): Promise<unknown | null> {

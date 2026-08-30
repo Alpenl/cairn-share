@@ -25,9 +25,9 @@ internal class ShareApiClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
-    fun save(url: String, note: String): ShareSubmitResult {
+    fun save(url: String, note: String, clientId: String? = null): ShareSubmitResult {
         val endpoint = URL(baseUrl.trimEnd('/') + "/api/links")
-        val body = LinkRequestJson.encode(url, note).toByteArray(StandardCharsets.UTF_8)
+        val body = LinkRequestJson.encode(url, note, clientId).toByteArray(StandardCharsets.UTF_8)
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "POST"

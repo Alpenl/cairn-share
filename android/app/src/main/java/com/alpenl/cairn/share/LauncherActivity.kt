@@ -49,6 +49,7 @@ class LauncherActivity : ComponentActivity() {
             repository = LinkRepository(apiBaseUrl),
             updateApiClient = UpdateApiClient(releasesApiUrl),
             settingsStore = SharePreferencesStore(this),
+            pendingUploadStore = PendingUploadStore(this),
             apiDebugClient = ApiDebugClient(apiBaseUrl),
             apiBaseUrl = apiBaseUrl,
             releasesApiUrl = releasesApiUrl,

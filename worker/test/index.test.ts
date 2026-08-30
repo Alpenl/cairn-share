@@ -10,7 +10,7 @@ beforeEach(async () => {
 });
 
 describe("cairn-share worker", () => {
-  it("applies performance migrations for learned pagination and cache generation", async () => {
+  it("applies schema migrations for pagination, cache generation and idempotent uploads", async () => {
     const index = await env.DB.prepare(
       "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?"
     )
@@ -25,6 +25,14 @@ describe("cairn-share worker", () => {
       .bind("links_generation")
       .first<{ value: number }>();
     expect(generation?.value).toBe(1);
+
+    const clientIdIndex = await env.DB.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?"
+    )
+      .bind("links_client_id_idx")
+      .first<{ sql: string }>();
+    expect(clientIdIndex?.sql).toContain("UNIQUE");
+    expect(clientIdIndex?.sql).toContain("client_id");
   });
 
   it("serves an API debugging interface at the root path", async () => {
@@ -91,6 +99,29 @@ describe("cairn-share worker", () => {
     expect(listed.items[0].url).toBe(injected);
   });
 
+  it("returns the original link when a queued upload retries with the same client id", async () => {
+    const clientId = "3f55e9e8-4d52-4f45-a33d-89be8ef7ab45";
+    const first = await postJson({
+      url: "https://example.com/idempotent",
+      note: "first attempt",
+      client_id: clientId
+    });
+    expect(first.status).toBe(201);
+    const created = (await first.json()) as LinkRecord;
+
+    const retry = await postJson({
+      url: "https://example.com/changed-on-retry",
+      note: "retry payload",
+      client_id: clientId
+    });
+    expect(retry.status).toBe(201);
+    await expect(retry.json()).resolves.toMatchObject(created);
+
+    const listed = await json(await dispatch("/api/links"));
+    expect(listed.items).toHaveLength(1);
+    expect(listed.items[0]).toMatchObject(created);
+  });
+
   it("rejects invalid bodies and unsupported URL shapes with stable errors", async () => {
     await expectError(postRaw("{"), 400, "invalid_json");
     await expectError(postJson({ url: "ftp://example.com/file" }), 400, "invalid_url");
@@ -99,6 +130,7 @@ describe("cairn-share worker", () => {
     await expectError(postJson({ url: "https://user:secret@example.com/a" }), 400, "invalid_url");
     await expectError(postJson({ url: "" }), 400, "invalid_url");
     await expectError(postJson({ url: "https://example.com", note: 1 }), 400, "invalid_note");
+    await expectError(postJson({ url: "https://example.com", client_id: "not-a-uuid" }), 400, "invalid_client_id");
     await expectError(postJson({ url: "https://example.com/" + "a".repeat(8190) }), 400, "invalid_url");
     await expectError(postJson({ url: "https://example.com", note: "n".repeat(2001) }), 400, "invalid_note");
   });

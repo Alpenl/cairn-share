@@ -1,7 +1,7 @@
 # Cairn Share
 
 Cairn Share 是一个开源 Android 分享入口：从系统分享菜单接收完整的 HTTP(S)
-链接和可选备注，直接写入 Cloudflare Worker 与 D1。
+链接和可选备注，先保存到设备上的持久队列，再写入 Cloudflare Worker 与 D1。
 
 生产 API 当前部署在：
 
@@ -12,10 +12,10 @@ https://share.alpenl.com
 ## 范围
 
 - 保留 Android `ACTION_SEND` 的文本分享入口和完整 URL，不删除 query 或 fragment。
-- 分享时允许填写可选备注，再由应用直接提交到 Cloudflare。
+- 分享时允许填写可选备注，先持久化到本机，再由应用提交到 Cloudflare。
 - 后端只使用 Cloudflare Worker 与 D1，不依赖 Cairn、WebTag 或其他自托管服务。
 - 应用和 HTTP API 不做账号、会话或多用户权限，只使用一个部署侧访问 Token 保护读写接口。
-- Android 本地保存访问 Token、分享偏好、筛选、搜索词和上次打开页面。
+- Android 本地保存访问 Token、分享偏好、筛选、搜索词、上次打开页面和待上传任务。
 
 ## API
 
@@ -27,7 +27,7 @@ https://share.alpenl.com
 curl -X POST https://share.alpenl.com/api/links \
   -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
-  --data '{"url":"https://example.com/a?x=1#fragment","note":"later"}'
+  --data '{"url":"https://example.com/a?x=1#fragment","note":"later","client_id":"3f55e9e8-4d52-4f45-a33d-89be8ef7ab45"}'
 ```
 
 可用接口：
@@ -43,7 +43,8 @@ curl -X POST https://share.alpenl.com/api/links \
 
 `POST /api/links` 只接受 `application/json`。`url` 必须是有 host、无 userinfo 的
 HTTP(S) URL，最长 8192 个 UTF-16 code unit；`note` 可省略，最长 2000 个 UTF-16
-code unit。创建成功后的记录会包含：
+code unit。`client_id` 也可省略；Android 待上传队列会传入 UUID v4，同一个
+`client_id` 的重试会返回第一次创建的记录，不会重复写入。创建成功后的记录会包含：
 
 ```json
 {
@@ -80,7 +81,8 @@ curl -X DELETE https://share.alpenl.com/api/links/1 \
   -H 'Authorization: Bearer <token>'
 ```
 
-D1 使用参数化查询，MVP 允许重复链接，不做抓取或去重。直接打开
+D1 使用参数化查询；不同创建任务仍允许相同链接，同一个 `client_id` 的网络重试则保持
+幂等。不做抓取或内容去重。直接打开
 `https://share.alpenl.com/` 会显示一个 API 调试台。填写访问 Token 后，可以从浏览器
 手动创建、查询、搜索、修改和删除链接。
 
@@ -89,7 +91,7 @@ D1 使用参数化查询，MVP 允许重复链接，不做抓取或去重。直�
 Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，用户可见
 名称是 `链接收集`。Manifest 声明 `INTERNET`、`REQUEST_INSTALL_PACKAGES`、桌面启动
 入口、系统分享入口和用于 APK 安装的 `FileProvider`。界面设计基线在
-`design/cairn-links-app.html`，当前 Android 客户端按该原型实现 8 个页面和 1 个分享
+`design/cairn-links-app.html`，当前 Android 客户端按该原型实现完整应用壳和系统分享
 弹层。
 
 桌面启动入口打开完整应用壳：
@@ -99,6 +101,7 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
   系统返回逐级退出。
 - “链接库”提供总览、搜索、筛选、周进度、链接详情入口和手动添加 FAB。
 - “待学习”只展示未学习链接，按收藏时间先进先读，并支持批量标记已学习。
+- “待上传队列”展示尚未同步的本地链接，支持逐条重试、全部重试和移除。
 - “设置”展示只读服务器地址、访问 Token、分享偏好、更新入口、API 调试台入口和关于入口。
 - 系统 `ACTION_SEND` 不进入应用壳，而是打开透明 Activity 上的 Material bottom sheet。
 
@@ -109,20 +112,25 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 3. 单链接自动选中但不自动提交；多链接先让用户选择。
 4. 用户填写可选备注后点击“保存”。默认保留完整 URL；设置中关闭“保留完整链接”后，
    提交前会移除 query 与 fragment 并在 UI 中展示实际提交值。
-5. App 直接通过 Android/Java 原生 HTTPS API POST 到 Cloudflare Worker。
-6. 默认成功后关闭；设置中关闭“保存后立即关闭”后，成功状态会保留在弹层里。失败留在
-   当前界面，用户可手动重试。
+5. App 先把链接和稳定的客户端 UUID 写入本地 DataStore 队列，再通过 Android/Java
+   原生 HTTPS API POST 到 Cloudflare Worker。
+6. 上传成功后移除本地任务；断网、超时、服务异常或 Token 不可用时保留任务，不显示
+   “保存失败”。下次打开主应用会自动重试，也可以在设置中手动重试。
+7. 默认在链接已上传或已安全写入本地队列后关闭；设置中关闭“保存后立即关闭”后，状态会
+   保留在弹层里。
 
-直接从桌面打开 App 时，不会自动提交任何数据。链接库和待学习页面共享同一份云端数据；
+直接从桌面打开 App 时，会自动重试本地待上传任务，但不会凭空创建新任务。链接库和
+待学习页面共享同一份云端数据；
 详情页只通过链接 ID 进入，必要时调用 `GET /api/links/:id` 补齐记录。打开、复制、学习
 状态切换、编辑和删除都是真实网络操作；删除前必须确认，删除后不会伪造撤销。
 
 应用内更新：
 
 1. 桌面打开 App 时会检查 GitHub Release 最新稳定版本。
-2. 发现新版后，App 内部下载 APK 到自身 cache。
-3. 下载完成后通过 `FileProvider` 把 APK 授权给 Android 系统安装器。
-4. Android 8+ 如果尚未允许“安装未知来源应用”，会先打开系统权限设置；授权后回到 App
+2. 发现新版后，检查更新页面会展示该 Release 的版本号和更新说明。
+3. 用户确认后，App 内部下载 APK 到自身 cache。
+4. 下载完成后通过 `FileProvider` 把 APK 授权给 Android 系统安装器。
+5. Android 8+ 如果尚未允许“安装未知来源应用”，会先打开系统权限设置；授权后回到 App
    会继续打开安装器。
 
 普通 Android 应用不能静默安装 APK，最终确认安装仍由系统安装器完成，这是系统安全边界。
@@ -178,7 +186,8 @@ Cloudflare 配置位于 `worker/wrangler.jsonc`：
 - Custom domain：`share.alpenl.com`
 - Worker secret：`CAIRN_API_TOKEN`
 
-本地部署：
+发布包含 Worker 协议或 migration 的 Android 版本前，需要先手动运行 `deploy-worker.yml`；
+它会先测试，再迁移 D1 并部署。也可以在本地手动部署：
 
 ```bash
 cd worker
@@ -203,14 +212,15 @@ Cloudflare Dashboard 配置，不要提交 Wrangler OAuth 文件、Cloudflare to
 `release-android.yml` 只响应稳定 tag：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.7
+git push origin v0.2.7
 ```
 
 workflow 会验证 tag 提交位于 `main`，从 tag 注入 `versionName`，用
 `major * 10000 + minor * 100 + patch` 推导 `versionCode`，重新运行 Android 门禁，
 构建 unsigned release APK，然后在 `RUNNER_TEMP` 解码 keystore、zipalign、签名、
-`apksigner verify`，并校验证书 SHA-256。
+`apksigner verify`，并校验证书 SHA-256。每个发布版本必须在 `CHANGELOG.md` 中有对应的
+`## X.Y.Z` 小节，工作流会把该小节写入 GitHub Release，App 检查更新时会直接展示。
 
 需要配置这些 repository secrets：
 
@@ -225,7 +235,7 @@ GitHub Release 只上传 APK 和 `SHA256SUMS`。本项目不自动上传 Google 
 ## 非目标
 
 - 不抓取、解析、摘要或分类网页内容。
-- 不提供 Reader、待办、账户、跨设备同步或离线持久队列。
+- 不提供 Reader、待办、账户、跨设备同步或常驻后台同步。
 - 不包含 iOS 客户端、带鉴权的 Web 管理后台或应用商店自动上传。
 
 ## 数据边界

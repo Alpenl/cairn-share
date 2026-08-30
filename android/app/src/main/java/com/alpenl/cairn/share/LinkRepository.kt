@@ -20,8 +20,8 @@ internal class LinkRepository(apiBaseUrl: String) {
     fun get(id: Int, apiToken: String): LinkGetResult =
         client.get(id, apiToken)
 
-    fun create(url: String, note: String, apiToken: String): LinkCreateResult =
-        client.create(url, note, apiToken)
+    fun create(url: String, note: String, apiToken: String, clientId: String? = null): LinkCreateResult =
+        client.create(url, note, apiToken, clientId)
 
     fun update(
         id: Int,

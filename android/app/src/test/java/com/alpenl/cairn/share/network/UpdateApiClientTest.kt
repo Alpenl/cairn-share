@@ -20,6 +20,7 @@ class UpdateApiClientTest {
                 {
                   "tag_name": "v0.1.5",
                   "html_url": "https://github.com/Alpenl/cairn-share/releases/tag/v0.1.5",
+                  "body": "- 新增本地上传队列\n- 显示更新说明",
                   "assets": [
                     {
                       "name": "SHA256SUMS",
@@ -37,6 +38,7 @@ class UpdateApiClientTest {
         assertTrue(result is UpdateCheckResult.Available)
         val update = (result as UpdateCheckResult.Available).update
         assertEquals("0.1.5", update.versionName)
+        assertEquals("- 新增本地上传队列\n- 显示更新说明", update.releaseNotes)
         assertEquals(
             "https://github.com/Alpenl/cairn-share/releases/download/v0.1.5/cairn-share-android-0.1.5.apk",
             update.downloadUrl,
@@ -61,6 +63,13 @@ class UpdateApiClientTest {
             UpdateCheckResult.Failed,
             ReleaseUpdateParser.parse("0.1.4", releaseJson("nightly")),
         )
+    }
+
+    @Test
+    fun parserUsesAnExplicitFallbackWhenReleaseNotesAreEmpty() {
+        val result = ReleaseUpdateParser.parse("0.1.4", releaseJson("v0.1.5"))
+        assertTrue(result is UpdateCheckResult.Available)
+        assertEquals("此版本未提供更新说明。", (result as UpdateCheckResult.Available).update.releaseNotes)
     }
 
     private fun releaseJson(tagName: String): String =

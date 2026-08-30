@@ -140,9 +140,9 @@ internal class LinksApiClient(
         }
     }
 
-    fun create(url: String, note: String, apiToken: String): LinkCreateResult {
+    fun create(url: String, note: String, apiToken: String, clientId: String? = null): LinkCreateResult {
         val endpoint = URL("${baseUrl.trimEnd('/')}/api/links")
-        val body = LinkRequestJson.encode(url, note).toByteArray(StandardCharsets.UTF_8)
+        val body = LinkRequestJson.encode(url, note, clientId).toByteArray(StandardCharsets.UTF_8)
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "POST"

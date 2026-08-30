@@ -5,6 +5,7 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -13,6 +14,7 @@ class ShareApiClientTest {
     fun saveSendsStableUserAgent() {
         val userAgents = LinkedBlockingQueue<String>()
         val authorizations = LinkedBlockingQueue<String>()
+        val bodies = LinkedBlockingQueue<String>()
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val serverThread = Thread {
             server.use { socketServer ->
@@ -32,7 +34,7 @@ class ShareApiClientTest {
                         ?.trim()
                         ?.toIntOrNull()
                         ?: 0
-                    input.readNBytes(contentLength)
+                    bodies.offer(input.readNBytes(contentLength).toString(Charsets.UTF_8))
                     socket.getOutputStream().write(
                         "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
                             .toByteArray(Charsets.US_ASCII),
@@ -47,11 +49,19 @@ class ShareApiClientTest {
                 baseUrl = "http://127.0.0.1:${server.localPort}",
                 apiToken = "test-token",
                 userAgent = "CairnShareAndroid/test (Android)",
-            ).save("https://example.com/article", "稍后阅读")
+            ).save(
+                "https://example.com/article",
+                "稍后阅读",
+                "3f55e9e8-4d52-4f45-a33d-89be8ef7ab45",
+            )
 
             assertEquals(ShareSubmitResult.Saved, result)
             assertEquals("CairnShareAndroid/test (Android)", userAgents.poll(5, TimeUnit.SECONDS))
             assertEquals("Bearer test-token", authorizations.poll(5, TimeUnit.SECONDS))
+            assertEquals(
+                "3f55e9e8-4d52-4f45-a33d-89be8ef7ab45",
+                JSONObject(bodies.poll(5, TimeUnit.SECONDS)).getString("client_id"),
+            )
         } finally {
             server.close()
             serverThread.join(5_000)

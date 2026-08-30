@@ -16,4 +16,14 @@ class LinkRequestJsonTest {
         assertEquals(note, json.getString("note"))
         assertEquals(2, json.length())
     }
+
+    @Test
+    fun queuedRequestIncludesStableClientId() {
+        val clientId = "3f55e9e8-4d52-4f45-a33d-89be8ef7ab45"
+
+        val json = JSONObject(LinkRequestJson.encode("https://example.com", "", clientId))
+
+        assertEquals(clientId, json.getString("client_id"))
+        assertEquals(3, json.length())
+    }
 }

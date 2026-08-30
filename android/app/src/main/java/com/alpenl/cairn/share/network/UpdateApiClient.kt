@@ -12,6 +12,7 @@ internal data class AppUpdateInfo(
     val versionName: String,
     val releaseUrl: String,
     val downloadUrl: String,
+    val releaseNotes: String,
 )
 
 internal sealed interface UpdateCheckResult {
@@ -74,6 +75,11 @@ internal object ReleaseUpdateParser {
                 .removePrefix("V")
             val releaseUrl = release.optString("html_url").trim()
             val downloadUrl = apkDownloadUrl(release).ifBlank { releaseUrl }
+            val releaseNotes = (release.opt("body") as? String).orEmpty()
+                .replace("\r\n", "\n")
+                .trim()
+                .take(MAX_RELEASE_NOTES_LENGTH)
+                .ifBlank { "此版本未提供更新说明。" }
 
             if (releaseUrl.isBlank() || downloadUrl.isBlank() || SemVer.compare(latestVersionName, currentVersionName) <= 0) {
                 UpdateCheckResult.UpToDate
@@ -83,6 +89,7 @@ internal object ReleaseUpdateParser {
                         versionName = latestVersionName,
                         releaseUrl = releaseUrl,
                         downloadUrl = downloadUrl,
+                        releaseNotes = releaseNotes,
                     ),
                 )
             }
@@ -103,6 +110,8 @@ internal object ReleaseUpdateParser {
         }
         return ""
     }
+
+    private const val MAX_RELEASE_NOTES_LENGTH = 20_000
 }
 
 internal object SemVer {

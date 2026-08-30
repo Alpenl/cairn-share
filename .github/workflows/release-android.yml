@@ -155,14 +155,21 @@ jobs:
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/release-notes.md"
-          {
-            echo "Cairn Share Android ${VERSION_NAME}"
-            echo
-            echo "- Public unauthenticated Cloudflare-backed link saver."
-            echo "- No account, token, local queue, old Cairn/WebTag backend, or Play upload."
-            echo "- APK and SHA256SUMS are attached below."
-          } > "${notes}"
+          awk -v heading="## ${VERSION_NAME}" '
+            $0 == heading { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 2 }
+          ' CHANGELOG.md > "${notes}" || {
+            echo "::error::CHANGELOG.md is missing a section for ${VERSION_NAME}"
+            exit 1
+          }
+          grep -q '[^[:space:]]' "${notes}" || {
+            echo "::error::CHANGELOG.md section for ${VERSION_NAME} is empty"
+            exit 1
+          }
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --notes-file "${notes}"
             gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber release-assets/*
           else
             gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --verify-tag \

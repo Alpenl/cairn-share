@@ -43,6 +43,13 @@ internal fun String.shortDateTime(): String =
             this
         }
 
+internal fun Long.shortDateTime(): String =
+    runCatching {
+        Instant.ofEpochMilli(this)
+            .atZone(ZoneId.systemDefault())
+            .format(ShortDateTimeFormatter)
+    }.getOrDefault("未知时间")
+
 internal fun parseInstantOrNull(value: String): Instant? =
     runCatching { Instant.parse(value) }.getOrNull()
 
