@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import worker, { type Env } from "../src/index";
 
 const TEST_TOKEN = "cairn_test_token_123456789";
+const TEST_ENRICHER_TOKEN = "cairn_enricher_test_token_123456789";
 
 beforeEach(async () => {
   await reset();
@@ -33,6 +34,25 @@ describe("cairn-share worker", () => {
       .first<{ sql: string }>();
     expect(clientIdIndex?.sql).toContain("UNIQUE");
     expect(clientIdIndex?.sql).toContain("client_id");
+
+    const columns = await env.DB.prepare("PRAGMA table_info(links)").all<{ name: string }>();
+    expect(columns.results?.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "enrichment_status",
+      "enrichment_attempts",
+      "enrichment_lease_token",
+      "original_text",
+      "summary",
+      "related_links",
+      "enriched_at"
+    ]));
+
+    const enrichmentIndex = await env.DB.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?"
+    )
+      .bind("links_enrichment_queue_idx")
+      .first<{ sql: string }>();
+    expect(enrichmentIndex?.sql).toContain("enrichment_status");
+    expect(enrichmentIndex?.sql).toContain("enrichment_next_retry_at");
   });
 
   it("serves an API debugging interface at the root path", async () => {
@@ -66,6 +86,231 @@ describe("cairn-share worker", () => {
     const health = await dispatch("/health", undefined, null, "");
     expect(health.status).toBe(200);
     await expect(health.json()).resolves.toEqual({ ok: true });
+  });
+
+  it("protects enrichment jobs with a separate bearer token", async () => {
+    const missing = await dispatchEnrichment("/api/enrichment/jobs/claim", { method: "POST" }, null);
+    await expectError(Promise.resolve(missing), 401, "missing_auth");
+
+    const appToken = await dispatch("/api/enrichment/jobs/claim", { method: "POST" });
+    await expectError(Promise.resolve(appToken), 401, "invalid_token");
+
+    const unconfigured = await dispatchEnrichment(
+      "/api/enrichment/jobs/claim",
+      { method: "POST" },
+      TEST_ENRICHER_TOKEN,
+      ""
+    );
+    await expectError(Promise.resolve(unconfigured), 500, "auth_not_configured");
+  });
+
+  it("atomically claims only X links in FIFO order", async () => {
+    await create("https://example.com/not-an-x-link");
+    const first = await create("https://x.com/example/status/100", "first note");
+    const second = await create("https://Twitter.com/example/status/101", "second note");
+
+    const firstClaim = await claimEnrichment();
+    expect(firstClaim.status).toBe(200);
+    const firstJob = await json(firstClaim);
+    expect(firstJob).toMatchObject({ id: first.id, url: first.url, note: "first note", attempt: 1 });
+    expect(firstJob.lease_token).toMatch(/^[0-9a-f-]{36}$/);
+    expect(firstJob.lease_until).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const secondClaim = await claimEnrichment();
+    expect(secondClaim.status).toBe(200);
+    await expect(secondClaim.json()).resolves.toMatchObject({ id: second.id, attempt: 1 });
+
+    const empty = await claimEnrichment();
+    expect(empty.status).toBe(204);
+    expect(await empty.text()).toBe("");
+
+    const claimed = await env.DB.prepare(
+      "SELECT enrichment_status, enrichment_attempts FROM links WHERE id = ?"
+    )
+      .bind(first.id)
+      .first<{ enrichment_status: string; enrichment_attempts: number }>();
+    expect(claimed).toEqual({ enrichment_status: "processing", enrichment_attempts: 1 });
+  });
+
+  it("stores completed enrichment without changing the public link contract", async () => {
+    const created = await create("https://x.com/example/status/200");
+    const job = await json(await claimEnrichment());
+
+    await expectError(
+      completeEnrichment(created.id, {
+        lease_token: "stale-token",
+        original_text: "原文",
+        summary: "简介",
+        related_links: [],
+        model: "grok-test"
+      }),
+      409,
+      "lease_conflict"
+    );
+
+    const completed = await completeEnrichment(created.id, {
+      lease_token: job.lease_token,
+      original_text: "  完整原文  ",
+      summary: "  简短总结  ",
+      related_links: ["https://example.com/source", "https://example.com/source"],
+      model: "grok-test"
+    });
+    expect(completed.status).toBe(200);
+    await expect(completed.json()).resolves.toMatchObject({ id: created.id, status: "completed" });
+
+    const stored = await env.DB.prepare(
+      `SELECT enrichment_status, original_text, summary, related_links, enrichment_model,
+              enrichment_lease_token, enriched_at
+       FROM links WHERE id = ?`
+    )
+      .bind(created.id)
+      .first<{
+        enrichment_status: string;
+        original_text: string;
+        summary: string;
+        related_links: string;
+        enrichment_model: string;
+        enrichment_lease_token: string | null;
+        enriched_at: string;
+      }>();
+    expect(stored).toMatchObject({
+      enrichment_status: "completed",
+      original_text: "完整原文",
+      summary: "简短总结",
+      related_links: JSON.stringify(["https://example.com/source"]),
+      enrichment_model: "grok-test",
+      enrichment_lease_token: null
+    });
+    expect(stored?.enriched_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const publicLink = await json(await dispatch(`/api/links/${created.id}`));
+    expect(publicLink).toMatchObject(created);
+    expect(publicLink).not.toHaveProperty("summary");
+    expect((await claimEnrichment()).status).toBe(204);
+  });
+
+  it("backs off failed jobs, recovers expired work and exhausts bounded retries", async () => {
+    const created = await create("https://x.com/example/status/300");
+    const firstJob = await json(await claimEnrichment());
+
+    const failed = await failEnrichment(created.id, {
+      lease_token: firstJob.lease_token,
+      error: "temporary upstream failure"
+    });
+    expect(failed.status).toBe(200);
+    const failureBody = await json(failed);
+    expect(failureBody).toMatchObject({ id: created.id, status: "failed" });
+    expect(failureBody.next_retry_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect((await claimEnrichment()).status).toBe(204);
+
+    await env.DB.prepare(
+      "UPDATE links SET enrichment_next_retry_at = ? WHERE id = ?"
+    )
+      .bind("2000-01-01T00:00:00.000Z", created.id)
+      .run();
+    const retryJob = await json(await claimEnrichment());
+    expect(retryJob).toMatchObject({ id: created.id, attempt: 2 });
+
+    await env.DB.prepare(
+      "UPDATE links SET enrichment_attempts = ? WHERE id = ?"
+    )
+      .bind(5, created.id)
+      .run();
+    const exhausted = await failEnrichment(created.id, {
+      lease_token: retryJob.lease_token,
+      error: "permanent failure"
+    });
+    await expect(exhausted.json()).resolves.toEqual({
+      id: created.id,
+      status: "exhausted",
+      next_retry_at: null
+    });
+    expect((await claimEnrichment()).status).toBe(204);
+  });
+
+  it("returns expired leases to the queue and resets enrichment after content edits", async () => {
+    const created = await create("https://x.com/example/status/400", "old note");
+    const firstJob = await json(await claimEnrichment());
+    await env.DB.prepare(
+      "UPDATE links SET enrichment_lease_until = ? WHERE id = ?"
+    )
+      .bind("2000-01-01T00:00:00.000Z", created.id)
+      .run();
+
+    const recovered = await json(await claimEnrichment());
+    expect(recovered).toMatchObject({ id: created.id, attempt: 2 });
+    expect(recovered.lease_token).not.toBe(firstJob.lease_token);
+    await expectError(
+      completeEnrichment(created.id, {
+        lease_token: firstJob.lease_token,
+        original_text: "stale",
+        summary: "stale",
+        related_links: [],
+        model: "grok-test"
+      }),
+      409,
+      "lease_conflict"
+    );
+
+    const completed = await completeEnrichment(created.id, {
+      lease_token: recovered.lease_token,
+      original_text: "fresh text",
+      summary: "fresh summary",
+      related_links: [],
+      model: "grok-test"
+    });
+    expect(completed.status).toBe(200);
+
+    await patchJson(created.id, { note: "new note" });
+    const resetRow = await env.DB.prepare(
+      `SELECT enrichment_status, enrichment_attempts, original_text, summary, enriched_at
+       FROM links WHERE id = ?`
+    )
+      .bind(created.id)
+      .first<{
+        enrichment_status: string;
+        enrichment_attempts: number;
+        original_text: string | null;
+        summary: string | null;
+        enriched_at: string | null;
+      }>();
+    expect(resetRow).toEqual({
+      enrichment_status: "pending",
+      enrichment_attempts: 0,
+      original_text: null,
+      summary: null,
+      enriched_at: null
+    });
+  });
+
+  it("validates enrichment result shapes and methods", async () => {
+    const created = await create("https://x.com/example/status/500");
+    const job = await json(await claimEnrichment());
+
+    await expectError(
+      completeEnrichment(created.id, {
+        lease_token: job.lease_token,
+        original_text: "text",
+        summary: "summary",
+        related_links: ["javascript:alert(1)"],
+        model: "grok-test"
+      }),
+      400,
+      "invalid_enrichment"
+    );
+    await expectError(
+      dispatchEnrichment(`/api/enrichment/jobs/${created.id}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: "{}"
+      }),
+      400,
+      "invalid_content_type"
+    );
+
+    const method = await dispatchEnrichment("/api/enrichment/jobs/claim", { method: "GET" });
+    expect(method.status).toBe(405);
+    expect(method.headers.get("allow")).toBe("POST, OPTIONS");
   });
 
   it("saves a link with a valid bearer token and preserves the exact URL and note", async () => {
@@ -425,6 +670,26 @@ async function patchRaw(id: number, body: string): Promise<Response> {
   });
 }
 
+async function claimEnrichment(): Promise<Response> {
+  return dispatchEnrichment("/api/enrichment/jobs/claim", { method: "POST" });
+}
+
+async function completeEnrichment(id: number, body: unknown): Promise<Response> {
+  return dispatchEnrichment(`/api/enrichment/jobs/${id}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(body)
+  });
+}
+
+async function failEnrichment(id: number, body: unknown): Promise<Response> {
+  return dispatchEnrichment(`/api/enrichment/jobs/${id}/fail`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(body)
+  });
+}
+
 async function expectError(responsePromise: Promise<Response>, status: number, code: string): Promise<void> {
   const response = await responsePromise;
   expect(response.status).toBe(status);
@@ -452,5 +717,27 @@ async function dispatch(
   return worker.fetch(request, {
     DB: env.DB,
     CAIRN_API_TOKEN: configuredToken,
+    CAIRN_ENRICHER_TOKEN: TEST_ENRICHER_TOKEN,
+  } satisfies Env);
+}
+
+async function dispatchEnrichment(
+  path: string,
+  init?: RequestInit,
+  token: string | null = TEST_ENRICHER_TOKEN,
+  configuredToken: string = TEST_ENRICHER_TOKEN
+): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  if (token !== null) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const request = new Request(`https://cairn-share-api.example${path}`, {
+    ...init,
+    headers
+  });
+  return worker.fetch(request, {
+    DB: env.DB,
+    CAIRN_API_TOKEN: TEST_TOKEN,
+    CAIRN_ENRICHER_TOKEN: configuredToken
   } satisfies Env);
 }

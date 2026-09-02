@@ -13,7 +13,8 @@ https://share.alpenl.com
 
 - 保留 Android `ACTION_SEND` 的文本分享入口和完整 URL，不删除 query 或 fragment。
 - 分享时允许填写可选备注，先持久化到本机，再由应用提交到 Cloudflare。
-- 后端只使用 Cloudflare Worker 与 D1，不依赖 Cairn、WebTag 或其他自托管服务。
+- App 的在线后端只使用 Cloudflare Worker 与 D1；可选的独立 X Enricher 服务通过内部
+  Worker API 写回原文、摘要和相关链接，不进入 Android 安装包，也不改变 App API。
 - 应用和 HTTP API 不做账号、会话或多用户权限，只使用一个部署侧访问 Token 保护读写接口。
 - Android 本地保存访问 Token、分享偏好、筛选、搜索词、上次打开页面和待上传任务。
 
@@ -40,6 +41,16 @@ curl -X POST https://share.alpenl.com/api/links \
 - `PATCH /api/links/:id`
 - `DELETE /api/links/:id`
 - `OPTIONS *`
+
+Worker 另提供三个不属于 App 公共契约的内部接口：
+
+- `POST /api/enrichment/jobs/claim`
+- `POST /api/enrichment/jobs/:id/complete`
+- `POST /api/enrichment/jobs/:id/fail`
+
+它们只接受独立的 `CAIRN_ENRICHER_TOKEN`，用于可选的
+[`cairn-x-enricher`](https://github.com/Alpenl/cairn-x-enricher) 服务。App 的
+`CAIRN_API_TOKEN` 无权调用这些接口，公开链接响应也不会增加增强字段。
 
 `POST /api/links` 只接受 `application/json`。`url` 必须是有 host、无 userinfo 的
 HTTP(S) URL，最长 8192 个 UTF-16 code unit；`note` 可省略，最长 2000 个 UTF-16
@@ -184,7 +195,7 @@ Cloudflare 配置位于 `worker/wrangler.jsonc`：
 - D1 binding：`DB`
 - D1 database id：`08f52f6c-4f94-4e51-bd1c-596fdeac295c`
 - Custom domain：`share.alpenl.com`
-- Worker secret：`CAIRN_API_TOKEN`
+- Worker secrets：`CAIRN_API_TOKEN`、`CAIRN_ENRICHER_TOKEN`
 
 发布包含 Worker 协议或 migration 的 Android 版本前，需要先手动运行 `deploy-worker.yml`；
 它会先测试，再迁移 D1 并部署。也可以在本地手动部署：
@@ -193,6 +204,7 @@ Cloudflare 配置位于 `worker/wrangler.jsonc`：
 cd worker
 npm run migrate:remote
 npx wrangler secret put CAIRN_API_TOKEN
+npx wrangler secret put CAIRN_ENRICHER_TOKEN
 npm run deploy
 ```
 
@@ -203,9 +215,10 @@ repository/environment secrets：
 - `CLOUDFLARE_API_TOKEN`
 
 Cloudflare API token 应使用最小权限，只授予部署该 Worker 和迁移该 D1 所需能力。
-`CAIRN_API_TOKEN` 是应用访问 API 用的 Bearer token，应通过 Wrangler secret 或
-Cloudflare Dashboard 配置，不要提交 Wrangler OAuth 文件、Cloudflare token、`.dev.vars`
-或 GitHub secret 值。
+`CAIRN_API_TOKEN` 是应用访问 API 用的 Bearer token；`CAIRN_ENRICHER_TOKEN` 只供
+伴随服务领取和提交增强任务。两者不得复用，均应通过 Wrangler secret 或 Cloudflare
+Dashboard 配置。不要提交 Wrangler OAuth 文件、Cloudflare token、`.dev.vars` 或
+GitHub secret 值。
 
 ## Android 发布
 
@@ -234,7 +247,8 @@ GitHub Release 只上传 APK 和 `SHA256SUMS`。本项目不自动上传 Google 
 
 ## 非目标
 
-- 不抓取、解析、摘要或分类网页内容。
+- Android App 和公开 API 不抓取、解析、摘要或分类网页内容；可选伴随服务只处理 X 收藏，
+  并通过独立鉴权的内部接口写回结果。
 - 不提供 Reader、待办、账户、跨设备同步或常驻后台同步。
 - 不包含 iOS 客户端、带鉴权的 Web 管理后台或应用商店自动上传。
 

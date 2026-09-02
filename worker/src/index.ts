@@ -1,6 +1,7 @@
 export interface Env {
   DB: D1Database;
   CAIRN_API_TOKEN: string;
+  CAIRN_ENRICHER_TOKEN: string;
 }
 
 interface LinkRecord {
@@ -21,6 +22,16 @@ interface LinkRow {
   learned_at: string | null;
 }
 
+interface EnrichmentJobRow {
+  id: number;
+  url: string;
+  note: string;
+  created_at: string;
+  enrichment_attempts: number;
+  enrichment_lease_token: string;
+  enrichment_lease_until: string;
+}
+
 type ErrorCode =
   | "invalid_json"
   | "invalid_content_type"
@@ -32,9 +43,11 @@ type ErrorCode =
   | "invalid_update"
   | "invalid_limit"
   | "invalid_before_id"
+  | "invalid_enrichment"
   | "missing_auth"
   | "invalid_token"
   | "auth_not_configured"
+  | "lease_conflict"
   | "not_found"
   | "method_not_allowed";
 
@@ -63,6 +76,14 @@ const MAX_QUERY_LENGTH = 200;
 const CLIENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
+const MAX_ENRICHMENT_ATTEMPTS = 5;
+const ENRICHMENT_LEASE_MILLISECONDS = 15 * 60 * 1000;
+const MAX_ORIGINAL_TEXT_LENGTH = 100_000;
+const MAX_SUMMARY_LENGTH = 4_000;
+const MAX_RELATED_LINKS = 50;
+const MAX_MODEL_LENGTH = 200;
+const MAX_ENRICHMENT_ERROR_LENGTH = 2_000;
+const ENRICHMENT_RETRY_DELAYS_MILLISECONDS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
 const READ_CACHE_TTL_SECONDS = 15;
 const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}, s-maxage=${READ_CACHE_TTL_SECONDS}`;
 const CACHE_VERSION = "2";
@@ -132,6 +153,24 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     return routeMethod(request, ["GET", "POST"], () => {
       if (request.method === "POST") return createLink(request, env, timing);
       return listLinks(request, url, env, timing);
+    });
+  }
+
+  if (path === "/api/enrichment/jobs/claim") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["POST"], () => claimEnrichmentJob(env, timing));
+  }
+
+  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(complete|fail)$/);
+  if (enrichmentJobMatch !== null) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["POST"], () => {
+      const id = Number(enrichmentJobMatch[1]);
+      return enrichmentJobMatch[2] === "complete"
+        ? completeEnrichmentJob(request, env, id, timing)
+        : failEnrichmentJob(request, env, id, timing);
     });
   }
 
@@ -263,6 +302,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
   const body = raw as Record<string, unknown>;
   const updates: string[] = [];
   const bindings: Array<string | number | null> = [];
+  let enrichmentInputChanged = false;
 
   if ("url" in body) {
     if (typeof body.url !== "string") {
@@ -274,6 +314,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     }
     updates.push("url = ?");
     bindings.push(url);
+    enrichmentInputChanged = true;
   }
 
   if ("note" in body) {
@@ -282,6 +323,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     }
     updates.push("note = ?");
     bindings.push(body.note);
+    enrichmentInputChanged = true;
   }
 
   if ("learned" in body) {
@@ -294,6 +336,23 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
 
   if (updates.length === 0) {
     return error("invalid_update");
+  }
+
+  if (enrichmentInputChanged) {
+    updates.push(
+      "enrichment_status = 'pending'",
+      "enrichment_attempts = 0",
+      "enrichment_next_retry_at = NULL",
+      "enrichment_lease_token = NULL",
+      "enrichment_lease_until = NULL",
+      "original_text = NULL",
+      "summary = NULL",
+      "related_links = NULL",
+      "enrichment_model = NULL",
+      "enrichment_error = NULL",
+      "enrichment_updated_at = NULL",
+      "enriched_at = NULL"
+    );
   }
 
   bindings.push(id);
@@ -327,6 +386,202 @@ async function deleteLink(env: Env, id: number, timing: TimingCollector): Promis
   }
   await bumpLinksCacheGeneration(env, timing);
   return new Response(null, { status: 204, headers: CORS_HEADERS });
+}
+
+async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Response> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const leaseToken = crypto.randomUUID();
+  const leaseUntil = new Date(now.getTime() + ENRICHMENT_LEASE_MILLISECONDS).toISOString();
+  const row = await timing.measure("db", () =>
+    env.DB.prepare(
+      `UPDATE links
+        SET enrichment_status = 'processing',
+            enrichment_attempts = enrichment_attempts + 1,
+            enrichment_next_retry_at = NULL,
+            enrichment_lease_token = ?,
+            enrichment_lease_until = ?,
+            enrichment_error = NULL,
+            enrichment_updated_at = ?
+        WHERE id = (
+          SELECT id
+          FROM links
+          WHERE (
+              lower(url) LIKE 'https://x.com/%'
+              OR lower(url) LIKE 'http://x.com/%'
+              OR lower(url) LIKE 'https://www.x.com/%'
+              OR lower(url) LIKE 'http://www.x.com/%'
+              OR lower(url) LIKE 'https://twitter.com/%'
+              OR lower(url) LIKE 'http://twitter.com/%'
+              OR lower(url) LIKE 'https://www.twitter.com/%'
+              OR lower(url) LIKE 'http://www.twitter.com/%'
+            )
+            AND enrichment_attempts < ?
+            AND (
+              enrichment_status = 'pending'
+              OR (
+                enrichment_status = 'failed'
+                AND (enrichment_next_retry_at IS NULL OR enrichment_next_retry_at <= ?)
+              )
+              OR (
+                enrichment_status = 'processing'
+                AND (enrichment_lease_until IS NULL OR enrichment_lease_until <= ?)
+              )
+            )
+          ORDER BY id ASC
+          LIMIT 1
+        )
+        RETURNING id, url, note, created_at, enrichment_attempts,
+                  enrichment_lease_token, enrichment_lease_until`
+    )
+      .bind(leaseToken, leaseUntil, nowIso, MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso)
+      .first<EnrichmentJobRow>()
+  );
+
+  if (row === null) {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+
+  return json({
+    id: row.id,
+    url: row.url,
+    note: row.note,
+    created_at: row.created_at,
+    attempt: row.enrichment_attempts,
+    lease_token: row.enrichment_lease_token,
+    lease_until: row.enrichment_lease_until
+  });
+}
+
+async function completeEnrichmentJob(
+  request: Request,
+  env: Env,
+  id: number,
+  timing: TimingCollector
+): Promise<Response> {
+  const body = await readEnrichmentBody(request);
+  if (body instanceof Response) return body;
+
+  const leaseToken = readBoundedString(body.lease_token, 1, 100);
+  const originalText = readBoundedString(body.original_text, 1, MAX_ORIGINAL_TEXT_LENGTH);
+  const summary = readBoundedString(body.summary, 1, MAX_SUMMARY_LENGTH);
+  const model = readBoundedString(body.model, 1, MAX_MODEL_LENGTH);
+  const relatedLinks = validateRelatedLinks(body.related_links);
+  if (leaseToken === null || originalText === null || summary === null || model === null || relatedLinks === null) {
+    return error("invalid_enrichment");
+  }
+
+  const now = new Date().toISOString();
+  const row = await timing.measure("db", () =>
+    env.DB.prepare(
+      `UPDATE links
+        SET enrichment_status = 'completed',
+            enrichment_next_retry_at = NULL,
+            enrichment_lease_token = NULL,
+            enrichment_lease_until = NULL,
+            original_text = ?,
+            summary = ?,
+            related_links = ?,
+            enrichment_model = ?,
+            enrichment_error = NULL,
+            enrichment_updated_at = ?,
+            enriched_at = ?
+        WHERE id = ?
+          AND enrichment_status = 'processing'
+          AND enrichment_lease_token = ?
+        RETURNING id`
+    )
+      .bind(originalText, summary, JSON.stringify(relatedLinks), model, now, now, id, leaseToken)
+      .first<{ id: number }>()
+  );
+
+  if (row === null) return error("lease_conflict", 409);
+  return json({ id: row.id, status: "completed", enriched_at: now });
+}
+
+async function failEnrichmentJob(
+  request: Request,
+  env: Env,
+  id: number,
+  timing: TimingCollector
+): Promise<Response> {
+  const body = await readEnrichmentBody(request);
+  if (body instanceof Response) return body;
+
+  const leaseToken = readBoundedString(body.lease_token, 1, 100);
+  const failure = readBoundedString(body.error, 1, MAX_ENRICHMENT_ERROR_LENGTH);
+  if (leaseToken === null || failure === null) return error("invalid_enrichment");
+
+  const current = await timing.measure("db", () =>
+    env.DB.prepare(
+      `SELECT enrichment_attempts
+       FROM links
+       WHERE id = ? AND enrichment_status = 'processing' AND enrichment_lease_token = ?`
+    )
+      .bind(id, leaseToken)
+      .first<{ enrichment_attempts: number }>()
+  );
+  if (current === null) return error("lease_conflict", 409);
+
+  const now = new Date();
+  const exhausted = current.enrichment_attempts >= MAX_ENRICHMENT_ATTEMPTS;
+  const delayIndex = Math.max(0, Math.min(current.enrichment_attempts - 1, ENRICHMENT_RETRY_DELAYS_MILLISECONDS.length - 1));
+  const nextRetryAt = exhausted
+    ? null
+    : new Date(now.getTime() + ENRICHMENT_RETRY_DELAYS_MILLISECONDS[delayIndex]).toISOString();
+  const status = exhausted ? "exhausted" : "failed";
+  const row = await timing.measure("db", () =>
+    env.DB.prepare(
+      `UPDATE links
+        SET enrichment_status = ?,
+            enrichment_next_retry_at = ?,
+            enrichment_lease_token = NULL,
+            enrichment_lease_until = NULL,
+            enrichment_error = ?,
+            enrichment_updated_at = ?
+        WHERE id = ? AND enrichment_status = 'processing' AND enrichment_lease_token = ?
+        RETURNING id`
+    )
+      .bind(status, nextRetryAt, failure, now.toISOString(), id, leaseToken)
+      .first<{ id: number }>()
+  );
+
+  if (row === null) return error("lease_conflict", 409);
+  return json({ id: row.id, status, next_retry_at: nextRetryAt });
+}
+
+async function readEnrichmentBody(request: Request): Promise<Record<string, unknown> | Response> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (contentType.toLowerCase().split(";")[0].trim() !== "application/json") {
+    return error("invalid_content_type");
+  }
+  const raw = await readJson(request);
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return error("invalid_json");
+  }
+  return raw as Record<string, unknown>;
+}
+
+function readBoundedString(value: unknown, minLength: number, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length >= minLength && trimmed.length <= maxLength ? trimmed : null;
+}
+
+function validateRelatedLinks(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > MAX_RELATED_LINKS) return null;
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") return null;
+    const link = item.trim();
+    if (!isValidHttpUrl(link)) return null;
+    if (!seen.has(link)) {
+      seen.add(link);
+      unique.push(link);
+    }
+  }
+  return unique;
 }
 
 async function cachedJson(
@@ -370,7 +625,15 @@ function shouldBypassReadCache(request: Request): boolean {
 }
 
 function requireApiToken(request: Request, env: Env): Response | null {
-  const expected = env.CAIRN_API_TOKEN?.trim();
+  return requireBearerToken(request, env.CAIRN_API_TOKEN);
+}
+
+function requireEnricherToken(request: Request, env: Env): Response | null {
+  return requireBearerToken(request, env.CAIRN_ENRICHER_TOKEN);
+}
+
+function requireBearerToken(request: Request, configuredToken: string): Response | null {
+  const expected = configuredToken?.trim();
   if (!expected) {
     return authError("auth_not_configured", 500);
   }
