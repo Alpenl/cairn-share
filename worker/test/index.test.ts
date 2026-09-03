@@ -95,6 +95,9 @@ describe("cairn-share worker", () => {
     const appToken = await dispatch("/api/enrichment/jobs/claim", { method: "POST" });
     await expectError(Promise.resolve(appToken), 401, "invalid_token");
 
+    const listMissing = await dispatchEnrichment("/api/enrichment/jobs", { method: "GET" }, null);
+    await expectError(Promise.resolve(listMissing), 401, "missing_auth");
+
     const unconfigured = await dispatchEnrichment(
       "/api/enrichment/jobs/claim",
       { method: "POST" },
@@ -187,6 +190,68 @@ describe("cairn-share worker", () => {
     expect(publicLink).toMatchObject(created);
     expect(publicLink).not.toHaveProperty("summary");
     expect((await claimEnrichment()).status).toBe(204);
+  });
+
+  it("lists X bookmarks, returns details and manually reclaims a selected item", async () => {
+    await create("https://example.com/not-an-x-link", "hidden");
+    const completed = await create("https://x.com/example/status/210", "已完成收藏");
+    const claimed = await json(await claimEnrichment());
+    await completeEnrichment(completed.id, {
+      lease_token: claimed.lease_token,
+      original_text: "完整帖子原文",
+      summary: "可搜索的测试总结",
+      related_links: ["https://example.com/relevant"],
+      model: "grok-test"
+    });
+    const pending = await create("https://twitter.com/example/status/211", "待处理收藏");
+
+    const firstPage = await dispatchEnrichment("/api/enrichment/jobs?limit=1", { method: "GET" });
+    expect(firstPage.status).toBe(200);
+    const firstPageBody = await json(firstPage);
+    expect(firstPageBody.items).toHaveLength(1);
+    expect(firstPageBody.items[0]).toMatchObject({
+      id: pending.id,
+      status: "pending",
+      attempts: 0,
+      related_links: []
+    });
+    expect(firstPageBody.items[0]).not.toHaveProperty("original_text");
+    expect(firstPageBody.items[0]).not.toHaveProperty("lease_token");
+    expect(firstPageBody.next_before_id).toBe(pending.id);
+    expect(firstPageBody.counts).toEqual({
+      total: 2,
+      pending: 1,
+      processing: 0,
+      completed: 1,
+      failed: 0,
+      exhausted: 0
+    });
+
+    const filtered = await dispatchEnrichment(
+      `/api/enrichment/jobs?status=completed&q=${encodeURIComponent("测试总结")}`,
+      { method: "GET" }
+    );
+    const filteredBody = await json(filtered);
+    expect(filteredBody.items).toHaveLength(1);
+    expect(filteredBody.items[0]).toMatchObject({
+      id: completed.id,
+      status: "completed",
+      summary: "可搜索的测试总结",
+      related_links: ["https://example.com/relevant"]
+    });
+
+    const detail = await dispatchEnrichment(`/api/enrichment/jobs/${completed.id}`, { method: "GET" });
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toMatchObject({
+      id: completed.id,
+      original_text: "完整帖子原文"
+    });
+
+    const manual = await claimEnrichmentByID(completed.id);
+    expect(manual.status).toBe(200);
+    await expect(manual.json()).resolves.toMatchObject({ id: completed.id, attempt: 1 });
+    await expectError(claimEnrichmentByID(completed.id), 409, "job_busy");
+    await expectError(claimEnrichmentByID(999), 404, "not_found");
   });
 
   it("backs off failed jobs, recovers expired work and exhausts bounded retries", async () => {
@@ -311,6 +376,12 @@ describe("cairn-share worker", () => {
     const method = await dispatchEnrichment("/api/enrichment/jobs/claim", { method: "GET" });
     expect(method.status).toBe(405);
     expect(method.headers.get("allow")).toBe("POST, OPTIONS");
+
+    await expectError(
+      dispatchEnrichment("/api/enrichment/jobs?status=unknown", { method: "GET" }),
+      400,
+      "invalid_status"
+    );
   });
 
   it("saves a link with a valid bearer token and preserves the exact URL and note", async () => {
@@ -672,6 +743,10 @@ async function patchRaw(id: number, body: string): Promise<Response> {
 
 async function claimEnrichment(): Promise<Response> {
   return dispatchEnrichment("/api/enrichment/jobs/claim", { method: "POST" });
+}
+
+async function claimEnrichmentByID(id: number): Promise<Response> {
+  return dispatchEnrichment(`/api/enrichment/jobs/${id}/claim`, { method: "POST" });
 }
 
 async function completeEnrichment(id: number, body: unknown): Promise<Response> {

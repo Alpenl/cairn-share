@@ -32,6 +32,37 @@ interface EnrichmentJobRow {
   enrichment_lease_until: string;
 }
 
+type EnrichmentStatus = "pending" | "processing" | "completed" | "failed" | "exhausted";
+
+interface EnrichmentListRow {
+  id: number;
+  url: string;
+  note: string;
+  created_at: string;
+  enrichment_status: EnrichmentStatus;
+  enrichment_attempts: number;
+  enrichment_next_retry_at: string | null;
+  summary: string | null;
+  related_links: string | null;
+  enrichment_model: string | null;
+  enrichment_error: string | null;
+  enrichment_updated_at: string | null;
+  enriched_at: string | null;
+}
+
+interface EnrichmentDetailRow extends EnrichmentListRow {
+  original_text: string | null;
+}
+
+interface EnrichmentCountRow {
+  total: number;
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  exhausted: number;
+}
+
 type ErrorCode =
   | "invalid_json"
   | "invalid_content_type"
@@ -43,11 +74,13 @@ type ErrorCode =
   | "invalid_update"
   | "invalid_limit"
   | "invalid_before_id"
+  | "invalid_status"
   | "invalid_enrichment"
   | "missing_auth"
   | "invalid_token"
   | "auth_not_configured"
   | "lease_conflict"
+  | "job_busy"
   | "not_found"
   | "method_not_allowed";
 
@@ -89,6 +122,16 @@ const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}, s-maxage=
 const CACHE_VERSION = "2";
 const CACHE_ORIGIN = "https://cairn-share-cache.internal";
 const LINKS_CACHE_GENERATION_KEY = "links_generation";
+const X_LINK_SQL = `(
+  lower(url) LIKE 'https://x.com/%'
+  OR lower(url) LIKE 'http://x.com/%'
+  OR lower(url) LIKE 'https://www.x.com/%'
+  OR lower(url) LIKE 'http://www.x.com/%'
+  OR lower(url) LIKE 'https://twitter.com/%'
+  OR lower(url) LIKE 'http://twitter.com/%'
+  OR lower(url) LIKE 'https://www.twitter.com/%'
+  OR lower(url) LIKE 'http://www.twitter.com/%'
+)`;
 
 type CacheState = "MISS" | "HIT" | "BYPASS";
 
@@ -162,16 +205,34 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     return routeMethod(request, ["POST"], () => claimEnrichmentJob(env, timing));
   }
 
-  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(complete|fail)$/);
+  if (path === "/api/enrichment/jobs") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => listEnrichmentJobs(url, env, timing));
+  }
+
+  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(claim|complete|fail)$/);
   if (enrichmentJobMatch !== null) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["POST"], () => {
       const id = Number(enrichmentJobMatch[1]);
+      if (enrichmentJobMatch[2] === "claim") {
+        return claimEnrichmentJobById(env, id, timing);
+      }
       return enrichmentJobMatch[2] === "complete"
         ? completeEnrichmentJob(request, env, id, timing)
         : failEnrichmentJob(request, env, id, timing);
     });
+  }
+
+  const enrichmentJobDetailMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)$/);
+  if (enrichmentJobDetailMatch !== null) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () =>
+      getEnrichmentJob(env, Number(enrichmentJobDetailMatch[1]), timing)
+    );
   }
 
   const linkIdMatch = path.match(/^\/api\/links\/(\d+)$/);
@@ -388,6 +449,88 @@ async function deleteLink(env: Env, id: number, timing: TimingCollector): Promis
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
+async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): Promise<Response> {
+  const limit = parseBoundedInt(url.searchParams.get("limit"), DEFAULT_LIMIT, MAX_LIMIT);
+  if (limit === null) return error("invalid_limit");
+
+  const beforeId = parseOptionalPositiveInt(url.searchParams.get("before_id"));
+  if (beforeId === null) return error("invalid_before_id");
+
+  const status = parseEnrichmentStatus(url.searchParams.get("status"));
+  if (status === null) return error("invalid_status");
+
+  const query = parseSearchQuery(url.searchParams.get("q"));
+  if (query === null) return error("invalid_query");
+
+  const clauses = [X_LINK_SQL];
+  const bindings: Array<string | number> = [];
+  if (beforeId !== undefined) {
+    clauses.push("id < ?");
+    bindings.push(beforeId);
+  }
+  if (status !== undefined) {
+    clauses.push("enrichment_status = ?");
+    bindings.push(status);
+  }
+  if (query !== undefined) {
+    const like = `%${escapeLike(query)}%`;
+    clauses.push("(url LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR COALESCE(summary, '') LIKE ? ESCAPE '\\')");
+    bindings.push(like, like, like);
+  }
+
+  const pageSize = limit + 1;
+  const listStatement = env.DB.prepare(
+    `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
+            enrichment_next_retry_at, summary, related_links, enrichment_model,
+            enrichment_error, enrichment_updated_at, enriched_at
+       FROM links
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY id DESC
+      LIMIT ?`
+  ).bind(...bindings, pageSize);
+  const countStatement = env.DB.prepare(
+    `SELECT COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN enrichment_status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+            COALESCE(SUM(CASE WHEN enrichment_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing,
+            COALESCE(SUM(CASE WHEN enrichment_status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+            COALESCE(SUM(CASE WHEN enrichment_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+            COALESCE(SUM(CASE WHEN enrichment_status = 'exhausted' THEN 1 ELSE 0 END), 0) AS exhausted
+       FROM links
+      WHERE ${X_LINK_SQL}`
+  );
+
+  const [listResult, countRow] = await timing.measure("db", () =>
+    Promise.all([
+      listStatement.all<EnrichmentListRow>(),
+      countStatement.first<EnrichmentCountRow>()
+    ])
+  );
+  const rows = listResult.results ?? [];
+  const items = rows.slice(0, limit);
+  const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
+  return json({
+    items: items.map(mapEnrichmentListItem),
+    next_before_id: next,
+    counts: mapEnrichmentCounts(countRow)
+  });
+}
+
+async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): Promise<Response> {
+  const row = await timing.measure("db", () =>
+    env.DB.prepare(
+      `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
+              enrichment_next_retry_at, original_text, summary, related_links,
+              enrichment_model, enrichment_error, enrichment_updated_at, enriched_at
+         FROM links
+        WHERE id = ? AND ${X_LINK_SQL}`
+    )
+      .bind(id)
+      .first<EnrichmentDetailRow>()
+  );
+  if (row === null) return error("not_found", 404);
+  return json({ ...mapEnrichmentListItem(row), original_text: row.original_text });
+}
+
 async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Response> {
   const now = new Date();
   const nowIso = now.toISOString();
@@ -406,16 +549,7 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
         WHERE id = (
           SELECT id
           FROM links
-          WHERE (
-              lower(url) LIKE 'https://x.com/%'
-              OR lower(url) LIKE 'http://x.com/%'
-              OR lower(url) LIKE 'https://www.x.com/%'
-              OR lower(url) LIKE 'http://www.x.com/%'
-              OR lower(url) LIKE 'https://twitter.com/%'
-              OR lower(url) LIKE 'http://twitter.com/%'
-              OR lower(url) LIKE 'https://www.twitter.com/%'
-              OR lower(url) LIKE 'http://www.twitter.com/%'
-            )
+          WHERE ${X_LINK_SQL}
             AND enrichment_attempts < ?
             AND (
               enrichment_status = 'pending'
@@ -442,15 +576,49 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
 
-  return json({
-    id: row.id,
-    url: row.url,
-    note: row.note,
-    created_at: row.created_at,
-    attempt: row.enrichment_attempts,
-    lease_token: row.enrichment_lease_token,
-    lease_until: row.enrichment_lease_until
-  });
+  return json(mapEnrichmentJob(row));
+}
+
+async function claimEnrichmentJobById(
+  env: Env,
+  id: number,
+  timing: TimingCollector
+): Promise<Response> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const leaseToken = crypto.randomUUID();
+  const leaseUntil = new Date(now.getTime() + ENRICHMENT_LEASE_MILLISECONDS).toISOString();
+  const row = await timing.measure("db", () =>
+    env.DB.prepare(
+      `UPDATE links
+          SET enrichment_status = 'processing',
+              enrichment_attempts = 1,
+              enrichment_next_retry_at = NULL,
+              enrichment_lease_token = ?,
+              enrichment_lease_until = ?,
+              enrichment_error = NULL,
+              enrichment_updated_at = ?
+        WHERE id = ?
+          AND ${X_LINK_SQL}
+          AND (
+            enrichment_status <> 'processing'
+            OR enrichment_lease_until IS NULL
+            OR enrichment_lease_until <= ?
+          )
+        RETURNING id, url, note, created_at, enrichment_attempts,
+                  enrichment_lease_token, enrichment_lease_until`
+    )
+      .bind(leaseToken, leaseUntil, nowIso, id, nowIso)
+      .first<EnrichmentJobRow>()
+  );
+  if (row !== null) return json(mapEnrichmentJob(row));
+
+  const existing = await timing.measure("db-check", () =>
+    env.DB.prepare(`SELECT id FROM links WHERE id = ? AND ${X_LINK_SQL}`)
+      .bind(id)
+      .first<{ id: number }>()
+  );
+  return existing === null ? error("not_found", 404) : error("job_busy", 409);
 }
 
 async function completeEnrichmentJob(
@@ -854,6 +1022,18 @@ function parseLearnedFilter(raw: string | null): boolean | undefined | null {
   return null;
 }
 
+function parseEnrichmentStatus(raw: string | null): EnrichmentStatus | undefined | null {
+  if (raw === null || raw === "" || raw === "all") return undefined;
+  const statuses: ReadonlyArray<EnrichmentStatus> = [
+    "pending",
+    "processing",
+    "completed",
+    "failed",
+    "exhausted"
+  ];
+  return statuses.includes(raw as EnrichmentStatus) ? raw as EnrichmentStatus : null;
+}
+
 function mapLink(row: LinkRow): LinkRecord {
   return {
     id: row.id,
@@ -863,6 +1043,56 @@ function mapLink(row: LinkRow): LinkRecord {
     learned: row.learned === 1,
     learned_at: row.learned_at
   };
+}
+
+function mapEnrichmentJob(row: EnrichmentJobRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    url: row.url,
+    note: row.note,
+    created_at: row.created_at,
+    attempt: row.enrichment_attempts,
+    lease_token: row.enrichment_lease_token,
+    lease_until: row.enrichment_lease_until
+  };
+}
+
+function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    url: row.url,
+    note: row.note,
+    created_at: row.created_at,
+    status: row.enrichment_status,
+    attempts: row.enrichment_attempts,
+    next_retry_at: row.enrichment_next_retry_at,
+    summary: row.summary,
+    related_links: parseStoredRelatedLinks(row.related_links),
+    model: row.enrichment_model,
+    error: row.enrichment_error,
+    updated_at: row.enrichment_updated_at,
+    enriched_at: row.enriched_at
+  };
+}
+
+function mapEnrichmentCounts(row: EnrichmentCountRow | null): EnrichmentCountRow {
+  return {
+    total: Number(row?.total ?? 0),
+    pending: Number(row?.pending ?? 0),
+    processing: Number(row?.processing ?? 0),
+    completed: Number(row?.completed ?? 0),
+    failed: Number(row?.failed ?? 0),
+    exhausted: Number(row?.exhausted ?? 0)
+  };
+}
+
+function parseStoredRelatedLinks(raw: string | null): string[] {
+  if (raw === null || raw === "") return [];
+  try {
+    return validateRelatedLinks(JSON.parse(raw)) ?? [];
+  } catch {
+    return [];
+  }
 }
 
 function trimTrailingSlash(path: string): string {
