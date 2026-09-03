@@ -19,5 +19,11 @@
       "database_name": "cairn-share",
       "database_id": "08f52f6c-4f94-4e51-bd1c-596fdeac295c"
     }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ENRICHMENT_IMAGES",
+      "bucket_name": "cairn-x-enrichment-images"
+    }
   ]
 }

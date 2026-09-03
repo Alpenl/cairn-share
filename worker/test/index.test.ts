@@ -1,5 +1,5 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker, { type Env } from "../src/index";
 
 const TEST_TOKEN = "cairn_test_token_123456789";
@@ -8,6 +8,10 @@ const TEST_ENRICHER_TOKEN = "cairn_enricher_test_token_123456789";
 beforeEach(async () => {
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("cairn-share worker", () => {
@@ -40,9 +44,13 @@ describe("cairn-share worker", () => {
       "enrichment_status",
       "enrichment_attempts",
       "enrichment_lease_token",
+      "ai_title",
+      "original_language",
       "original_text",
+      "translated_text",
       "summary",
       "related_links",
+      "images",
       "enriched_at"
     ]));
 
@@ -153,34 +161,46 @@ describe("cairn-share worker", () => {
 
     const completed = await completeEnrichment(created.id, {
       lease_token: job.lease_token,
+      ai_title: "一条由人工智能生成的中文测试标题",
+      original_language: "en",
       original_text: "  完整原文  ",
+      translated_text: "完整简体中文译文",
       summary: "  简短总结  ",
       related_links: ["https://example.com/source", "https://example.com/source"],
+      images: [],
       model: "grok-test"
     });
     expect(completed.status).toBe(200);
     await expect(completed.json()).resolves.toMatchObject({ id: created.id, status: "completed" });
 
     const stored = await env.DB.prepare(
-      `SELECT enrichment_status, original_text, summary, related_links, enrichment_model,
-              enrichment_lease_token, enriched_at
+      `SELECT enrichment_status, ai_title, original_language, original_text, translated_text,
+              summary, related_links, images, enrichment_model, enrichment_lease_token, enriched_at
        FROM links WHERE id = ?`
     )
       .bind(created.id)
       .first<{
         enrichment_status: string;
+        ai_title: string;
+        original_language: string;
         original_text: string;
+        translated_text: string;
         summary: string;
         related_links: string;
+        images: string;
         enrichment_model: string;
         enrichment_lease_token: string | null;
         enriched_at: string;
       }>();
     expect(stored).toMatchObject({
       enrichment_status: "completed",
+      ai_title: "一条由人工智能生成的中文测试标题",
+      original_language: "en",
       original_text: "完整原文",
+      translated_text: "完整简体中文译文",
       summary: "简短总结",
       related_links: JSON.stringify(["https://example.com/source"]),
+      images: "[]",
       enrichment_model: "grok-test",
       enrichment_lease_token: null
     });
@@ -190,6 +210,85 @@ describe("cairn-share worker", () => {
     expect(publicLink).toMatchObject(created);
     expect(publicLink).not.toHaveProperty("summary");
     expect((await claimEnrichment()).status).toBe(204);
+  });
+
+  it("copies allow-listed X images to R2 and serves only stored object keys", async () => {
+    const created = await create("https://x.com/example/status/205");
+    const job = await json(await claimEnrichment());
+    const imageUrl = "https://pbs.twimg.com/media/example-image?format=jpg&name=large";
+    const imageBody = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(imageBody, {
+      status: 200,
+      headers: { "Content-Type": "image/jpeg", "Content-Length": String(imageBody.byteLength) }
+    }));
+
+    const uploaded = await storeImages(created.id, {
+      lease_token: job.lease_token,
+      image_urls: [imageUrl, imageUrl]
+    });
+    expect(uploaded.status).toBe(200);
+    const uploadedBody = await json(uploaded);
+    expect(uploadedBody.images).toHaveLength(1);
+    expect(uploadedBody.images[0]).toMatchObject({ content_type: "image/jpeg" });
+    expect(uploadedBody.images[0].key).toMatch(
+      new RegExp(`^enrichment/${created.id}/[0-9a-f]{64}\\.jpg$`)
+    );
+
+    const object = await env.ENRICHMENT_IMAGES.head(uploadedBody.images[0].key);
+    expect(object?.httpMetadata?.contentType).toBe("image/jpeg");
+
+    const completed = await completeEnrichment(created.id, {
+      lease_token: job.lease_token,
+      ai_title: "图片内容的人工智能中文标题",
+      original_language: "en",
+      original_text: "original image post",
+      translated_text: "图片帖子的简体中文译文",
+      summary: "图片帖子摘要",
+      related_links: [],
+      images: uploadedBody.images,
+      model: "grok-test"
+    });
+    expect(completed.status).toBe(200);
+
+    const keyPath = uploadedBody.images[0].key.split("/").map(encodeURIComponent).join("/");
+    const image = await dispatchEnrichment(`/api/enrichment/images/${keyPath}`, { method: "GET" });
+    expect(image.status).toBe(200);
+    expect(image.headers.get("content-type")).toBe("image/jpeg");
+    expect(new Uint8Array(await image.arrayBuffer())).toEqual(imageBody);
+
+    const missingAuth = await dispatchEnrichment(
+      `/api/enrichment/images/${keyPath}`,
+      { method: "GET" },
+      null
+    );
+    await expectError(Promise.resolve(missingAuth), 401, "missing_auth");
+    await expectError(
+      dispatchEnrichment("/api/enrichment/images/%E0%A4%A", { method: "GET" }),
+      404,
+      "not_found"
+    );
+  });
+
+  it("rejects unsafe image sources and image uploads with a stale lease", async () => {
+    const created = await create("https://x.com/example/status/206");
+    const job = await json(await claimEnrichment());
+
+    await expectError(
+      storeImages(created.id, {
+        lease_token: job.lease_token,
+        image_urls: ["https://example.com/tracker.jpg"]
+      }),
+      400,
+      "invalid_images"
+    );
+    await expectError(
+      storeImages(created.id, {
+        lease_token: "stale-token",
+        image_urls: []
+      }),
+      409,
+      "lease_conflict"
+    );
   });
 
   it("lists X bookmarks, returns details and manually reclaims a selected item", async () => {
@@ -377,6 +476,24 @@ describe("cairn-share worker", () => {
         original_text: "text",
         summary: "summary",
         related_links: ["javascript:alert(1)"],
+        model: "grok-test"
+      }),
+      400,
+      "invalid_enrichment"
+    );
+    await expectError(
+      completeEnrichment(created.id, {
+        lease_token: job.lease_token,
+        ai_title: "人工智能生成的测试中文标题",
+        original_language: "en",
+        original_text: "text",
+        translated_text: "译文",
+        summary: "summary",
+        related_links: [],
+        images: [{
+          key: `enrichment/${created.id}/${"a".repeat(64)}.jpg`,
+          content_type: "image/jpeg"
+        }],
         model: "grok-test"
       }),
       400,
@@ -784,6 +901,14 @@ async function failEnrichment(id: number, body: unknown): Promise<Response> {
   });
 }
 
+async function storeImages(id: number, body: unknown): Promise<Response> {
+  return dispatchEnrichment(`/api/enrichment/jobs/${id}/images`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(body)
+  });
+}
+
 async function expectError(responsePromise: Promise<Response>, status: number, code: string): Promise<void> {
   const response = await responsePromise;
   expect(response.status).toBe(status);
@@ -810,6 +935,7 @@ async function dispatch(
   });
   return worker.fetch(request, {
     DB: env.DB,
+    ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES,
     CAIRN_API_TOKEN: configuredToken,
     CAIRN_ENRICHER_TOKEN: TEST_ENRICHER_TOKEN,
   } satisfies Env);
@@ -831,6 +957,7 @@ async function dispatchEnrichment(
   });
   return worker.fetch(request, {
     DB: env.DB,
+    ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES,
     CAIRN_API_TOKEN: TEST_TOKEN,
     CAIRN_ENRICHER_TOKEN: configuredToken
   } satisfies Env);

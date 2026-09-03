@@ -14,7 +14,8 @@ https://share.alpenl.com
 - 保留 Android `ACTION_SEND` 的文本分享入口和完整 URL，不删除 query 或 fragment。
 - 分享时允许填写可选备注，先持久化到本机，再由应用提交到 Cloudflare。
 - App 的在线后端只使用 Cloudflare Worker 与 D1；可选的独立 X Enricher 服务通过内部
-  Worker API 写回原文、摘要和相关链接，不进入 Android 安装包，也不改变 App API。
+  Worker API 写回 AI 标题、双语原文、摘要和相关链接，并把图片保存到 R2；该服务不进入
+  Android 安装包，也不改变 App API。
 - 应用和 HTTP API 不做账号、会话或多用户权限，只使用一个部署侧访问 Token 保护读写接口。
 - Android 本地保存访问 Token、分享偏好、筛选、搜索词、上次打开页面和待上传任务。
 
@@ -42,15 +43,22 @@ curl -X POST https://share.alpenl.com/api/links \
 - `DELETE /api/links/:id`
 - `OPTIONS *`
 
-Worker 另提供三个不属于 App 公共契约的内部接口：
+Worker 另提供不属于 App 公共契约的内部接口：
 
+- `GET /api/enrichment/jobs`
 - `POST /api/enrichment/jobs/claim`
+- `GET /api/enrichment/jobs/:id`
+- `POST /api/enrichment/jobs/:id/claim`
+- `POST /api/enrichment/jobs/:id/images`
 - `POST /api/enrichment/jobs/:id/complete`
 - `POST /api/enrichment/jobs/:id/fail`
+- `GET /api/enrichment/images/:key`
 
 它们只接受独立的 `CAIRN_ENRICHER_TOKEN`，用于可选的
 [`cairn-x-enricher`](https://github.com/Alpenl/cairn-x-enricher) 服务。App 的
 `CAIRN_API_TOKEN` 无权调用这些接口，公开链接响应也不会增加增强字段。
+图片上传只接受 `pbs.twimg.com/media`，经过响应类型和大小校验后写入绑定为
+`ENRICHMENT_IMAGES` 的 R2 bucket；D1 只保存 R2 对象引用。
 
 `POST /api/links` 只接受 `application/json`。`url` 必须是有 host、无 userinfo 的
 HTTP(S) URL，最长 8192 个 UTF-16 code unit；`note` 可省略，最长 2000 个 UTF-16

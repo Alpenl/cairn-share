@@ -1,5 +1,6 @@
 export interface Env {
   DB: D1Database;
+  ENRICHMENT_IMAGES: R2Bucket;
   CAIRN_API_TOKEN: string;
   CAIRN_ENRICHER_TOKEN: string;
 }
@@ -43,9 +44,13 @@ interface EnrichmentListRow {
   enrichment_status: EnrichmentStatus;
   enrichment_attempts: number;
   enrichment_next_retry_at: string | null;
+  ai_title: string | null;
+  original_language: string | null;
   original_text: string | null;
+  translated_text: string | null;
   summary: string | null;
   related_links: string | null;
+  images: string | null;
   enrichment_model: string | null;
   enrichment_error: string | null;
   enrichment_updated_at: string | null;
@@ -54,6 +59,11 @@ interface EnrichmentListRow {
 }
 
 type EnrichmentDetailRow = EnrichmentListRow;
+
+interface EnrichmentImage {
+  key: string;
+  content_type: string;
+}
 
 interface EnrichmentCountRow {
   total: number;
@@ -78,6 +88,8 @@ type ErrorCode =
   | "invalid_before_id"
   | "invalid_status"
   | "invalid_enrichment"
+  | "invalid_images"
+  | "image_fetch_failed"
   | "missing_auth"
   | "invalid_token"
   | "auth_not_configured"
@@ -114,8 +126,13 @@ const MAX_LIMIT = 100;
 const MAX_ENRICHMENT_ATTEMPTS = 5;
 const ENRICHMENT_LEASE_MILLISECONDS = 15 * 60 * 1000;
 const MAX_ORIGINAL_TEXT_LENGTH = 100_000;
+const MAX_TRANSLATED_TEXT_LENGTH = 100_000;
+const MAX_AI_TITLE_LENGTH = 200;
+const MAX_ORIGINAL_LANGUAGE_LENGTH = 32;
 const MAX_SUMMARY_LENGTH = 4_000;
 const MAX_RELATED_LINKS = 50;
+const MAX_IMAGES = 8;
+const MAX_IMAGE_BYTES = 15 << 20;
 const MAX_MODEL_LENGTH = 200;
 const MAX_ENRICHMENT_ERROR_LENGTH = 2_000;
 const ENRICHMENT_RETRY_DELAYS_MILLISECONDS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
@@ -213,7 +230,16 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     return routeMethod(request, ["GET"], () => listEnrichmentJobs(url, env, timing));
   }
 
-  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(claim|complete|fail)$/);
+  const enrichmentImageMatch = path.match(/^\/api\/enrichment\/images\/(.+)$/);
+  if (enrichmentImageMatch !== null) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    const key = decodePathComponent(enrichmentImageMatch[1]);
+    if (key === null) return error("not_found", 404);
+    return routeMethod(request, ["GET"], () => getEnrichmentImage(request, env, key));
+  }
+
+  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(claim|complete|fail|images)$/);
   if (enrichmentJobMatch !== null) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
@@ -221,6 +247,9 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
       const id = Number(enrichmentJobMatch[1]);
       if (enrichmentJobMatch[2] === "claim") {
         return claimEnrichmentJobById(env, id, timing);
+      }
+      if (enrichmentJobMatch[2] === "images") {
+        return storeEnrichmentImages(request, env, id, timing);
       }
       return enrichmentJobMatch[2] === "complete"
         ? completeEnrichmentJob(request, env, id, timing)
@@ -408,9 +437,13 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
       "enrichment_next_retry_at = NULL",
       "enrichment_lease_token = NULL",
       "enrichment_lease_until = NULL",
+      "ai_title = NULL",
+      "original_language = NULL",
       "original_text = NULL",
+      "translated_text = NULL",
       "summary = NULL",
       "related_links = NULL",
+      "images = NULL",
       "enrichment_model = NULL",
       "enrichment_error = NULL",
       "enrichment_updated_at = NULL",
@@ -479,16 +512,20 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   }
   if (query !== undefined) {
     const like = `%${escapeLike(query)}%`;
-    clauses.push("(url LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR COALESCE(summary, '') LIKE ? ESCAPE '\\')");
-    bindings.push(like, like, like);
+    clauses.push(
+      "(url LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR COALESCE(ai_title, '') LIKE ? ESCAPE '\\' " +
+      "OR COALESCE(summary, '') LIKE ? ESCAPE '\\' OR COALESCE(translated_text, '') LIKE ? ESCAPE '\\')"
+    );
+    bindings.push(like, like, like, like, like);
   }
 
   const pageSize = limit + 1;
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const listStatement = env.DB.prepare(
     `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
-            enrichment_next_retry_at, original_text, summary, related_links,
-            enrichment_model, enrichment_error, enrichment_updated_at, enriched_at,
+            enrichment_next_retry_at, ai_title, original_language, original_text,
+            translated_text, summary, related_links, images, enrichment_model,
+            enrichment_error, enrichment_updated_at, enriched_at,
             CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable
        FROM links
       ${where}
@@ -526,8 +563,9 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): 
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
-              enrichment_next_retry_at, original_text, summary, related_links,
-              enrichment_model, enrichment_error, enrichment_updated_at, enriched_at,
+              enrichment_next_retry_at, ai_title, original_language, original_text,
+              translated_text, summary, related_links, images, enrichment_model,
+              enrichment_error, enrichment_updated_at, enriched_at,
               CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable
          FROM links
         WHERE id = ?`
@@ -640,11 +678,25 @@ async function completeEnrichmentJob(
 
   const leaseToken = readBoundedString(body.lease_token, 1, 100);
   const originalText = readBoundedString(body.original_text, 1, MAX_ORIGINAL_TEXT_LENGTH);
+  const aiTitle = readOptionalBoundedString(body.ai_title, 1, MAX_AI_TITLE_LENGTH);
+  const originalLanguage = readOptionalBoundedString(body.original_language, 1, MAX_ORIGINAL_LANGUAGE_LENGTH);
+  const translatedText = readOptionalBoundedString(body.translated_text, 1, MAX_TRANSLATED_TEXT_LENGTH);
   const summary = readBoundedString(body.summary, 1, MAX_SUMMARY_LENGTH);
   const model = readBoundedString(body.model, 1, MAX_MODEL_LENGTH);
   const relatedLinks = validateRelatedLinks(body.related_links);
-  if (leaseToken === null || originalText === null || summary === null || model === null || relatedLinks === null) {
+  const images = body.images === undefined ? [] : validateStoredImages(body.images, id);
+  if (
+    leaseToken === null || originalText === null || aiTitle === null || originalLanguage === null ||
+    translatedText === null || summary === null || model === null || relatedLinks === null || images === null
+  ) {
     return error("invalid_enrichment");
+  }
+
+  if (images.length > 0) {
+    const storedImages = await timing.measure("r2-head", () =>
+      Promise.all(images.map((image) => env.ENRICHMENT_IMAGES.head(image.key)))
+    );
+    if (storedImages.some((image) => image === null)) return error("invalid_enrichment");
   }
 
   const now = new Date().toISOString();
@@ -655,9 +707,13 @@ async function completeEnrichmentJob(
             enrichment_next_retry_at = NULL,
             enrichment_lease_token = NULL,
             enrichment_lease_until = NULL,
+            ai_title = ?,
+            original_language = ?,
             original_text = ?,
+            translated_text = ?,
             summary = ?,
             related_links = ?,
+            images = ?,
             enrichment_model = ?,
             enrichment_error = NULL,
             enrichment_updated_at = ?,
@@ -667,7 +723,10 @@ async function completeEnrichmentJob(
           AND enrichment_lease_token = ?
         RETURNING id`
     )
-      .bind(originalText, summary, JSON.stringify(relatedLinks), model, now, now, id, leaseToken)
+      .bind(
+        aiTitle ?? null, originalLanguage ?? null, originalText, translatedText ?? null, summary,
+        JSON.stringify(relatedLinks), JSON.stringify(images), model, now, now, id, leaseToken
+      )
       .first<{ id: number }>()
   );
 
@@ -726,6 +785,137 @@ async function failEnrichmentJob(
   return json({ id: row.id, status, next_retry_at: nextRetryAt });
 }
 
+async function storeEnrichmentImages(
+  request: Request,
+  env: Env,
+  id: number,
+  timing: TimingCollector
+): Promise<Response> {
+  const body = await readEnrichmentBody(request);
+  if (body instanceof Response) return body;
+
+  const leaseToken = readBoundedString(body.lease_token, 1, 100);
+  const imageUrls = validateImageUrls(body.image_urls);
+  if (leaseToken === null || imageUrls === null) return error("invalid_images");
+
+  const leased = await timing.measure("db-check", () =>
+    env.DB.prepare(
+      `SELECT id
+         FROM links
+        WHERE id = ? AND enrichment_status = 'processing' AND enrichment_lease_token = ?`
+    )
+      .bind(id, leaseToken)
+      .first<{ id: number }>()
+  );
+  if (leased === null) return error("lease_conflict", 409);
+
+  const images: EnrichmentImage[] = [];
+  try {
+    for (const imageUrl of imageUrls) {
+      images.push(await fetchAndStoreImage(env, id, imageUrl, timing));
+    }
+  } catch {
+    return error("image_fetch_failed", 502);
+  }
+  return json({ images });
+}
+
+async function fetchAndStoreImage(
+  env: Env,
+  id: number,
+  imageUrl: string,
+  timing: TimingCollector
+): Promise<EnrichmentImage> {
+  const response = await timing.measure("image-fetch", () =>
+    fetch(imageUrl, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(20_000)
+    })
+  );
+  if (!response.ok) throw new Error("image response was not successful");
+
+  const contentType = normalizeImageContentType(response.headers.get("content-type"));
+  if (contentType === null) throw new Error("unsupported image content type");
+
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null) {
+    const bytes = Number(declaredLength);
+    if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_IMAGE_BYTES) {
+      throw new Error("invalid image content length");
+    }
+  }
+
+  const body = await readBodyWithinLimit(response, MAX_IMAGE_BYTES);
+  if (body.byteLength === 0) throw new Error("empty image");
+
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(imageUrl));
+  const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const extension = imageExtension(contentType);
+  const key = `enrichment/${id}/${hash}.${extension}`;
+  await timing.measure("r2-put", () =>
+    env.ENRICHMENT_IMAGES.put(key, body, {
+      httpMetadata: {
+        contentType,
+        cacheControl: "private, max-age=86400"
+      },
+      customMetadata: { source_url: imageUrl }
+    })
+  );
+  return { key, content_type: contentType };
+}
+
+async function readBodyWithinLimit(response: Response, limit: number): Promise<Uint8Array> {
+  if (response.body === null) throw new Error("missing image body");
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        throw new Error("image exceeds size limit");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+async function getEnrichmentImage(request: Request, env: Env, key: string): Promise<Response> {
+  if (!isValidImageKey(key)) return error("not_found", 404);
+
+  const object = await env.ENRICHMENT_IMAGES.get(key);
+  if (object === null) return error("not_found", 404);
+
+  const etag = object.httpEtag;
+  if (request.headers.get("if-none-match") === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: { ETag: etag, "Cache-Control": "private, max-age=86400", ...CORS_HEADERS }
+    });
+  }
+
+  const headers = new Headers(CORS_HEADERS);
+  object.writeHttpMetadata(headers);
+  headers.set("ETag", etag);
+  headers.set("Cache-Control", "private, max-age=86400");
+  headers.set("X-Content-Type-Options", "nosniff");
+  return new Response(object.body, { headers });
+}
+
 async function readEnrichmentBody(request: Request): Promise<Record<string, unknown> | Response> {
   const contentType = request.headers.get("content-type") ?? "";
   if (contentType.toLowerCase().split(";")[0].trim() !== "application/json") {
@@ -744,6 +934,11 @@ function readBoundedString(value: unknown, minLength: number, maxLength: number)
   return trimmed.length >= minLength && trimmed.length <= maxLength ? trimmed : null;
 }
 
+function readOptionalBoundedString(value: unknown, minLength: number, maxLength: number): string | null | undefined {
+  if (value === undefined) return undefined;
+  return readBoundedString(value, minLength, maxLength);
+}
+
 function validateRelatedLinks(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length > MAX_RELATED_LINKS) return null;
   const unique: string[] = [];
@@ -758,6 +953,84 @@ function validateRelatedLinks(value: unknown): string[] | null {
     }
   }
   return unique;
+}
+
+function validateImageUrls(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > MAX_IMAGES) return null;
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") return null;
+    const imageUrl = item.trim();
+    if (!isAllowedImageUrl(imageUrl)) return null;
+    if (!seen.has(imageUrl)) {
+      seen.add(imageUrl);
+      unique.push(imageUrl);
+    }
+  }
+  return unique;
+}
+
+function isAllowedImageUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" &&
+      url.hostname.toLowerCase() === "pbs.twimg.com" &&
+      url.port === "" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.pathname.startsWith("/media/");
+  } catch {
+    return false;
+  }
+}
+
+function normalizeImageContentType(value: string | null): string | null {
+  const contentType = value?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  const supported = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"];
+  return supported.includes(contentType) ? contentType : null;
+}
+
+function imageExtension(contentType: string): string {
+  const extensions: Record<string, string> = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/avif": "avif"
+  };
+  return extensions[contentType] ?? "bin";
+}
+
+function validateStoredImages(value: unknown, id: number): EnrichmentImage[] | null {
+  if (!Array.isArray(value) || value.length > MAX_IMAGES) return null;
+  const images: EnrichmentImage[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
+    const record = item as Record<string, unknown>;
+    if (typeof record.key !== "string" || typeof record.content_type !== "string") return null;
+    if (!record.key.startsWith(`enrichment/${id}/`) || !isValidImageKey(record.key)) return null;
+    const contentType = normalizeImageContentType(record.content_type);
+    if (contentType === null) return null;
+    if (!seen.has(record.key)) {
+      seen.add(record.key);
+      images.push({ key: record.key, content_type: contentType });
+    }
+  }
+  return images;
+}
+
+function isValidImageKey(key: string): boolean {
+  return /^enrichment\/[1-9]\d*\/[0-9a-f]{64}\.(?:jpg|png|webp|gif|avif)$/.test(key);
+}
+
+function decodePathComponent(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
 }
 
 async function cachedJson(
@@ -1077,9 +1350,13 @@ function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> 
     processable,
     attempts: row.enrichment_attempts,
     next_retry_at: row.enrichment_next_retry_at,
+    ai_title: row.ai_title,
+    original_language: row.original_language,
     original_text: row.original_text,
+    translated_text: row.translated_text,
     summary: row.summary,
     related_links: parseStoredRelatedLinks(row.related_links),
+    images: parseStoredImages(row.images, row.id),
     model: row.enrichment_model,
     error: row.enrichment_error,
     updated_at: row.enrichment_updated_at,
@@ -1103,6 +1380,15 @@ function parseStoredRelatedLinks(raw: string | null): string[] {
   if (raw === null || raw === "") return [];
   try {
     return validateRelatedLinks(JSON.parse(raw)) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function parseStoredImages(raw: string | null, id: number): EnrichmentImage[] {
+  if (raw === null || raw === "") return [];
+  try {
+    return validateStoredImages(JSON.parse(raw), id) ?? [];
   } catch {
     return [];
   }
