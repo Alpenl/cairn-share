@@ -193,7 +193,7 @@ describe("cairn-share worker", () => {
   });
 
   it("lists X bookmarks, returns details and manually reclaims a selected item", async () => {
-    await create("https://example.com/not-an-x-link", "hidden");
+    const unsupported = await create("https://example.com/not-an-x-link", "其他收藏");
     const completed = await create("https://x.com/example/status/210", "已完成收藏");
     const claimed = await json(await claimEnrichment());
     await completeEnrichment(completed.id, {
@@ -215,16 +215,17 @@ describe("cairn-share worker", () => {
       attempts: 0,
       related_links: []
     });
-    expect(firstPageBody.items[0]).not.toHaveProperty("original_text");
+    expect(firstPageBody.items[0]).toMatchObject({ original_text: null, processable: true });
     expect(firstPageBody.items[0]).not.toHaveProperty("lease_token");
     expect(firstPageBody.next_before_id).toBe(pending.id);
     expect(firstPageBody.counts).toEqual({
-      total: 2,
+      total: 3,
       pending: 1,
       processing: 0,
       completed: 1,
       failed: 0,
-      exhausted: 0
+      exhausted: 0,
+      unsupported: 1
     });
 
     const filtered = await dispatchEnrichment(
@@ -236,14 +237,32 @@ describe("cairn-share worker", () => {
     expect(filteredBody.items[0]).toMatchObject({
       id: completed.id,
       status: "completed",
+      processable: true,
+      original_text: "完整帖子原文",
       summary: "可搜索的测试总结",
       related_links: ["https://example.com/relevant"]
     });
+
+    const unsupportedResponse = await dispatchEnrichment(
+      "/api/enrichment/jobs?status=unsupported",
+      { method: "GET" }
+    );
+    expect(unsupportedResponse.status).toBe(200);
+    const unsupportedBody = await json(unsupportedResponse);
+    expect(unsupportedBody.items).toEqual([
+      expect.objectContaining({
+        id: unsupported.id,
+        status: "unsupported",
+        processable: false,
+        original_text: null
+      })
+    ]);
 
     const detail = await dispatchEnrichment(`/api/enrichment/jobs/${completed.id}`, { method: "GET" });
     expect(detail.status).toBe(200);
     await expect(detail.json()).resolves.toMatchObject({
       id: completed.id,
+      processable: true,
       original_text: "完整帖子原文"
     });
 

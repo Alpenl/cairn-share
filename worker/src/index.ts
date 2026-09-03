@@ -33,6 +33,7 @@ interface EnrichmentJobRow {
 }
 
 type EnrichmentStatus = "pending" | "processing" | "completed" | "failed" | "exhausted";
+type EnrichmentFilter = EnrichmentStatus | "unsupported";
 
 interface EnrichmentListRow {
   id: number;
@@ -42,17 +43,17 @@ interface EnrichmentListRow {
   enrichment_status: EnrichmentStatus;
   enrichment_attempts: number;
   enrichment_next_retry_at: string | null;
+  original_text: string | null;
   summary: string | null;
   related_links: string | null;
   enrichment_model: string | null;
   enrichment_error: string | null;
   enrichment_updated_at: string | null;
   enriched_at: string | null;
+  processable: number;
 }
 
-interface EnrichmentDetailRow extends EnrichmentListRow {
-  original_text: string | null;
-}
+type EnrichmentDetailRow = EnrichmentListRow;
 
 interface EnrichmentCountRow {
   total: number;
@@ -61,6 +62,7 @@ interface EnrichmentCountRow {
   completed: number;
   failed: number;
   exhausted: number;
+  unsupported: number;
 }
 
 type ErrorCode =
@@ -462,13 +464,16 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   const query = parseSearchQuery(url.searchParams.get("q"));
   if (query === null) return error("invalid_query");
 
-  const clauses = [X_LINK_SQL];
+  const clauses: string[] = [];
   const bindings: Array<string | number> = [];
   if (beforeId !== undefined) {
     clauses.push("id < ?");
     bindings.push(beforeId);
   }
-  if (status !== undefined) {
+  if (status === "unsupported") {
+    clauses.push(`NOT ${X_LINK_SQL}`);
+  } else if (status !== undefined) {
+    clauses.push(X_LINK_SQL);
     clauses.push("enrichment_status = ?");
     bindings.push(status);
   }
@@ -479,24 +484,26 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   }
 
   const pageSize = limit + 1;
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const listStatement = env.DB.prepare(
     `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
-            enrichment_next_retry_at, summary, related_links, enrichment_model,
-            enrichment_error, enrichment_updated_at, enriched_at
+            enrichment_next_retry_at, original_text, summary, related_links,
+            enrichment_model, enrichment_error, enrichment_updated_at, enriched_at,
+            CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable
        FROM links
-      WHERE ${clauses.join(" AND ")}
+      ${where}
       ORDER BY id DESC
       LIMIT ?`
   ).bind(...bindings, pageSize);
   const countStatement = env.DB.prepare(
     `SELECT COUNT(*) AS total,
-            COALESCE(SUM(CASE WHEN enrichment_status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
-            COALESCE(SUM(CASE WHEN enrichment_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing,
-            COALESCE(SUM(CASE WHEN enrichment_status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
-            COALESCE(SUM(CASE WHEN enrichment_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
-            COALESCE(SUM(CASE WHEN enrichment_status = 'exhausted' THEN 1 ELSE 0 END), 0) AS exhausted
-       FROM links
-      WHERE ${X_LINK_SQL}`
+            COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+            COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing,
+            COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+            COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+            COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'exhausted' THEN 1 ELSE 0 END), 0) AS exhausted,
+            COALESCE(SUM(CASE WHEN NOT ${X_LINK_SQL} THEN 1 ELSE 0 END), 0) AS unsupported
+       FROM links`
   );
 
   const [listResult, countRow] = await timing.measure("db", () =>
@@ -520,15 +527,16 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): 
     env.DB.prepare(
       `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
               enrichment_next_retry_at, original_text, summary, related_links,
-              enrichment_model, enrichment_error, enrichment_updated_at, enriched_at
+              enrichment_model, enrichment_error, enrichment_updated_at, enriched_at,
+              CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable
          FROM links
-        WHERE id = ? AND ${X_LINK_SQL}`
+        WHERE id = ?`
     )
       .bind(id)
       .first<EnrichmentDetailRow>()
   );
   if (row === null) return error("not_found", 404);
-  return json({ ...mapEnrichmentListItem(row), original_text: row.original_text });
+  return json(mapEnrichmentListItem(row));
 }
 
 async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Response> {
@@ -1022,16 +1030,17 @@ function parseLearnedFilter(raw: string | null): boolean | undefined | null {
   return null;
 }
 
-function parseEnrichmentStatus(raw: string | null): EnrichmentStatus | undefined | null {
+function parseEnrichmentStatus(raw: string | null): EnrichmentFilter | undefined | null {
   if (raw === null || raw === "" || raw === "all") return undefined;
-  const statuses: ReadonlyArray<EnrichmentStatus> = [
+  const statuses: ReadonlyArray<EnrichmentFilter> = [
     "pending",
     "processing",
     "completed",
     "failed",
-    "exhausted"
+    "exhausted",
+    "unsupported"
   ];
-  return statuses.includes(raw as EnrichmentStatus) ? raw as EnrichmentStatus : null;
+  return statuses.includes(raw as EnrichmentFilter) ? raw as EnrichmentFilter : null;
 }
 
 function mapLink(row: LinkRow): LinkRecord {
@@ -1058,14 +1067,17 @@ function mapEnrichmentJob(row: EnrichmentJobRow): Record<string, unknown> {
 }
 
 function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> {
+  const processable = row.processable === 1;
   return {
     id: row.id,
     url: row.url,
     note: row.note,
     created_at: row.created_at,
-    status: row.enrichment_status,
+    status: processable ? row.enrichment_status : "unsupported",
+    processable,
     attempts: row.enrichment_attempts,
     next_retry_at: row.enrichment_next_retry_at,
+    original_text: row.original_text,
     summary: row.summary,
     related_links: parseStoredRelatedLinks(row.related_links),
     model: row.enrichment_model,
@@ -1082,7 +1094,8 @@ function mapEnrichmentCounts(row: EnrichmentCountRow | null): EnrichmentCountRow
     processing: Number(row?.processing ?? 0),
     completed: Number(row?.completed ?? 0),
     failed: Number(row?.failed ?? 0),
-    exhausted: Number(row?.exhausted ?? 0)
+    exhausted: Number(row?.exhausted ?? 0),
+    unsupported: Number(row?.unsupported ?? 0)
   };
 }
 
