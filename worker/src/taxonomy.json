@@ -1,0 +1,38 @@
+{
+  "version": "2026-09-08.1",
+  "topics": [
+    { "id": "llm", "label": "LLM", "active": true, "aliases": ["大模型", "人工智能", "AI", "生成式AI", "AIGC", "agent"] },
+    { "id": "eng", "label": "工程", "active": true, "aliases": ["前端", "后端", "基础设施", "DevOps", "编程", "代码"] },
+    { "id": "product", "label": "产品", "active": true, "aliases": [] },
+    { "id": "design", "label": "设计", "active": true, "aliases": [] },
+    { "id": "writing", "label": "写作", "active": true, "aliases": [] },
+    { "id": "invest", "label": "投资", "active": true, "aliases": ["理财", "量化", "股市", "资产配置"] },
+    { "id": "health", "label": "健康", "active": true, "aliases": [] },
+    { "id": "psych", "label": "心理", "active": true, "aliases": [] },
+    { "id": "manage", "label": "管理", "active": true, "aliases": [] },
+    { "id": "media", "label": "媒体", "active": true, "aliases": [] },
+    { "id": "law", "label": "法律", "active": true, "aliases": [] },
+    { "id": "edu", "label": "教育", "active": true, "aliases": [] },
+    { "id": "history", "label": "历史", "active": true, "aliases": [] },
+    { "id": "science", "label": "科学", "active": true, "aliases": [] },
+    { "id": "city", "label": "城市", "active": true, "aliases": [] },
+    { "id": "life", "label": "生活", "active": true, "aliases": [] },
+    { "id": "eval", "label": "评估", "active": true, "aliases": ["评测", "评估标准", "benchmark"] }
+  ],
+  "forms": [
+    { "id": "opinion", "label": "观点", "active": true, "aliases": [] },
+    { "id": "method", "label": "方法", "active": true, "aliases": [] },
+    { "id": "case", "label": "案例", "active": true, "aliases": [] },
+    { "id": "data", "label": "数据", "active": true, "aliases": [] },
+    { "id": "tool", "label": "工具", "active": true, "aliases": ["软件", "应用", "app", "插件"] },
+    { "id": "thread", "label": "串推", "active": true, "aliases": [] },
+    { "id": "longform", "label": "长文", "active": true, "aliases": [] }
+  ],
+  "uses": [
+    { "id": "quote", "label": "可引用", "active": true, "aliases": [] },
+    { "id": "try", "label": "待试", "active": true, "aliases": [] },
+    { "id": "contra", "label": "反对", "active": true, "aliases": [] },
+    { "id": "background", "label": "背景", "active": true, "aliases": [] },
+    { "id": "material", "label": "素材", "active": true, "aliases": [] }
+  ]
+}

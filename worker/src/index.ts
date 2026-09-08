@@ -1,3 +1,5 @@
+import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
+
 export interface Env {
   DB: D1Database;
   ENRICHMENT_IMAGES: R2Bucket;
@@ -56,6 +58,10 @@ interface EnrichmentListRow {
   enrichment_updated_at: string | null;
   enriched_at: string | null;
   processable: number;
+  classification: string | null;
+  curation: string | null;
+  why: string;
+  curation_status: string;
 }
 
 type EnrichmentDetailRow = EnrichmentListRow;
@@ -88,6 +94,7 @@ type ErrorCode =
   | "invalid_before_id"
   | "invalid_status"
   | "invalid_enrichment"
+  | "invalid_curation"
   | "invalid_images"
   | "image_fetch_failed"
   | "missing_auth"
@@ -228,6 +235,19 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => listEnrichmentJobs(url, env, timing));
+  }
+
+  if (path === "/api/enrichment/taxonomy") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => json(taxonomy));
+  }
+
+  const curationMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/curation$/);
+  if (curationMatch !== null) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["PATCH"], () => updateCuration(request, env, Number(curationMatch[1]), timing));
   }
 
   const enrichmentImageMatch = path.match(/^\/api\/enrichment\/images\/(.+)$/);
@@ -447,7 +467,8 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
       "enrichment_model = NULL",
       "enrichment_error = NULL",
       "enrichment_updated_at = NULL",
-      "enriched_at = NULL"
+      "enriched_at = NULL",
+      "classification = NULL"
     );
   }
 
@@ -499,6 +520,39 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
 
   const clauses: string[] = [];
   const bindings: Array<string | number> = [];
+  const curationStatus = url.searchParams.get("curation_status");
+  if (curationStatus && curationStatus !== "all") {
+    if (!validCurationStatus(curationStatus)) return error("invalid_query");
+    clauses.push("curation_status = ?");
+    bindings.push(curationStatus);
+  }
+  for (const [key, dimension, field] of [["topic", "topics", "topics"], ["form", "forms", "form"], ["use", "uses", "use"]] as const) {
+    const value = url.searchParams.get(key);
+    if (!value) continue;
+    if (!validTerm(dimension, value, false)) return error("invalid_query");
+    clauses.push(key === "topic"
+      ? "EXISTS (SELECT 1 FROM json_each(COALESCE(curation, classification, '{}'), '$.topics') WHERE value = ?)"
+      : `json_extract(COALESCE(curation, classification, '{}'), '$.${field}') = ?`);
+    bindings.push(value);
+  }
+  const wechatSQL = "(lower(url) LIKE 'https://mp.weixin.qq.com/%' OR lower(url) LIKE 'http://mp.weixin.qq.com/%')";
+  const source = url.searchParams.get("source");
+  if (source) {
+    if (!["x", "wechat", "other"].includes(source)) return error("invalid_query");
+    clauses.push(source === "x" ? X_LINK_SQL : source === "wechat" ? wechatSQL : `(NOT ${X_LINK_SQL} AND NOT ${wechatSQL})`);
+  }
+  const uncertain = url.searchParams.get("uncertain");
+  if (uncertain) {
+    if (uncertain !== "true") return error("invalid_query");
+    clauses.push("curation IS NULL AND COALESCE(json_extract(classification, '$.uncertainty'), 1) = 1");
+  }
+  const since = url.searchParams.get("since");
+  if (since) {
+    const date = new Date(since);
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(since) || !Number.isFinite(date.getTime())) return error("invalid_query");
+    clauses.push("created_at >= ?");
+    bindings.push(date.toISOString());
+  }
   if (beforeId !== undefined) {
     clauses.push("id < ?");
     bindings.push(beforeId);
@@ -511,12 +565,15 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
     bindings.push(status);
   }
   if (query !== undefined) {
-    const like = `%${escapeLike(query)}%`;
-    clauses.push(
-      "(url LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR COALESCE(ai_title, '') LIKE ? ESCAPE '\\' " +
-      "OR COALESCE(summary, '') LIKE ? ESCAPE '\\' OR COALESCE(translated_text, '') LIKE ? ESCAPE '\\')"
-    );
-    bindings.push(like, like, like, like, like);
+    const terms = query.split(/\s+/);
+    if (terms.length > 10) return error("invalid_query");
+    for (const term of terms) {
+      const like = `%${escapeLike(term)}%`;
+      const fields = ["url", "note", "ai_title", "summary", "translated_text", "original_text", "why",
+        "json_extract(classification, '$.why_suggestion')", "json_extract(classification, '$.entities')"];
+      clauses.push(`(${fields.map((field) => `COALESCE(${field}, '') LIKE ? ESCAPE '\\'`).join(" OR ")})`);
+      bindings.push(...fields.map(() => like));
+    }
   }
 
   const pageSize = limit + 1;
@@ -525,7 +582,7 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
     `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
             enrichment_next_retry_at, ai_title, original_language, original_text,
             translated_text, summary, related_links, images, enrichment_model,
-            enrichment_error, enrichment_updated_at, enriched_at,
+            enrichment_error, enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
             CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable
        FROM links
       ${where}
@@ -565,7 +622,7 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): 
       `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
               enrichment_next_retry_at, ai_title, original_language, original_text,
               translated_text, summary, related_links, images, enrichment_model,
-              enrichment_error, enrichment_updated_at, enriched_at,
+              enrichment_error, enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
               CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable
          FROM links
         WHERE id = ?`
@@ -575,6 +632,37 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): 
   );
   if (row === null) return error("not_found", 404);
   return json(mapEnrichmentListItem(row));
+}
+
+async function updateCuration(request: Request, env: Env, id: number, timing: TimingCollector): Promise<Response> {
+  const body = await readEnrichmentBody(request);
+  if (body instanceof Response) return body;
+  if (Object.keys(body).some((key) => !["why", "curation_status", "classification"].includes(key))) return error("invalid_curation");
+  const updates: string[] = [];
+  const bindings: Array<string | number | null> = [];
+  if ("why" in body) {
+    if (typeof body.why !== "string" || Array.from(body.why).length > 200) return error("invalid_curation");
+    updates.push("why = ?");
+    bindings.push(body.why.trim());
+  }
+  if ("curation_status" in body) {
+    if (!validCurationStatus(body.curation_status)) return error("invalid_curation");
+    updates.push("curation_status = ?");
+    bindings.push(body.curation_status);
+  }
+  if ("classification" in body) {
+    const selection = validateSelection(body.classification);
+    if (body.classification !== null && (selection === null || !record(body.classification) ||
+      Object.keys(body.classification).some((key) => !["topics", "form", "use"].includes(key)))) return error("invalid_curation");
+    updates.push("curation = ?");
+    bindings.push(selection === null ? null : JSON.stringify(selection));
+  }
+  if (updates.length === 0) return error("invalid_curation");
+  const row = await timing.measure("db", () => env.DB.prepare(
+    `UPDATE links SET ${updates.join(", ")} WHERE id = ? RETURNING id`
+  ).bind(...bindings, id).first<{ id: number }>());
+  if (row === null) return error("not_found", 404);
+  return getEnrichmentJob(env, id, timing);
 }
 
 async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Response> {
@@ -596,6 +684,7 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
           SELECT id
           FROM links
           WHERE ${X_LINK_SQL}
+            AND curation_status <> 'drop'
             AND enrichment_attempts < ?
             AND (
               enrichment_status = 'pending'
@@ -685,9 +774,10 @@ async function completeEnrichmentJob(
   const model = readBoundedString(body.model, 1, MAX_MODEL_LENGTH);
   const relatedLinks = validateRelatedLinks(body.related_links);
   const images = body.images === undefined ? [] : validateStoredImages(body.images, id);
+  const classification = body.classification === undefined ? undefined : validateClassification(body.classification);
   if (
     leaseToken === null || originalText === null || aiTitle === null || originalLanguage === null ||
-    translatedText === null || summary === null || model === null || relatedLinks === null || images === null
+    translatedText === null || summary === null || model === null || relatedLinks === null || images === null || classification === null
   ) {
     return error("invalid_enrichment");
   }
@@ -714,6 +804,7 @@ async function completeEnrichmentJob(
             summary = ?,
             related_links = ?,
             images = ?,
+            classification = COALESCE(?, classification),
             enrichment_model = ?,
             enrichment_error = NULL,
             enrichment_updated_at = ?,
@@ -725,7 +816,8 @@ async function completeEnrichmentJob(
     )
       .bind(
         aiTitle ?? null, originalLanguage ?? null, originalText, translatedText ?? null, summary,
-        JSON.stringify(relatedLinks), JSON.stringify(images), model, now, now, id, leaseToken
+        JSON.stringify(relatedLinks), JSON.stringify(images), classification ? JSON.stringify(classification) : null,
+        model, now, now, id, leaseToken
       )
       .first<{ id: number }>()
   );
@@ -1348,6 +1440,11 @@ function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> 
     created_at: row.created_at,
     status: processable ? row.enrichment_status : "unsupported",
     processable,
+    source: bookmarkSource(row.url),
+    classification: storedClassification(row.classification, row.curation),
+    classification_reviewed: row.curation !== null,
+    why: row.why,
+    curation_status: row.curation_status,
     attempts: row.enrichment_attempts,
     next_retry_at: row.enrichment_next_retry_at,
     ai_title: row.ai_title,
