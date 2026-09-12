@@ -33,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -222,13 +223,34 @@ internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String) 
     }
 }
 
+private fun filterPanelLabel(filters: BookmarkFilters): String {
+    if (filters == BookmarkFilters()) return "筛选"
+    val parts = mutableListOf<String>()
+    CurationStatus.entries.firstOrNull { it.apiValue == filters.curationStatus }?.let { parts += it.label }
+    when (filters.source) {
+        "x" -> parts += "X"
+        "wechat" -> parts += "公众号"
+        "other" -> parts += "其他来源"
+    }
+    if (filters.uncertain) parts += "待确认"
+    if (filters.recentDays > 0) parts += "近 ${filters.recentDays} 天"
+    if (filters.topic.isNotBlank()) parts += "主题"
+    if (filters.form.isNotBlank()) parts += "形态"
+    if (filters.use.isNotBlank()) parts += "用途"
+    return "筛选 · " + parts.joinToString(" · ")
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTaxonomy?, onChange: (BookmarkFilters) -> Unit) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
+    // 已激活筛选时保持展开，让用户随时看到当前筛选条件；默认收起，
+    // 避免一堆标签把真正的链接列表挤到首屏之外。
+    var expanded by rememberSaveable { mutableStateOf(filters != BookmarkFilters()) }
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag("bookmark_filters")) { Text(if (expanded) "收起整理筛选" else "整理筛选") }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag("bookmark_filters")) {
+                Text(if (expanded) "收起筛选" else filterPanelLabel(filters))
+            }
             if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) }) { Text("清除筛选") }
         }
         if (expanded) Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {

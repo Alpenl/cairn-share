@@ -903,6 +903,8 @@ private fun DetailScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(bottom = 32.dp),
         ) {
             if (link != null) {
+                // 内容优先：标题与操作最先出现，归档正文紧随其后；
+                // 整理、备注、元信息等次要内容全部沉到正文之后。
                 item(key = "link") {
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         LinkDetailContent(link, id in state.busyIds, onOpenExternal, onCopy, onToggleLearned)
@@ -913,12 +915,8 @@ private fun DetailScreen(
                     TextButton(onClick = { onEnsureLink(id) }) { Text("读取归档内容失败，点击重试") }
                 }
                 if (enrichment != null) {
-                    item(key = "curation") { BookmarkCuration(id, enrichment, state.taxonomy, id in state.busyIds, onLoadTaxonomy, onSaveCuration) }
-                    item(key = "summary") {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(enrichment.statusLabel(), style = MaterialTheme.typography.labelMedium)
-                            if (enrichment.summary.isNotBlank()) InfoBlock("摘要", enrichment.summary)
-                        }
+                    if (enrichment.summary.isNotBlank()) {
+                        item(key = "summary") { InfoBlock("摘要", enrichment.summary) }
                     }
                     if (readingText.isNotBlank()) {
                         item(key = "reading_controls") {
@@ -941,6 +939,17 @@ private fun DetailScreen(
                     items(enrichment.relatedLinks, key = { "related_$it" }, contentType = { "related" }) { url ->
                         TextButton(onClick = { if (validateHttpUrl(url)) onOpenExternal(url) }) { Text(url) }
                     }
+                    // 次要区域：整理信息、备注与元数据，放在全部正文之后。
+                    item(key = "secondary") {
+                        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Text(enrichment.statusLabel(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            BookmarkCuration(id, enrichment, state.taxonomy, id in state.busyIds, onLoadTaxonomy, onSaveCuration)
+                            LinkDetailSecondary(link)
+                        }
+                    }
+                } else if (link.note.isNotBlank()) {
+                    item(key = "note_only") { InfoBlock("备注", link.note) }
                 }
             } else item {
                 when (loadState) {
@@ -1352,35 +1361,36 @@ private fun FilterRow(
     enabled: Boolean,
     onFilterChange: (LinkFilter) -> Unit,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        FilterChip(
-            selected = selected == LinkFilter.All,
-            onClick = { onFilterChange(LinkFilter.All) },
-            enabled = enabled,
-            label = { Text("全部 ${stats.total}") },
-            modifier = Modifier
-                .weight(1f)
-                .testTag("filter_all"),
-        )
-        FilterChip(
-            selected = selected == LinkFilter.Unlearned,
-            onClick = { onFilterChange(LinkFilter.Unlearned) },
-            enabled = enabled,
-            label = { Text("待学习 ${stats.pending}") },
-            modifier = Modifier
-                .weight(1f)
-                .testTag("filter_unlearned"),
-        )
-        FilterChip(
-            selected = selected == LinkFilter.Learned,
-            onClick = { onFilterChange(LinkFilter.Learned) },
-            enabled = enabled,
-            label = { Text("已学习 ${stats.learned}") },
-            modifier = Modifier
-                .weight(1f)
-                .testTag("filter_learned"),
-        )
+    // 用轻量的文本切换代替一排 Chip，降低视觉噪声，让链接列表成为主角。
+    Row(horizontalArrangement = Arrangement.spacedBy(18.dp), modifier = Modifier.fillMaxWidth()) {
+        FilterTab("全部 ${stats.total}", selected == LinkFilter.All, enabled, { onFilterChange(LinkFilter.All) }, Modifier.testTag("filter_all"))
+        FilterTab("待学习 ${stats.pending}", selected == LinkFilter.Unlearned, enabled, { onFilterChange(LinkFilter.Unlearned) }, Modifier.testTag("filter_unlearned"))
+        FilterTab("已学习 ${stats.learned}", selected == LinkFilter.Learned, enabled, { onFilterChange(LinkFilter.Learned) }, Modifier.testTag("filter_learned"))
     }
+}
+
+@Composable
+private fun FilterTab(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.bodyMedium,
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        color = when {
+            !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            selected -> MaterialTheme.colorScheme.primary
+            else -> MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(enabled = enabled, role = Role.Tab, onClick = onClick)
+            .padding(horizontal = 2.dp, vertical = 6.dp),
+    )
 }
 
 @Composable
@@ -1473,7 +1483,9 @@ private fun LinkRow(
 ) {
     val title = remember(link.url, link.enrichment?.aiTitle) { link.displayTitle() }
     val metadata = remember(link.url, link.createdAt, fifo) { "${if (fifo) "入队" else link.hostLabel()} · ${link.createdAt.shortDateTime()}" }
-    val preview = link.enrichment?.why?.takeIf { it.isNotBlank() } ?: link.note.ifBlank { link.enrichment?.summary.orEmpty() }
+    // 列表行以内容预览为主：优先摘要，其次是个人备注，不展示整理状态等标签。
+    val preview = link.enrichment?.summary?.takeIf { it.isNotBlank() }
+        ?: link.note.ifBlank { link.enrichment?.why.orEmpty() }
     Surface(
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surface,
@@ -1517,9 +1529,6 @@ private fun LinkRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                link.enrichment?.let {
-                    Text(it.curationStatus.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                }
             }
             StateDot(learned = link.learned)
         }
@@ -1534,34 +1543,28 @@ private fun LinkDetailContent(
     onCopy: (String) -> Unit,
     onToggleLearned: (SavedLink) -> Unit,
 ) {
-    Surface(
-        shape = MaterialTheme.shapes.extraLarge,
-        color = if (link.learned) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.tertiaryContainer,
-        contentColor = if (link.learned) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onTertiaryContainer,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            StatePill(learned = link.learned)
-            Text(link.displayTitle(), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-        }
+    // 标题与状态直接呈现，不再包裹大色块卡片，让内容第一眼可见。
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        StatePill(learned = link.learned)
+        Text(link.displayTitle(), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
     }
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                HostAvatar(link.url)
-                Text(link.hostLabel(), modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-                IconButton(onClick = { onCopy(link.url) }) {
-                    Icon(Icons.Default.Share, contentDescription = "复制链接")
-                }
-            }
-            SelectionContainer {
-                Text(link.url, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-            }
+        HostAvatar(link.url)
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(link.hostLabel(), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                link.url,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.clickable(role = Role.Button) { onCopy(link.url) },
+            )
         }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -1589,7 +1592,11 @@ private fun LinkDetailContent(
             Text(if (link.learned) "改回待学习" else "标为已学习")
         }
     }
-    InfoBlock(title = "备注", text = link.note.ifBlank { "无备注" })
+}
+
+@Composable
+private fun LinkDetailSecondary(link: SavedLink) {
+    if (link.note.isNotBlank()) InfoBlock(title = "备注", text = link.note)
     Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             MetaRow("收藏于", link.createdAt.shortDateTime())
