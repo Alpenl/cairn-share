@@ -98,10 +98,19 @@ class EnrichmentInstrumentedTest {
             assertEquals(0, detailRequests.get())
             compose.onNodeWithTag("link_3").performClick()
             compose.waitUntil(20_000) { detailRequests.get() > 0 }
+            // Paragraphs are separate lazy items. Scroll to the text itself;
+            // bringing the controls into view need not compose the next item.
+            compose.waitUntil(20_000) {
+                runCatching {
+                    compose.onNodeWithTag("detail_content").performScrollToNode(hasText("这是一段完整的中文译文。"))
+                    true
+                }.getOrDefault(false)
+            }
+            compose.onNodeWithText("这是一段完整的中文译文。").assertIsDisplayed()
             compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("toggle_original"))
-            compose.onNodeWithText("这是一段完整的中文译文。").assertExists()
             compose.onNodeWithTag("toggle_original").performClick()
-            compose.onNodeWithText("Original source text.").assertExists()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasText("Original source text."))
+            compose.onNodeWithText("Original source text.").assertIsDisplayed()
             compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("bookmark_image"))
             compose.waitUntil(20_000) { compose.onAllNodesWithContentDescription("收藏图片").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithContentDescription("收藏图片").assertExists()
@@ -114,7 +123,8 @@ class EnrichmentInstrumentedTest {
             assertEquals("用于项目评审", edit.get().getString("why"))
             assertEquals("kept", edit.get().getString("curation_status"))
             compose.waitUntil(20_000) { compose.onAllNodesWithTag("save_curation").fetchSemanticsNodes().isEmpty() }
-            compose.onNodeWithText("用于项目评审").assertExists()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasText("用于项目评审"))
+            compose.onNodeWithText("用于项目评审").assertIsDisplayed()
         }
     }
 
