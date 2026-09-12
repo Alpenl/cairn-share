@@ -1,0 +1,18 @@
+{
+  "unit": {
+    "tests": 31,
+    "failed": 0
+  },
+  "device": {
+    "tests": 9,
+    "failed": 0,
+    "configuration": "API 26 x86 software emulator, emulator-5558"
+  },
+  "apk": {
+    "path": "android/app/build/outputs/apk/debug/app-debug.apk",
+    "bytes": 10395137,
+    "sha256": "f6c5057ec4cb44ba4ab52874ab0d27c6fd759e1d8c2d66c547d715da373a5cd7",
+    "build_type": "debug",
+    "version_name": "0.1.0"
+  }
+}

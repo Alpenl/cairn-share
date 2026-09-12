@@ -13,7 +13,12 @@ import com.alpenl.cairn.share.network.FailureKind
 import com.alpenl.cairn.share.network.LinkCreateResult
 import com.alpenl.cairn.share.network.LinkFilter
 import com.alpenl.cairn.share.network.LinkGetResult
-import com.alpenl.cairn.share.network.LinkListResult
+import com.alpenl.cairn.share.network.LinksApiClient
+import com.alpenl.cairn.share.network.BookmarkTaxonomy
+import com.alpenl.cairn.share.network.BookmarkFilters
+import com.alpenl.cairn.share.network.CurationUpdate
+import com.alpenl.cairn.share.network.TaxonomyResult
+import com.alpenl.cairn.share.network.retainLoadedContent
 import com.alpenl.cairn.share.network.LinkMutationResult
 import com.alpenl.cairn.share.network.LinkPageResult
 import com.alpenl.cairn.share.network.SavedLink
@@ -37,8 +42,11 @@ internal data class CairnLinksUiState(
     val currentVersionCode: Int,
     val links: List<SavedLink> = emptyList(),
     val loading: Boolean = false,
+    val taxonomy: BookmarkTaxonomy? = null,
+    val taxonomyLoading: Boolean = false,
     val statusText: String = "",
     val filter: LinkFilter = LinkFilter.All,
+    val bookmarkFilters: BookmarkFilters = BookmarkFilters(),
     val searchQuery: String = "",
     val searchResults: List<SavedLink> = emptyList(),
     val searchLoading: Boolean = false,
@@ -113,7 +121,7 @@ internal data class LinkStats(
 }
 
 internal class CairnLinksViewModel(
-    private val repository: LinkRepository,
+    private val repository: LinksApiClient,
     private val updateApiClient: UpdateApiClient,
     private val settingsStore: SharePreferencesStore,
     private val pendingUploadStore: PendingUploadStore,
@@ -135,6 +143,7 @@ internal class CairnLinksViewModel(
 
     private var messageId = 0L
     private var searchJob: Job? = null
+    private var refreshJob: Job? = null
     private var pendingUploadsRetryJob: Job? = null
     private var retryPendingUploadsAgain = false
     private var retryPendingUploadsAgainWithSummary = false
@@ -168,34 +177,65 @@ internal class CairnLinksViewModel(
             loading = true,
             statusText = if (hadLinks) "正在刷新链接..." else "正在同步云端链接...",
         )
-        viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.loadAll(apiToken) }) {
-                is LinkListResult.Loaded -> {
-                    uiState = uiState.copy(
-                        links = result.items.sortedByDescending { it.id },
-                        loading = false,
-                        statusText = if (result.items.isEmpty()) "还没有收藏链接。" else "已同步 ${result.items.size} 条链接。",
-                    )
-                }
-                is LinkListResult.Failed -> {
-                    val authFailure = result.kind == FailureKind.Unauthorized
-                    uiState = uiState.copy(
-                        loading = false,
-                        statusText = if (authFailure) "Token 无效，请在设置中重新填写。" else "加载失败。请检查网络后重试。",
-                        message = if (uiState.links.isNotEmpty()) {
-                            nextMessage(if (authFailure) "Token 无效，已保留当前列表。" else "同步失败，已保留当前列表。")
-                        } else {
-                            uiState.message
-                        },
-                    )
+        refreshJob = viewModelScope.launch {
+            val collected = linkedMapOf<Int, SavedLink>()
+            var published = uiState.links.associateBy { it.id }
+            val edited = mutableMapOf<Int, SavedLink>()
+            val deleted = mutableSetOf<Int>()
+            var beforeId: Int? = null
+            repeat(50) {
+                val result = withContext(Dispatchers.IO) { repository.listPage(LinkFilter.All, "", apiToken, beforeId) }
+                if (apiToken != currentApiToken()) return@launch
+                when (result) {
+                    is LinkPageResult.Loaded -> {
+                        val current = uiState.links.associateBy { it.id }
+                        for ((id, link) in current) if (published[id] != link) edited[id] = link
+                        deleted += published.keys - current.keys
+                        for (link in result.page.items) collected[link.id] = link.retainLoadedContent(current[link.id])
+                        collected.putAll(edited)
+                        for (id in deleted) collected.remove(id)
+                        val next = result.page.nextBeforeId
+                        if (next != null && (result.page.items.isEmpty() || (beforeId != null && next >= beforeId!!))) {
+                            uiState = uiState.copy(loading = false, statusText = "分页响应无效，请重试。")
+                            return@launch
+                        }
+                        // Publish each summary page immediately; the first screen
+                        // no longer waits for the entire library to download.
+                        val visible = if (next != null && hadLinks) current + collected else collected
+                        val items = visible.values.map { it.retainLoadedContent(current[it.id]) }.sortedByDescending { it.id }
+                        published = items.associateBy { it.id }
+                        uiState = uiState.copy(
+                            links = items,
+                            loading = next != null,
+                            statusText = if (next != null) "已加载 ${items.size} 条，正在同步更多..."
+                                else if (items.isEmpty()) "还没有收藏链接。" else "已同步 ${items.size} 条链接。",
+                        )
+                        if (next == null) return@launch
+                        beforeId = next
+                    }
+                    is LinkPageResult.Failed -> {
+                        uiState = uiState.copy(
+                            loading = false,
+                            statusText = failureText(result.kind, "同步未完成，已保留当前列表，请重试。"),
+                            message = nextMessage(failureText(result.kind, "同步未完成，已保留当前列表。")),
+                        )
+                        return@launch
+                    }
                 }
             }
+            uiState = uiState.copy(loading = false, statusText = "已加载 5000 条链接，请通过搜索查找更早的内容。")
         }
+        loadTaxonomy()
     }
 
     fun setFilter(filter: LinkFilter) {
         uiState = uiState.copy(filter = filter)
         viewModelScope.launch { settingsStore.setLastFilter(filter.apiValue) }
+    }
+
+    fun setBookmarkFilters(filters: BookmarkFilters) {
+        uiState = uiState.copy(bookmarkFilters = filters)
+        if (uiState.searchQuery.isNotBlank()) setSearchQuery(uiState.searchQuery)
     }
 
     fun setSearchQuery(value: String) {
@@ -237,7 +277,7 @@ internal class CairnLinksViewModel(
     }
 
     fun ensureLink(id: Int) {
-        if (uiState.links.any { it.id == id } || uiState.detailLoads[id] == DetailLoadState.Loading) return
+        if (uiState.links.any { it.id == id && it.enrichment?.contentLoaded == true } || uiState.detailLoads[id] == DetailLoadState.Loading) return
         val apiToken = currentApiToken()
         if (apiToken.isBlank()) {
             uiState = uiState.copy(
@@ -268,6 +308,45 @@ internal class CairnLinksViewModel(
                         },
                     )
                 }
+            }
+        }
+    }
+
+    fun loadTaxonomy() {
+        val token = currentApiToken()
+        if (token.isBlank() || uiState.taxonomy != null || uiState.taxonomyLoading) return
+        uiState = uiState.copy(taxonomyLoading = true)
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { repository.taxonomy(token) }
+            if (token != currentApiToken()) return@launch
+            uiState = uiState.copy(taxonomyLoading = false, taxonomy = (result as? TaxonomyResult.Loaded)?.taxonomy)
+        }
+    }
+
+    fun saveCuration(id: Int, update: CurationUpdate, onSuccess: () -> Unit) {
+        if (id in uiState.busyIds) return
+        val token = currentApiToken()
+        if (token.isBlank()) {
+            uiState = uiState.copy(message = nextMessage("请先在设置中配置访问 Token。"))
+            return
+        }
+        uiState = uiState.copy(busyIds = uiState.busyIds + id)
+        viewModelScope.launch {
+            when (val result = withContext(Dispatchers.IO) { repository.curate(id, update, token) }) {
+                is LinkMutationResult.Updated -> {
+                    uiState = uiState.copy(
+                        links = uiState.links.upsert(result.link),
+                        searchResults = uiState.searchResults.map { if (it.id == id) result.link else it },
+                        busyIds = uiState.busyIds - id,
+                        message = nextMessage("已保存整理。"),
+                    )
+                    onSuccess()
+                }
+                is LinkMutationResult.Failed -> uiState = uiState.copy(
+                    busyIds = uiState.busyIds - id,
+                    message = nextMessage(failureText(result.kind, "整理保存失败，请重试。")),
+                )
+                LinkMutationResult.Deleted -> Unit
             }
         }
     }
@@ -518,7 +597,9 @@ internal class CairnLinksViewModel(
 
     fun setApiToken(value: String) {
         val token = value.trim()
-        uiState = uiState.copy(preferences = uiState.preferences.copy(apiToken = token))
+        refreshJob?.cancel()
+        searchJob?.cancel()
+        uiState = uiState.copy(preferences = uiState.preferences.copy(apiToken = token), loading = false, taxonomy = null, taxonomyLoading = false)
         viewModelScope.launch { settingsStore.setApiToken(token) }
         refreshLinks()
         if (token.isNotBlank()) startPendingUploadRetry(showSummary = true)
@@ -764,6 +845,7 @@ internal class CairnLinksViewModel(
 
     private suspend fun loadSearchPage(query: String, beforeId: Int?, append: Boolean) {
         val apiToken = currentApiToken()
+        val filters = uiState.bookmarkFilters
         if (apiToken.isBlank()) {
             uiState = uiState.copy(
                 searchLoading = false,
@@ -776,9 +858,9 @@ internal class CairnLinksViewModel(
             searchLoading = true,
             searchStatusText = if (append) "正在加载更多..." else "正在搜索...",
         )
-        when (val result = withContext(Dispatchers.IO) { repository.searchPage(query, apiToken, beforeId) }) {
+        when (val result = withContext(Dispatchers.IO) { repository.listPage(LinkFilter.All, query, apiToken, beforeId, filters) }) {
             is LinkPageResult.Loaded -> {
-                if (uiState.searchQuery.trim() != query) return
+                if (uiState.searchQuery.trim() != query || uiState.bookmarkFilters != filters || apiToken != currentApiToken()) return
                 val nextItems = if (append) {
                     (uiState.searchResults + result.page.items)
                         .distinctBy { it.id }
@@ -866,7 +948,8 @@ internal class CairnLinksViewModel(
 }
 
 internal fun CairnLinksUiState.visibleLibraryLinks(): List<SavedLink> {
-    return links.asSequence().filter { link ->
+    val now = java.time.Instant.now()
+    return links.asSequence().filter { bookmarkFilters.matches(it, now) }.filter { link ->
         when (filter) {
             LinkFilter.All -> true
             LinkFilter.Unlearned -> !link.learned
@@ -881,7 +964,9 @@ internal fun CairnLinksUiState.searchResultLinks(): List<SavedLink> {
 
 internal fun CairnLinksUiState.queueLinks(): List<SavedLink> =
     links.filter { !it.learned }
-        .sortedWith(compareBy<SavedLink> { parseInstantOrNull(it.createdAt) }.thenBy { it.id })
+        .map { it to parseInstantOrNull(it.createdAt) }
+        .sortedWith(compareBy<Pair<SavedLink, java.time.Instant?>> { it.second }.thenBy { it.first.id })
+        .map { it.first }
 
 internal fun CairnLinksUiState.stats(): LinkStats {
     val learnedLinks = links.filter { it.learned }
@@ -897,7 +982,8 @@ internal fun CairnLinksUiState.stats(): LinkStats {
             val learnedAt = link.learnedAt?.let(::parseInstantOrNull)
             learnedAt != null && !learnedAt.isBefore(weekStart)
         },
-        oldestPending = queueLinks().firstOrNull(),
+        oldestPending = links.asSequence().filter { !it.learned }
+            .minWithOrNull(compareBy<SavedLink> { parseInstantOrNull(it.createdAt) }.thenBy { it.id }),
     )
 }
 
@@ -909,7 +995,7 @@ private fun List<SavedLink>.upsert(link: SavedLink): List<SavedLink> =
     }
 
 internal class CairnLinksViewModelFactory(
-    private val repository: LinkRepository,
+    private val repository: LinksApiClient,
     private val updateApiClient: UpdateApiClient,
     private val settingsStore: SharePreferencesStore,
     private val pendingUploadStore: PendingUploadStore,

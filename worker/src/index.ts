@@ -145,7 +145,7 @@ const MAX_ENRICHMENT_ERROR_LENGTH = 2_000;
 const ENRICHMENT_RETRY_DELAYS_MILLISECONDS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
 const READ_CACHE_TTL_SECONDS = 15;
 const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}, s-maxage=${READ_CACHE_TTL_SECONDS}`;
-const CACHE_VERSION = "2";
+const CACHE_VERSION = "3";
 const CACHE_ORIGIN = "https://cairn-share-cache.internal";
 const LINKS_CACHE_GENERATION_KEY = "links_generation";
 const X_LINK_SQL = `(
@@ -158,6 +158,23 @@ const X_LINK_SQL = `(
   OR lower(url) LIKE 'https://www.twitter.com/%'
   OR lower(url) LIKE 'http://www.twitter.com/%'
 )`;
+
+const LINK_COLUMNS = "id, url, note, created_at, learned, learned_at";
+const ENRICHMENT_COLUMNS = `enrichment_status, enrichment_attempts, enrichment_next_retry_at,
+  ai_title, original_language, summary, images, enrichment_model, enrichment_error,
+  enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
+  CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable`;
+
+// Lists omit the two potentially 100 KB bodies. Detail reads retain them.
+function contentColumns(summary: boolean): string {
+  return summary
+    ? "NULL AS original_text, NULL AS translated_text, NULL AS related_links"
+    : "original_text, translated_text, related_links";
+}
+
+function includeEnrichment(url: URL): boolean {
+  return url.searchParams.get("include") === "enrichment";
+}
 
 type CacheState = "MISS" | "HIT" | "BYPASS";
 
@@ -223,6 +240,28 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
       if (request.method === "POST") return createLink(request, env, timing);
       return listLinks(request, url, env, timing);
     });
+  }
+
+  if (path === "/api/taxonomy") {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => json(taxonomy));
+  }
+
+  const appCurationMatch = path.match(/^\/api\/links\/(\d+)\/curation$/);
+  if (appCurationMatch !== null) {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["PATCH"], () => updateCuration(request, env, Number(appCurationMatch[1]), timing, true));
+  }
+
+  const appImageMatch = path.match(/^\/api\/images\/(.+)$/);
+  if (appImageMatch !== null) {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    const key = decodePathComponent(appImageMatch[1]);
+    if (key === null) return error("not_found", 404);
+    return routeMethod(request, ["GET"], () => getEnrichmentImage(request, env, key));
   }
 
   if (path === "/api/enrichment/jobs/claim") {
@@ -351,12 +390,16 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
   const query = parseSearchQuery(url.searchParams.get("q"));
   if (query === null) return error("invalid_query");
 
+  const enriched = includeEnrichment(url);
+  const filters = bookmarkFilters(url, enriched ? query : undefined);
+  if (filters instanceof Response) return filters;
+
   return cachedJson(request, env, timing, (generation) => listCacheUrl(url, { limit, beforeId, learned, query }, generation), async () => {
     const pageSize = limit + 1;
-    const select = "SELECT id, url, note, created_at, learned, learned_at FROM links";
+    const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}` : ""} FROM links`;
     const order = "ORDER BY id DESC LIMIT ?";
-    const clauses: string[] = [];
-    const bindings: Array<string | number> = [];
+    const clauses = [...filters.clauses];
+    const bindings = [...filters.bindings];
 
     if (learned !== undefined) {
       clauses.push("learned = ?");
@@ -366,7 +409,7 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
       clauses.push("id < ?");
       bindings.push(beforeId);
     }
-    if (query !== undefined) {
+    if (query !== undefined && !enriched) {
       clauses.push("(url LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\')");
       const like = `%${escapeLike(query)}%`;
       bindings.push(like, like);
@@ -375,11 +418,11 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
     const statement = env.DB.prepare(`${select}${where} ${order}`).bind(...bindings, pageSize);
 
-    const result = await timing.measure("db", () => statement.all<LinkRow>());
+    const result = await timing.measure("db", () => statement.all<LinkRow & EnrichmentListRow>());
     const rows = result.results ?? [];
     const items = rows.slice(0, limit);
     const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
-    return { items: items.map(mapLink), next_before_id: next };
+    return { items: items.map((row) => enriched ? mapAppLink(row, false) : mapLink(row)), next_before_id: next };
   });
 }
 
@@ -387,16 +430,16 @@ async function getLink(request: Request, url: URL, id: number, env: Env, timing:
   return cachedJson(request, env, timing, (generation) => detailCacheUrl(id, url, generation), async () => {
     const row = await timing.measure("db", () =>
       env.DB.prepare(
-        "SELECT id, url, note, created_at, learned, learned_at FROM links WHERE id = ?"
+        `SELECT ${LINK_COLUMNS}${includeEnrichment(url) ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}` : ""} FROM links WHERE id = ?`
       )
         .bind(id)
-        .first<LinkRow>()
+        .first<LinkRow & EnrichmentListRow>()
     );
 
     if (row === null) {
       return null;
     }
-    return mapLink(row);
+    return includeEnrichment(url) ? mapAppLink(row, true) : mapLink(row);
   });
 }
 
@@ -473,22 +516,23 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
   }
 
   bindings.push(id);
+  const enriched = includeEnrichment(new URL(request.url));
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `UPDATE links
         SET ${updates.join(", ")}
         WHERE id = ?
-        RETURNING id, url, note, created_at, learned, learned_at`
+        RETURNING ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}` : ""}`
     )
       .bind(...bindings)
-      .first<LinkRow>()
+      .first<LinkRow & EnrichmentListRow>()
   );
 
   if (row === null) {
     return error("not_found", 404);
   }
   await bumpLinksCacheGeneration(env, timing);
-  return json(mapLink(row));
+  return json(enriched ? mapAppLink(row, true) : mapLink(row));
 }
 
 async function deleteLink(env: Env, id: number, timing: TimingCollector): Promise<Response> {
@@ -505,19 +549,7 @@ async function deleteLink(env: Env, id: number, timing: TimingCollector): Promis
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
-async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): Promise<Response> {
-  const limit = parseBoundedInt(url.searchParams.get("limit"), DEFAULT_LIMIT, MAX_LIMIT);
-  if (limit === null) return error("invalid_limit");
-
-  const beforeId = parseOptionalPositiveInt(url.searchParams.get("before_id"));
-  if (beforeId === null) return error("invalid_before_id");
-
-  const status = parseEnrichmentStatus(url.searchParams.get("status"));
-  if (status === null) return error("invalid_status");
-
-  const query = parseSearchQuery(url.searchParams.get("q"));
-  if (query === null) return error("invalid_query");
-
+function bookmarkFilters(url: URL, query?: string): { clauses: string[]; bindings: Array<string | number> } | Response {
   const clauses: string[] = [];
   const bindings: Array<string | number> = [];
   const curationStatus = url.searchParams.get("curation_status");
@@ -553,17 +585,6 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
     clauses.push("created_at >= ?");
     bindings.push(date.toISOString());
   }
-  if (beforeId !== undefined) {
-    clauses.push("id < ?");
-    bindings.push(beforeId);
-  }
-  if (status === "unsupported") {
-    clauses.push(`NOT ${X_LINK_SQL}`);
-  } else if (status !== undefined) {
-    clauses.push(X_LINK_SQL);
-    clauses.push("enrichment_status = ?");
-    bindings.push(status);
-  }
   if (query !== undefined) {
     const terms = query.split(/\s+/);
     if (terms.length > 10) return error("invalid_query");
@@ -576,14 +597,38 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
     }
   }
 
+  return { clauses, bindings };
+}
+
+async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): Promise<Response> {
+  const limit = parseBoundedInt(url.searchParams.get("limit"), DEFAULT_LIMIT, MAX_LIMIT);
+  if (limit === null) return error("invalid_limit");
+  const beforeId = parseOptionalPositiveInt(url.searchParams.get("before_id"));
+  if (beforeId === null) return error("invalid_before_id");
+  const status = parseEnrichmentStatus(url.searchParams.get("status"));
+  if (status === null) return error("invalid_status");
+  const query = parseSearchQuery(url.searchParams.get("q"));
+  if (query === null) return error("invalid_query");
+  const filters = bookmarkFilters(url, query);
+  if (filters instanceof Response) return filters;
+  const { clauses, bindings } = filters;
+  if (beforeId !== undefined) {
+    clauses.push("id < ?");
+    bindings.push(beforeId);
+  }
+  if (status === "unsupported") {
+    clauses.push(`NOT ${X_LINK_SQL}`);
+  } else if (status !== undefined) {
+    clauses.push(X_LINK_SQL);
+    clauses.push("enrichment_status = ?");
+    bindings.push(status);
+  }
+  const summary = url.searchParams.get("view") === "summary";
+
   const pageSize = limit + 1;
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const listStatement = env.DB.prepare(
-    `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
-            enrichment_next_retry_at, ai_title, original_language, original_text,
-            translated_text, summary, related_links, images, enrichment_model,
-            enrichment_error, enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
-            CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable
+    `SELECT id, url, note, created_at, ${ENRICHMENT_COLUMNS}, ${contentColumns(summary)}
        FROM links
       ${where}
       ORDER BY id DESC
@@ -610,7 +655,7 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   const items = rows.slice(0, limit);
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
   return json({
-    items: items.map(mapEnrichmentListItem),
+    items: items.map((row) => ({ ...mapEnrichmentListItem(row), ...(summary ? { content_loaded: false } : {}) })),
     next_before_id: next,
     counts: mapEnrichmentCounts(countRow)
   });
@@ -634,7 +679,7 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): 
   return json(mapEnrichmentListItem(row));
 }
 
-async function updateCuration(request: Request, env: Env, id: number, timing: TimingCollector): Promise<Response> {
+async function updateCuration(request: Request, env: Env, id: number, timing: TimingCollector, app = false): Promise<Response> {
   const body = await readEnrichmentBody(request);
   if (body instanceof Response) return body;
   if (Object.keys(body).some((key) => !["why", "curation_status", "classification"].includes(key))) return error("invalid_curation");
@@ -662,6 +707,12 @@ async function updateCuration(request: Request, env: Env, id: number, timing: Ti
     `UPDATE links SET ${updates.join(", ")} WHERE id = ? RETURNING id`
   ).bind(...bindings, id).first<{ id: number }>());
   if (row === null) return error("not_found", 404);
+  if (app) {
+    const item = await timing.measure("db", () => env.DB.prepare(
+      `SELECT ${LINK_COLUMNS}, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)} FROM links WHERE id = ?`
+    ).bind(id).first<LinkRow & EnrichmentListRow>());
+    return item === null ? error("not_found", 404) : json(mapAppLink(item, true));
+  }
   return getEnrichmentJob(env, id, timing);
 }
 
@@ -1286,6 +1337,10 @@ function listCacheUrl(
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
   if (parsed.query !== undefined) url.searchParams.set("q", parsed.query);
+  for (const key of ["include", "curation_status", "topic", "form", "use", "source", "uncertain", "since"]) {
+    const value = requestUrl.searchParams.get(key);
+    if (value) url.searchParams.set(key, value);
+  }
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
 }
@@ -1294,6 +1349,7 @@ function detailCacheUrl(id: number, requestUrl: URL, generation: number): string
   const url = new URL(`/api/links/${id}`, CACHE_ORIGIN);
   url.searchParams.set("v", CACHE_VERSION);
   url.searchParams.set("g", String(generation));
+  if (includeEnrichment(requestUrl)) url.searchParams.set("include", "enrichment");
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
 }
@@ -1416,6 +1472,32 @@ function mapLink(row: LinkRow): LinkRecord {
     created_at: row.created_at,
     learned: row.learned === 1,
     learned_at: row.learned_at
+  };
+}
+
+function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean): LinkRecord & { enrichment: Record<string, unknown> } {
+  return {
+    ...mapLink(row),
+    enrichment: {
+      status: row.processable === 1 ? row.enrichment_status : "unsupported",
+      source: bookmarkSource(row.url),
+      ai_title: row.ai_title,
+      summary: row.summary,
+      original_language: row.original_language,
+      classification: storedClassification(row.classification, row.curation),
+      classification_reviewed: row.curation !== null,
+      why: row.why,
+      curation_status: row.curation_status,
+      updated_at: row.enrichment_updated_at,
+      enriched_at: row.enriched_at,
+      content_loaded: detail,
+      ...(detail ? {
+        original_text: row.original_text,
+        translated_text: row.translated_text,
+        related_links: parseStoredRelatedLinks(row.related_links),
+        images: parseStoredImages(row.images, row.id)
+      } : {})
+    }
   };
 }
 

@@ -18,6 +18,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import com.alpenl.cairn.share.network.ApiDebugClient
 import com.alpenl.cairn.share.network.AppUpdateInfo
+import com.alpenl.cairn.share.network.LinksApiClient
 import com.alpenl.cairn.share.network.UpdateApiClient
 import com.alpenl.cairn.share.ui.theme.CairnShareTheme
 import kotlinx.coroutines.Dispatchers
@@ -46,7 +47,7 @@ class LauncherActivity : ComponentActivity() {
             fallback = BuildConfig.CAIRN_SHARE_RELEASES_API_URL,
         )
         val factory = CairnLinksViewModelFactory(
-            repository = LinkRepository(apiBaseUrl),
+            repository = LinksApiClient(apiBaseUrl),
             updateApiClient = UpdateApiClient(releasesApiUrl),
             settingsStore = SharePreferencesStore(this),
             pendingUploadStore = PendingUploadStore(this),

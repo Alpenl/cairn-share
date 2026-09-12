@@ -16,7 +16,7 @@ private val ShortDateTimeFormatter: DateTimeFormatter =
     DateTimeFormatter.ofPattern("MM-dd HH:mm", Locale.ROOT)
 
 internal fun SavedLink.displayTitle(): String =
-    runCatching {
+    enrichment?.aiTitle?.takeIf { it.isNotBlank() } ?: runCatching {
         val parsed = URL(url)
         UrlDisplayLabel.render(
             host = parsed.host,

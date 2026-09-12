@@ -1,0 +1,1079 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-12T06:26:17.826621+00:00",
+  "revision": "1ea43e7",
+  "command": "ablation/run.py --platform worker --json ablation/results/worker-final-20260912.json --report ablation/WORKER-20260912.md",
+  "device_enabled": false,
+  "device_serial": null,
+  "baselines": [
+    {
+      "verifier": "worker_test",
+      "status": "PASS",
+      "elapsed_seconds": 8.475,
+      "return_code": 0,
+      "tests": {
+        "total": 49,
+        "passed": 49,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": "exception = workerd/api/unsafe.c++:229: failed: jsg.Error: Application called deleteAllDurableObjects(). | exception = workerd/api/unsafe.c++:229: failed: jsg.Error: Application called deleteAllDurableObjects()."
+    },
+    {
+      "verifier": "worker_typecheck",
+      "status": "PASS",
+      "elapsed_seconds": 1.178,
+      "return_code": 0,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    }
+  ],
+  "results": [
+    {
+      "case_id": "worker-server-timing",
+      "platform": "worker",
+      "area": "observability",
+      "description": "Remove the Server-Timing response instrumentation.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 7.317,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 45,
+        "failed": 4,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path",
+          "test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes",
+          "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete",
+          "test/index.test.ts.cairn-share worker > bypasses shared read cache when a request carries cookie headers"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path; test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes; test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete; test/index.test.ts.cairn-share worker > bypasses shared read cache when a request carries cookie headers"
+    },
+    {
+      "case_id": "worker-public-auth",
+      "platform": "worker",
+      "area": "security",
+      "description": "Bypass bearer authentication for the public links API.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 7.567,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images",
+          "test/index.test.ts.cairn-share worker > requires a bearer token for link API requests"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images; test/index.test.ts.cairn-share worker > requires a bearer token for link API requests"
+    },
+    {
+      "case_id": "worker-enricher-auth",
+      "platform": "worker",
+      "area": "security",
+      "description": "Bypass the separate bearer token for enrichment endpoints.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 9.507,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 44,
+        "failed": 5,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images",
+          "test/curation.test.ts.bookmark curation > provides the authoritative vocabulary only to the enrichment token",
+          "test/curation.test.ts.bookmark curation > rejects invalid edits and filters without changing saved data",
+          "test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token",
+          "test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images; test/curation.test.ts.bookmark curation > provides the authoritative vocabulary only to the enrichment token; test/curation.test.ts.bookmark curation > rejects invalid edits and filters without changing saved data; test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token; test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys"
+    },
+    {
+      "case_id": "worker-method-guard",
+      "platform": "worker",
+      "area": "routing",
+      "description": "Allow every HTTP method through routeMethod.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 9.695,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > validates enrichment result shapes and methods",
+          "test/index.test.ts.cairn-share worker > returns health, CORS preflight, 404 and 405 without leaking internals"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > validates enrichment result shapes and methods; test/index.test.ts.cairn-share worker > returns health, CORS preflight, 404 and 405 without leaking internals"
+    },
+    {
+      "case_id": "worker-create-content-type",
+      "platform": "worker",
+      "area": "validation",
+      "description": "Accept non-JSON content types on all JSON write endpoints.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 8.263,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 46,
+        "failed": 3,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > validates enrichment result shapes and methods",
+          "test/index.test.ts.cairn-share worker > requires JSON content for writes",
+          "test/index.test.ts.cairn-share worker > validates learned state writes"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > validates enrichment result shapes and methods; test/index.test.ts.cairn-share worker > requires JSON content for writes; test/index.test.ts.cairn-share worker > validates learned state writes"
+    },
+    {
+      "case_id": "worker-url-userinfo-validation",
+      "platform": "worker",
+      "area": "validation",
+      "description": "Allow HTTP URLs containing username/password userinfo.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 11.052,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > rejects invalid bodies and unsupported URL shapes with stable errors"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > rejects invalid bodies and unsupported URL shapes with stable errors"
+    },
+    {
+      "case_id": "worker-input-length-limits",
+      "platform": "worker",
+      "area": "validation",
+      "description": "Remove URL and note length limits from link creation.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 9.267,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > rejects invalid bodies and unsupported URL shapes with stable errors"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > rejects invalid bodies and unsupported URL shapes with stable errors"
+    },
+    {
+      "case_id": "worker-idempotent-create",
+      "platform": "worker",
+      "area": "persistence",
+      "description": "Remove client_id conflict handling from link creation.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 9.815,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > returns the original link when a queued upload retries with the same client id"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > returns the original link when a queued upload retries with the same client id"
+    },
+    {
+      "case_id": "worker-learned-filter",
+      "platform": "worker",
+      "area": "query",
+      "description": "Ignore the learned-state filter on public list requests.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 10.877,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > filters records by learned state",
+          "test/index.test.ts.cairn-share worker > searches URL and note while preserving learned filters"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > filters records by learned state; test/index.test.ts.cairn-share worker > searches URL and note while preserving learned filters"
+    },
+    {
+      "case_id": "worker-before-id-pagination",
+      "platform": "worker",
+      "area": "query",
+      "description": "Ignore before_id when listing public links.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 8.727,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results",
+          "test/index.test.ts.cairn-share worker > lists newest records first and paginates with before_id"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results; test/index.test.ts.cairn-share worker > lists newest records first and paginates with before_id"
+    },
+    {
+      "case_id": "worker-like-escaping",
+      "platform": "worker",
+      "area": "query",
+      "description": "Stop escaping SQL LIKE wildcard characters in searches.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 8.168,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts"
+    },
+    {
+      "case_id": "worker-cache-hit",
+      "platform": "worker",
+      "area": "cache",
+      "description": "Ignore shared-cache hits and always query D1.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 8.467,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 46,
+        "failed": 3,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes",
+          "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes; test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete"
+    },
+    {
+      "case_id": "worker-cache-cookie-bypass",
+      "platform": "worker",
+      "area": "cache",
+      "description": "Cache requests carrying Cookie headers.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 8.171,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > bypasses shared read cache when a request carries cookie headers"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > bypasses shared read cache when a request carries cookie headers"
+    },
+    {
+      "case_id": "worker-cache-invalidation",
+      "platform": "worker",
+      "area": "cache",
+      "description": "Keep the cache generation unchanged after writes.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 8.125,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes",
+          "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes; test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete"
+    },
+    {
+      "case_id": "worker-enrichment-reset-on-edit",
+      "platform": "worker",
+      "area": "enrichment",
+      "description": "Keep stale enrichment data after URL or note edits.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 11.373,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/curation.test.ts.bookmark curation > invalidates generated classification while retaining human work after an App edit",
+          "test/index.test.ts.cairn-share worker > returns expired leases to the queue and resets enrichment after content edits"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/curation.test.ts.bookmark curation > invalidates generated classification while retaining human work after an App edit; test/index.test.ts.cairn-share worker > returns expired leases to the queue and resets enrichment after content edits"
+    },
+    {
+      "case_id": "worker-learned-timestamp",
+      "platform": "worker",
+      "area": "persistence",
+      "description": "Never record learned_at when a link becomes learned.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 12.275,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > marks a link learned and can move it back to unlearned",
+          "test/index.test.ts.cairn-share worker > updates URL, note and learned state in one PATCH"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > marks a link learned and can move it back to unlearned; test/index.test.ts.cairn-share worker > updates URL, note and learned state in one PATCH"
+    },
+    {
+      "case_id": "worker-delete-persistence",
+      "platform": "worker",
+      "area": "persistence",
+      "description": "Return success from DELETE without removing the row.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 12.037,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete",
+          "test/index.test.ts.cairn-share worker > deletes links and keeps missing deletes JSON shaped"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete; test/index.test.ts.cairn-share worker > deletes links and keeps missing deletes JSON shaped"
+    },
+    {
+      "case_id": "worker-x-only-claim",
+      "platform": "worker",
+      "area": "enrichment",
+      "description": "Allow non-X links into the enrichment queue.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 9.789,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order",
+          "test/index.test.ts.cairn-share worker > lists X bookmarks, returns details and manually reclaims a selected item"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order; test/index.test.ts.cairn-share worker > lists X bookmarks, returns details and manually reclaims a selected item"
+    },
+    {
+      "case_id": "worker-enrichment-fifo",
+      "platform": "worker",
+      "area": "enrichment",
+      "description": "Claim newest enrichment jobs first instead of FIFO.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 10.323,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order"
+    },
+    {
+      "case_id": "worker-completion-lease",
+      "platform": "worker",
+      "area": "concurrency",
+      "description": "Accept any non-empty lease token when completing a job.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 7.483,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract",
+          "test/index.test.ts.cairn-share worker > returns expired leases to the queue and resets enrichment after content edits"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract; test/index.test.ts.cairn-share worker > returns expired leases to the queue and resets enrichment after content edits"
+    },
+    {
+      "case_id": "worker-retry-backoff",
+      "platform": "worker",
+      "area": "resilience",
+      "description": "Retry failed enrichment work immediately instead of backing off.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 7.415,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > backs off failed jobs, recovers expired work and exhausts bounded retries"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > backs off failed jobs, recovers expired work and exhausts bounded retries"
+    },
+    {
+      "case_id": "worker-image-source-allowlist",
+      "platform": "worker",
+      "area": "security",
+      "description": "Silently accept and drop image URLs outside the allow-list.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 7.409,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+    },
+    {
+      "case_id": "worker-image-content-type",
+      "platform": "worker",
+      "area": "security",
+      "description": "Stop rejecting unsupported image response content types.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 7.417,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers"
+    },
+    {
+      "case_id": "worker-image-stream-limit",
+      "platform": "worker",
+      "area": "security",
+      "description": "Remove the streaming image-size cutoff.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 7.273,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers"
+    },
+    {
+      "case_id": "worker-public-learned-mapping",
+      "platform": "worker",
+      "area": "contract",
+      "description": "Map every public link to learned=false.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 7.428,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > marks a link learned and can move it back to unlearned",
+          "test/index.test.ts.cairn-share worker > updates URL, note and learned state in one PATCH"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > marks a link learned and can move it back to unlearned; test/index.test.ts.cairn-share worker > updates URL, note and learned state in one PATCH"
+    },
+    {
+      "case_id": "worker-trailing-slash-routing",
+      "platform": "worker",
+      "area": "routing",
+      "description": "Stop normalizing trailing slashes in request paths.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test+worker_typecheck",
+      "status": "SURVIVED",
+      "elapsed_seconds": 8.693,
+      "return_code": 0,
+      "tests": {
+        "total": 49,
+        "passed": 49,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": "exception = workerd/api/unsafe.c++:229: failed: jsg.Error: Application called deleteAllDurableObjects(). | exception = workerd/api/unsafe.c++:229: failed: jsg.Error: Application called deleteAllDurableObjects()."
+    },
+    {
+      "case_id": "worker-debug-console",
+      "platform": "worker",
+      "area": "debug-ui",
+      "description": "Remove the visible API operations from the debug console.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test+worker_typecheck",
+      "status": "SURVIVED",
+      "elapsed_seconds": 8.645,
+      "return_code": 0,
+      "tests": {
+        "total": 49,
+        "passed": 49,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": "exception = workerd/api/unsafe.c++:229: failed: jsg.Error: Application called deleteAllDurableObjects(). | exception = workerd/api/unsafe.c++:229: failed: jsg.Error: Application called deleteAllDurableObjects()."
+    },
+    {
+      "case_id": "worker-cors-origin",
+      "platform": "worker",
+      "area": "contract",
+      "description": "Remove Access-Control-Allow-Origin from all responses.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 7.556,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > saves a link with a valid bearer token and preserves the exact URL and note",
+          "test/index.test.ts.cairn-share worker > returns health, CORS preflight, 404 and 405 without leaking internals"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > saves a link with a valid bearer token and preserves the exact URL and note; test/index.test.ts.cairn-share worker > returns health, CORS preflight, 404 and 405 without leaking internals"
+    },
+    {
+      "case_id": "worker-env-r2-contract",
+      "platform": "worker",
+      "area": "types",
+      "description": "Remove the typed R2 bucket contract from Env.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_typecheck",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 1.152,
+      "return_code": 2,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "migration-0001",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0001 from a fresh database.",
+      "file": "worker/migrations/0001_create_links.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 3.979,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 0,
+        "failed": 49,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts",
+          "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers",
+          "test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details",
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content",
+          "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results",
+          "test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses",
+          "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts; test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers; test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details; test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content; test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results; test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses; test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+    },
+    {
+      "case_id": "migration-0002",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0002 from a fresh database.",
+      "file": "worker/migrations/0002_add_learned_state.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 4.23,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 0,
+        "failed": 49,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts",
+          "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers",
+          "test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details",
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content",
+          "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results",
+          "test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses",
+          "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts; test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers; test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details; test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content; test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results; test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses; test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+    },
+    {
+      "case_id": "migration-0003",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0003 from a fresh database.",
+      "file": "worker/migrations/0003_add_cache_metadata.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 4.535,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 0,
+        "failed": 49,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts",
+          "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers",
+          "test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details",
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content",
+          "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results",
+          "test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses",
+          "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts; test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers; test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details; test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content; test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results; test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses; test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+    },
+    {
+      "case_id": "migration-0004",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0004 from a fresh database.",
+      "file": "worker/migrations/0004_add_client_id.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 5.287,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 0,
+        "failed": 49,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts",
+          "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers",
+          "test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details",
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content",
+          "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results",
+          "test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses",
+          "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts; test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers; test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details; test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content; test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results; test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses; test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+    },
+    {
+      "case_id": "migration-0005",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0005 from a fresh database.",
+      "file": "worker/migrations/0005_add_x_enrichment.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 4.929,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 0,
+        "failed": 49,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts",
+          "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers",
+          "test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details",
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content",
+          "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results",
+          "test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses",
+          "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts; test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers; test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details; test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content; test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results; test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses; test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+    },
+    {
+      "case_id": "migration-0006",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0006 from a fresh database.",
+      "file": "worker/migrations/0006_add_rich_x_enrichment.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 4.782,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 0,
+        "failed": 49,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts",
+          "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers",
+          "test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details",
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content",
+          "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results",
+          "test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses",
+          "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts; test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers; test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details; test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content; test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results; test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses; test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+    },
+    {
+      "case_id": "migration-0007",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0007 from a fresh database.",
+      "file": "worker/migrations/0007_add_bookmark_curation.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 4.951,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 0,
+        "failed": 49,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts",
+          "test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers",
+          "test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details",
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content",
+          "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results",
+          "test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses",
+          "test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > searches literal percent, underscore and backslash characters in both list contracts; test/app-enrichment.test.ts.App enrichment integration > rejects unsupported image types and cancels oversized streams without trusting headers; test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details; test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content; test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results; test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses; test/app-enrichment.test.ts.App enrichment integration > requires App authentication for taxonomy, curation and archived images"
+    },
+    {
+      "case_id": "worker-app-enrichment-projection",
+      "platform": "worker",
+      "area": "app-sync",
+      "description": "Remove the opt-in enrichment projection from public App reads.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 8.359,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 46,
+        "failed": 3,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details",
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > keeps legacy reads stable and loads full content only in opted-in details; test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/app-enrichment.test.ts.App enrichment integration > searches source content while transferring only a summary and paginates filtered results"
+    },
+    {
+      "case_id": "worker-enriched-cache-migration",
+      "platform": "worker",
+      "area": "persistence",
+      "description": "Remove transactional cache invalidation for enrichment and curation updates.",
+      "file": "worker/migrations/0008_invalidate_enriched_link_cache.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 9.728,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 47,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes",
+          "test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > invalidates warmed list and detail caches when an internal job completes; test/app-enrichment.test.ts.App enrichment integration > shares human curation and filters across App and dashboard without changing source content"
+    },
+    {
+      "case_id": "worker-compact-content",
+      "platform": "worker",
+      "area": "performance",
+      "description": "Transfer full bodies in compact list responses.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 10.042,
+      "return_code": 1,
+      "tests": {
+        "total": 49,
+        "passed": 48,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/app-enrichment.test.ts.App enrichment integration > offers compact internal lists while preserving full legacy responses"
+    }
+  ],
+  "production_files": [
+    "android/app/src/main/AndroidManifest.xml",
+    "android/app/src/main/java/com/alpenl/cairn/share/AppUpdateState.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/BookmarkContent.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksApp.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/LauncherActivity.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/LinkPresentation.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/NativeShareSources.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/SharePreferencesStore.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/UpdateApkDownloader.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/SharePayload.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidate.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlDisplayLabel.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ApiDebugClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/AppUserAgent.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/BookmarkFilters.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkEnrichment.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkRequestJson.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinksApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ShareApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/UpdateApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnShareTheme.kt",
+    "android/app/src/main/res/values/strings.xml",
+    "worker/migrations/0001_create_links.sql",
+    "worker/migrations/0002_add_learned_state.sql",
+    "worker/migrations/0003_add_cache_metadata.sql",
+    "worker/migrations/0004_add_client_id.sql",
+    "worker/migrations/0005_add_x_enrichment.sql",
+    "worker/migrations/0006_add_rich_x_enrichment.sql",
+    "worker/migrations/0007_add_bookmark_curation.sql",
+    "worker/migrations/0008_invalidate_enriched_link_cache.sql",
+    "worker/src/curation.ts",
+    "worker/src/env.d.ts",
+    "worker/src/index.ts",
+    "worker/src/taxonomy.json"
+  ],
+  "coverage": {
+    "worker/src/index.ts": [
+      "worker-server-timing",
+      "worker-public-auth",
+      "worker-enricher-auth",
+      "worker-method-guard",
+      "worker-create-content-type",
+      "worker-url-userinfo-validation",
+      "worker-input-length-limits",
+      "worker-idempotent-create",
+      "worker-learned-filter",
+      "worker-before-id-pagination",
+      "worker-like-escaping",
+      "worker-cache-hit",
+      "worker-cache-cookie-bypass",
+      "worker-cache-invalidation",
+      "worker-enrichment-reset-on-edit",
+      "worker-learned-timestamp",
+      "worker-delete-persistence",
+      "worker-x-only-claim",
+      "worker-enrichment-fifo",
+      "worker-completion-lease",
+      "worker-retry-backoff",
+      "worker-image-source-allowlist",
+      "worker-image-content-type",
+      "worker-image-stream-limit",
+      "worker-public-learned-mapping",
+      "worker-trailing-slash-routing",
+      "worker-debug-console",
+      "worker-cors-origin",
+      "worker-env-r2-contract",
+      "worker-app-enrichment-projection",
+      "worker-compact-content"
+    ],
+    "worker/migrations/0001_create_links.sql": [
+      "migration-0001"
+    ],
+    "worker/migrations/0002_add_learned_state.sql": [
+      "migration-0002"
+    ],
+    "worker/migrations/0003_add_cache_metadata.sql": [
+      "migration-0003"
+    ],
+    "worker/migrations/0004_add_client_id.sql": [
+      "migration-0004"
+    ],
+    "worker/migrations/0005_add_x_enrichment.sql": [
+      "migration-0005"
+    ],
+    "worker/migrations/0006_add_rich_x_enrichment.sql": [
+      "migration-0006"
+    ],
+    "worker/migrations/0007_add_bookmark_curation.sql": [
+      "migration-0007"
+    ],
+    "worker/migrations/0008_invalidate_enriched_link_cache.sql": [
+      "worker-enriched-cache-migration"
+    ],
+    "worker/src/env.d.ts": [
+      "worker-env-r2-contract"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/AppUpdateState.kt": [
+      "android-update-download-success"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/SharePayload.kt": [
+      "android-text-url-extraction"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidate.kt": [
+      "android-url-deduplication"
+    ]
+  }
+}

@@ -9,13 +9,28 @@ Cairn Share 是一个开源 Android 分享入口：从系统分享菜单接收�
 https://share.alpenl.com
 ```
 
+## 项目组成
+
+本仓库包含三个目录，另有一个紧密关联但独立发布的伴随服务：
+
+| 组成 | 位置 | 说明 |
+| --- | --- | --- |
+| Android 客户端 | `android/` | 系统分享入口和完整应用壳，随 GitHub Release 分发 APK |
+| Cloudflare 后端 | `worker/` | 唯一的线上后端：Worker `cairn-share-api`、D1 `cairn-share`、R2 图片桶 |
+| 界面设计基线 | `design/` | Android 界面原型，不参与运行 |
+| X 增强服务 | [`cairn-x-enricher`](https://github.com/Alpenl/cairn-x-enricher)（独立仓库） | 自托管 Go 服务，通常以 Docker 跑在 NAS 上，通过内部接口回写 X 收藏的增强内容 |
+
+Android 客户端只依赖 Cloudflare 后端。增强服务是可选的：不部署它时，App 的功能和
+API 契约完全不变，只是链接不会带上 AI 标题、译文和图片。详见
+[X 增强伴随服务](#x-增强伴随服务)。
+
 ## 范围
 
 - 保留 Android `ACTION_SEND` 的文本分享入口和完整 URL，不删除 query 或 fragment。
 - 分享时允许填写可选备注，先持久化到本机，再由应用提交到 Cloudflare。
 - App 的在线后端只使用 Cloudflare Worker 与 D1；可选的独立 X Enricher 服务通过内部
   Worker API 写回 AI 标题、双语原文、摘要和相关链接，并把图片保存到 R2；该服务不进入
-  Android 安装包，也不改变 App API。
+  Android 安装包。新版 App 通过显式的增强读取接口展示同一份内容。
 - 应用和 HTTP API 不做账号、会话或多用户权限，只使用一个部署侧访问 Token 保护读写接口。
 - Android 本地保存访问 Token、分享偏好、筛选、搜索词、上次打开页面和待上传任务。
 
@@ -39,6 +54,11 @@ curl -X POST https://share.alpenl.com/api/links \
 - `POST /api/links`
 - `GET /api/links?limit=50&before_id=123&learned=false&q=keyword`
 - `GET /api/links/:id`
+- `GET /api/links?include=enrichment`：轻量摘要、分类和整理状态。
+- `GET /api/links/:id?include=enrichment`：完整双语正文及归档图片引用。
+- `GET /api/taxonomy`：共享的版本化词表。
+- `GET /api/images/:key`：使用 App Token 读取归档图片。
+- `PATCH /api/links/:id/curation`：更新收藏原因、整理状态、人工分类或恢复自动分类。
 - `PATCH /api/links/:id`
 - `DELETE /api/links/:id`
 - `OPTIONS *`
@@ -56,7 +76,8 @@ Worker 另提供不属于 App 公共契约的内部接口：
 
 它们只接受独立的 `CAIRN_ENRICHER_TOKEN`，用于可选的
 [`cairn-x-enricher`](https://github.com/Alpenl/cairn-x-enricher) 服务。App 的
-`CAIRN_API_TOKEN` 无权调用这些接口，公开链接响应也不会增加增强字段。
+`CAIRN_API_TOKEN` 无权调用这些内部任务接口。默认公开链接响应保留六个原始字段；
+`include=enrichment` 在独立的 `enrichment` 对象内返回阅读和整理信息，不暴露租约、模型或内部错误。
 图片上传只接受 `pbs.twimg.com/media`，经过响应类型和大小校验后写入绑定为
 `ENRICHMENT_IMAGES` 的 R2 bucket；D1 只保存 R2 对象引用。
 
@@ -82,6 +103,15 @@ code unit。`client_id` 也可省略；Android 待上传队列会传入 UUID v4�
 - `learned=false` 或 `learned=0`：只返回未学习链接。
 - `learned=true` 或 `learned=1`：只返回已学习链接。
 - `q` 会在链接和备注中做大小写不敏感的模糊查询，最长 200 个 UTF-16 code unit。
+
+指定 `include=enrichment` 后，`q` 同时查询原文、译文、AI 标题、摘要、实体和收藏原因；
+支持 `topic`、`form`、`use`、`source=x|wechat|other`、`curation_status=inbox|kept|compiled|drop`、
+`uncertain=true` 与 ISO 时间 `since` 组合筛选。列表只返回摘要和 `content_loaded=false`，
+单条详情返回完整正文及 `content_loaded=true`。URL/备注编辑后应重新读取详情。
+
+人工分类使用 `{"classification":{"topics":["llm"],"form":"tool","use":"try"}}`，
+`{"classification":null}` 恢复模型分类；`why` 和 `curation_status` 可单独修改。
+这些操作与局域网阅读页共享 D1 中的同一条记录，不触发模型处理。
 
 手动修改链接：
 
@@ -119,6 +149,8 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 - “链接详情”“编辑链接”“检查更新”“API 调试台”“关于”是独立下钻页面，应用栏返回和
   系统返回逐级退出。
 - “链接库”提供总览、搜索、筛选、周进度、链接详情入口和手动添加 FAB。
+- “整理筛选”提供主题、形态、用途、来源、整理状态、待确认和近 7/30 天条件。
+- 详情展示 AI 标题、摘要、原文/译文切换、归档图片和相关链接；支持填写收藏原因、确认分类和恢复自动分类。
 - “待学习”只展示未学习链接，按收藏时间先进先读，并支持批量标记已学习。
 - “待上传队列”展示尚未同步的本地链接，支持逐条重试、全部重试和移除。
 - “设置”展示只读服务器地址、访问 Token、分享偏好、更新入口、API 调试台入口和关于入口。
@@ -140,7 +172,8 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 
 直接从桌面打开 App 时，会自动重试本地待上传任务，但不会凭空创建新任务。链接库和
 待学习页面共享同一份云端数据；
-详情页只通过链接 ID 进入，必要时调用 `GET /api/links/:id` 补齐记录。打开、复制、学习
+列表每返回一页就显示一页，最多加载 5000 条并明确提示上限；详情页通过链接 ID 调用
+`GET /api/links/:id?include=enrichment` 按需补齐正文。文本按段落延迟组合，图片按可见区域读取并限制解码尺寸与内存缓存。打开、复制、学习
 状态切换、编辑和删除都是真实网络操作；删除前必须确认，删除后不会伪造撤销。
 
 应用内更新：
@@ -154,11 +187,14 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 
 普通 Android 应用不能静默安装 APK，最终确认安装仍由系统安装器完成，这是系统安全边界。
 
-仍然没有账号体系、可编辑 server、多服务器切换、Room、WorkManager、Keystore、Reader、
+仍然没有账号体系、可编辑 server、多服务器切换、Room、WorkManager、Keystore、
 旧 Cairn/WebTag endpoint 或后台同步。设置页中的服务器地址只读，生产用户不能切换到
 任意 API 主机；API 调试台也被限制在当前配置服务器下。
 
 ## 本地构建
+
+全仓行为消融及原始结果见 [ablation/README.md](ablation/README.md)，包含 Worker、Android
+和新增阅读功能的设备对照。实验使用当前工作区的临时副本，不操作生产 D1。
 
 Worker：
 
@@ -191,7 +227,7 @@ cd android
 ./gradlew --no-daemon --dependency-verification strict connectedDebugAndroidTest
 ```
 
-本机运行模拟器需要当前用户具备 `/dev/kvm` 权限；GitHub Actions 的 `device.yml`
+本机运行加速模拟器需要当前用户具备 `/dev/kvm` 权限；也可使用软件模拟器。GitHub Actions 的 `device.yml`
 会在 runner 上启用 KVM 并分别跑 API 26 和 API 35。
 
 ## Cloudflare 部署
@@ -207,6 +243,10 @@ Cloudflare 配置位于 `worker/wrangler.jsonc`：
 
 发布包含 Worker 协议或 migration 的 Android 版本前，需要先手动运行 `deploy-worker.yml`；
 它会先测试，再迁移 D1 并部署。也可以在本地手动部署：
+
+本次 App 同步需要全部迁移，截至 `0008_invalidate_enriched_link_cache.sql`。
+0007 提供分类和人工整理字段，0008 在富化或整理更新的同一事务内递增缓存版本。
+先迁移并部署 Worker，再升级 Enricher 和 Android；现有记录、人工分类和上传队列会保留。
 
 ```bash
 cd worker
@@ -228,13 +268,47 @@ Cloudflare API token 应使用最小权限，只授予部署该 Worker 和迁移
 Dashboard 配置。不要提交 Wrangler OAuth 文件、Cloudflare token、`.dev.vars` 或
 GitHub secret 值。
 
+## X 增强伴随服务
+
+[`cairn-x-enricher`](https://github.com/Alpenl/cairn-x-enricher) 是本项目的伴随服务，
+代码和发布都在独立仓库，用 Go 编写，正式镜像发布在
+`ghcr.io/alpenl/cairn-x-enricher`，日常以 Docker Compose 自托管，作者的部署位于 NAS。
+
+它做的事情：
+
+1. 按轮询间隔调用 `POST /api/enrichment/jobs/claim` 领取尚未处理的 X 收藏，Worker 用
+   原子更新和 15 分钟 lease 分发任务，允许多实例并发而不重复领取。
+2. 用 Grok Responses API 和服务端 `x_search` 读取原帖及评论。
+3. 通过 `POST /api/enrichment/jobs/:id/images` 归档图片，只接受
+   `https://pbs.twimg.com/media/...`，由 Worker 校验响应类型和大小后写入 R2，D1 只保存
+   对象引用。
+4. 通过 `POST /api/enrichment/jobs/:id/complete` 或 `.../fail` 回写结果：AI 中文标题、
+   原始语言全文、简体中文译文、摘要和内容相关链接。失败由 Worker 按
+   `1m / 5m / 30m / 2h` 退避，最多尝试 5 次。
+
+它同时在本机监听一个局域网页面（NAS 部署映射到 `8088`），提供收藏列表、独立阅读页和
+手动触发处理。该页面会展示收藏内容并可以触发付费模型请求，只应开放在可信局域网，不要
+做公网端口转发。
+
+与本仓库的边界：
+
+- 它只使用 `/api/enrichment/*` 内部接口和独立的 `CAIRN_ENRICHER_TOKEN`。App 的
+  `CAIRN_API_TOKEN` 无权调用这些接口，两个 token 不得复用。
+- 它不进入 Android 安装包。App 通过 `include=enrichment` 读取增强内容，通过公共 curation
+  接口整理收藏；默认 `/api/links` 六字段响应及原有鉴权仍兼容旧客户端。
+- 本仓库维护 D1 migration、两组独立鉴权的 API、R2 绑定和 Android 阅读/整理界面。
+- App 修改链接的 URL 或备注时，已有增强结果会失效并重新入队。
+
+部署顺序、环境变量和 NAS compose 清单以该仓库的 `README.md`、`docs/deployment.md` 和
+`deploy/nas/compose.yaml` 为准，本仓库不重复维护。
+
 ## Android 发布
 
 `release-android.yml` 只响应稳定 tag：
 
 ```bash
-git tag v0.2.7
-git push origin v0.2.7
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 workflow 会验证 tag 提交位于 `main`，从 tag 注入 `versionName`，用
@@ -257,7 +331,7 @@ GitHub Release 只上传 APK 和 `SHA256SUMS`。本项目不自动上传 Google 
 
 - Android App 和公开 API 不抓取、解析、摘要或分类网页内容；可选伴随服务只处理 X 收藏，
   并通过独立鉴权的内部接口写回结果。
-- 不提供 Reader、待办、账户、跨设备同步或常驻后台同步。
+- 阅读已归档正文，不提供任意网页抓取 Reader、待办、账户或常驻后台同步。
 - 不包含 iOS 客户端、带鉴权的 Web 管理后台或应用商店自动上传。
 
 ## 数据边界

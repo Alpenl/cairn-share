@@ -100,6 +100,8 @@ import com.alpenl.cairn.share.contract.UrlCandidate
 import com.alpenl.cairn.share.network.ApiDebugMethod
 import com.alpenl.cairn.share.network.LinkFilter
 import com.alpenl.cairn.share.network.SavedLink
+import com.alpenl.cairn.share.network.CurationUpdate
+import com.alpenl.cairn.share.network.BookmarkFilters
 
 private object Routes {
     const val Library = "library"
@@ -222,6 +224,7 @@ internal fun CairnLinksApp(
                 LibraryScreen(
                     state = state,
                     onFilterChange = viewModel::setFilter,
+                    onBookmarkFiltersChange = viewModel::setBookmarkFilters,
                     onOpenSearch = { navController.navigate(Routes.Search) },
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
@@ -260,6 +263,7 @@ internal fun CairnLinksApp(
                     },
                     onSearchQueryChange = viewModel::setSearchQuery,
                     onLoadMoreSearchResults = viewModel::loadMoreSearchResults,
+                    onBookmarkFiltersChange = viewModel::setBookmarkFilters,
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
             }
@@ -277,6 +281,8 @@ internal fun CairnLinksApp(
                     onOpenExternal = onOpenExternal,
                     onCopy = onCopy,
                     onToggleLearned = viewModel::toggleLearned,
+                    onLoadTaxonomy = viewModel::loadTaxonomy,
+                    onSaveCuration = { update, onSuccess -> viewModel.saveCuration(id, update, onSuccess) },
                     onDelete = { viewModel.deleteLink(id) { navController.popBackStack() } },
                 )
             }
@@ -488,15 +494,16 @@ private fun restorableRoute(route: String?): String? =
 private fun LibraryScreen(
     state: CairnLinksUiState,
     onFilterChange: (LinkFilter) -> Unit,
+    onBookmarkFiltersChange: (BookmarkFilters) -> Unit,
     onOpenSearch: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
-    val stats = state.stats()
-    val items = state.visibleLibraryLinks()
+    val stats = remember(state.links, java.time.LocalDate.now()) { state.stats() }
+    val items = remember(state.links, state.filter, state.bookmarkFilters) { state.visibleLibraryLinks() }
     ScreenColumn {
         AppHeader(
             title = "链接库",
-            subtitle = "${stats.total} 条收藏 · ${stats.pending} 条待读",
+            subtitle = "${if (state.loading) "已加载 " else ""}${stats.total} 条收藏 · ${stats.pending} 条待读",
             actions = {
                 HeaderIconButton(
                     icon = Icons.Default.Search,
@@ -509,9 +516,10 @@ private fun LibraryScreen(
         FilterRow(
             selected = state.filter,
             stats = stats,
-            enabled = !state.loading,
+            enabled = true,
             onFilterChange = onFilterChange,
         )
+        BookmarkFilterPanel(state.bookmarkFilters, state.taxonomy, onBookmarkFiltersChange)
         LinkList(
             items = items,
             loading = state.loading,
@@ -528,9 +536,10 @@ private fun SearchScreen(
     onBack: () -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onLoadMoreSearchResults: () -> Unit,
+    onBookmarkFiltersChange: (BookmarkFilters) -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
-    val results = state.searchResultLinks()
+    val results = remember(state.searchResults) { state.searchResultLinks() }
     ScreenColumn {
         DetailTopBar(title = "搜索", onBack = onBack)
         SearchField(
@@ -538,11 +547,12 @@ private fun SearchScreen(
             onValueChange = onSearchQueryChange,
             enabled = true,
         )
+        BookmarkFilterPanel(state.bookmarkFilters, state.taxonomy, onBookmarkFiltersChange)
         LinkList(
             items = results,
             loading = state.searchLoading && results.isEmpty(),
             emptyText = when {
-                state.searchQuery.isBlank() -> "输入关键词搜索链接、备注或站点。"
+                state.searchQuery.isBlank() -> "搜索标题、正文、摘要、收藏原因或链接。"
                 state.searchLoading -> "正在搜索..."
                 else -> "没有匹配的链接。"
             },
@@ -560,13 +570,13 @@ private fun QueueScreen(
     onMarkAll: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
-    val queue = state.queueLinks()
+    val queue = remember(state.links) { state.queueLinks() }
     ScreenColumn {
         AppHeader(
             title = "待学习",
             subtitle = if (queue.isEmpty()) "按收藏先后排队，先进先读" else "${queue.size} 条排队中，最早 ${queue.first().createdAt.shortDateTime()}",
             actions = {
-                IconButton(onClick = onMarkAll, enabled = queue.isNotEmpty() && state.busyIds.isEmpty(), modifier = Modifier.testTag("mark_all_learned")) {
+                IconButton(onClick = onMarkAll, enabled = !state.loading && queue.isNotEmpty() && state.busyIds.isEmpty(), modifier = Modifier.testTag("mark_all_learned")) {
                     Icon(Icons.Default.Check, contentDescription = "全部标记为已学习")
                 }
             },
@@ -862,14 +872,20 @@ private fun DetailScreen(
     onOpenExternal: (String) -> Unit,
     onCopy: (String) -> Unit,
     onToggleLearned: (SavedLink) -> Unit,
+    onLoadTaxonomy: () -> Unit,
+    onSaveCuration: (CurationUpdate, () -> Unit) -> Unit,
     onDelete: () -> Unit,
 ) {
     val link = state.links.firstOrNull { it.id == id }
     val loadState = state.detailLoads[id]
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
+    var showOriginal by rememberSaveable(id) { mutableStateOf(false) }
+    val enrichment = link?.enrichment
+    val readingText = if (showOriginal || enrichment?.translatedText.isNullOrBlank()) enrichment?.originalText.orEmpty() else enrichment?.translatedText.orEmpty()
+    val paragraphs = remember(readingText) { readingText.split(Regex("\\n+")).map { it.trim() }.filter { it.isNotEmpty() } }
     LaunchedEffect(id) { onEnsureLink(id) }
 
-    ScreenColumn(scroll = true) {
+    ScreenColumn {
         DetailTopBar(
             title = "链接 #$id",
             onBack = onBack,
@@ -882,17 +898,57 @@ private fun DetailScreen(
                 }
             },
         )
-        when {
-            link != null -> LinkDetailContent(
-                link = link,
-                busy = id in state.busyIds,
-                onOpenExternal = onOpenExternal,
-                onCopy = onCopy,
-                onToggleLearned = onToggleLearned,
-            )
-            loadState == DetailLoadState.Loading -> LoadingState("正在加载链接详情...")
-            loadState == DetailLoadState.NotFound -> EmptyState("这条链接不存在或已经被删除。")
-            else -> EmptyState("无法加载链接详情。")
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f).testTag("detail_content"),
+            verticalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(bottom = 32.dp),
+        ) {
+            if (link != null) {
+                item(key = "link") {
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        LinkDetailContent(link, id in state.busyIds, onOpenExternal, onCopy, onToggleLearned)
+                    }
+                }
+                if (loadState == DetailLoadState.Loading) item(key = "loading") { LoadingState("正在加载归档内容...") }
+                if (loadState == DetailLoadState.Failed) item(key = "retry") {
+                    TextButton(onClick = { onEnsureLink(id) }) { Text("读取归档内容失败，点击重试") }
+                }
+                if (enrichment != null) {
+                    item(key = "curation") { BookmarkCuration(id, enrichment, state.taxonomy, id in state.busyIds, onLoadTaxonomy, onSaveCuration) }
+                    item(key = "summary") {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(enrichment.statusLabel(), style = MaterialTheme.typography.labelMedium)
+                            if (enrichment.summary.isNotBlank()) InfoBlock("摘要", enrichment.summary)
+                        }
+                    }
+                    if (readingText.isNotBlank()) {
+                        item(key = "reading_controls") {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(if (showOriginal || enrichment.translatedText.isBlank()) "原文 ${enrichment.originalLanguage}" else "中文译文", style = MaterialTheme.typography.titleMedium)
+                                if (enrichment.originalText.isNotBlank() && enrichment.translatedText.isNotBlank()) TextButton(
+                                    onClick = { showOriginal = !showOriginal }, modifier = Modifier.testTag("toggle_original"),
+                                ) { Text(if (showOriginal) "查看译文" else "查看原文") }
+                                TextButton(onClick = { onCopy(readingText) }) { Text("复制全文") }
+                            }
+                        }
+                        items(paragraphs.size, key = { "paragraph_$it" }, contentType = { "paragraph" }) { index ->
+                            SelectionContainer { Text(paragraphs[index], style = MaterialTheme.typography.bodyLarge) }
+                        }
+                    }
+                    items(enrichment.imageKeys, key = { "image_$it" }, contentType = { "image" }) { key ->
+                        BookmarkImage(state.apiBaseUrl, state.preferences.apiToken, key)
+                    }
+                    if (enrichment.relatedLinks.isNotEmpty()) item(key = "links_title") { SectionLabel("相关链接") }
+                    items(enrichment.relatedLinks, key = { "related_$it" }, contentType = { "related" }) { url ->
+                        TextButton(onClick = { if (validateHttpUrl(url)) onOpenExternal(url) }) { Text(url) }
+                    }
+                }
+            } else item {
+                when (loadState) {
+                    DetailLoadState.Loading -> LoadingState("正在加载链接详情...")
+                    DetailLoadState.NotFound -> EmptyState("这条链接不存在或已经被删除。")
+                    else -> TextButton(onClick = { onEnsureLink(id) }) { Text("无法加载链接详情，点击重试") }
+                }
+            }
         }
     }
 
@@ -1379,7 +1435,7 @@ private fun ColumnScope.LinkList(
         } else if (items.isEmpty()) {
             item { EmptyState(emptyText) }
         }
-        items(items, key = { it.id }) { link ->
+        items(items, key = { it.id }, contentType = { "link" }) { link ->
             LinkRow(
                 link = link,
                 fifo = fifo,
@@ -1415,6 +1471,9 @@ private fun LinkRow(
     fifo: Boolean,
     onClick: () -> Unit,
 ) {
+    val title = remember(link.url, link.enrichment?.aiTitle) { link.displayTitle() }
+    val metadata = remember(link.url, link.createdAt, fifo) { "${if (fifo) "入队" else link.hostLabel()} · ${link.createdAt.shortDateTime()}" }
+    val preview = link.enrichment?.why?.takeIf { it.isNotBlank() } ?: link.note.ifBlank { link.enrichment?.summary.orEmpty() }
     Surface(
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surface,
@@ -1435,28 +1494,31 @@ private fun LinkRow(
             HostAvatar(link.url)
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(
-                    text = link.displayTitle(),
+                    text = title,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "${if (fifo) "入队" else link.hostLabel()} · ${link.createdAt.shortDateTime()}",
+                    text = metadata,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontFamily = FontFamily.Monospace,
                 )
-                if (link.note.isNotBlank()) {
+                if (preview.isNotBlank()) {
                     Text(
-                        text = link.note,
-                        maxLines = 1,
+                        text = preview,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+                link.enrichment?.let {
+                    Text(it.curationStatus.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 }
             }
             StateDot(learned = link.learned)
@@ -1903,6 +1965,7 @@ private fun SaveLinkSheetContent(
         modifier = modifier
             .fillMaxWidth()
             .imePadding()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 22.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {

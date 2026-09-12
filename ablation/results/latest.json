@@ -1,0 +1,1720 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-05T02:45:49.218947+00:00",
+  "revision": "8d3f891",
+  "command": "ablation/run.py --device --serial emulator-5558",
+  "device_enabled": true,
+  "device_serial": "emulator-5558",
+  "baselines": [
+    {
+      "verifier": "worker_test",
+      "status": "PASS",
+      "elapsed_seconds": 4.918,
+      "return_code": 0,
+      "tests": {
+        "total": 30,
+        "passed": 30,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "worker_typecheck",
+      "status": "PASS",
+      "elapsed_seconds": 0.942,
+      "return_code": 0,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_unit",
+      "status": "PASS",
+      "elapsed_seconds": 5.191,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_build",
+      "status": "PASS",
+      "elapsed_seconds": 36.766,
+      "return_code": 0,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_device:launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks",
+      "status": "FAIL",
+      "elapsed_seconds": 52.732,
+      "return_code": 1,
+      "tests": {
+        "total": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.ShareActivityInstrumentedTest.launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks"
+        ]
+      },
+      "diagnostic": "com.alpenl.cairn.share.ShareActivityInstrumentedTest.launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks"
+    },
+    {
+      "verifier": "android_device:recreationPreservesSelectionAndNoteWithoutSubmitting",
+      "status": "PASS",
+      "elapsed_seconds": 45.733,
+      "return_code": 0,
+      "tests": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_device:failedPostIsKeptLocallyWithoutASecondSubmission",
+      "status": "PASS",
+      "elapsed_seconds": 47.633,
+      "return_code": 0,
+      "tests": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_device:singleLinkIsNotSubmittedUntilUserAddsNoteAndSaves",
+      "status": "PASS",
+      "elapsed_seconds": 46.199,
+      "return_code": 0,
+      "tests": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_device:launcherAutomaticallyRetriesLocalQueueAndAllowsManualRetry",
+      "status": "PASS",
+      "elapsed_seconds": 46.826,
+      "return_code": 0,
+      "tests": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_device:unsupportedShareShowsNoSaveableLink",
+      "status": "PASS",
+      "elapsed_seconds": 50.747,
+      "return_code": 0,
+      "tests": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    }
+  ],
+  "results": [
+    {
+      "case_id": "worker-server-timing",
+      "platform": "worker",
+      "area": "observability",
+      "description": "Remove the Server-Timing response instrumentation.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.911,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 26,
+        "failed": 4,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path",
+          "test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes",
+          "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete",
+          "test/index.test.ts.cairn-share worker > bypasses shared read cache when a request carries cookie headers"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path; test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes; test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete; test/index.test.ts.cairn-share worker > bypasses shared read cache when a request carries cookie headers"
+    },
+    {
+      "case_id": "worker-public-auth",
+      "platform": "worker",
+      "area": "security",
+      "description": "Bypass bearer authentication for the public links API.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.04,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > requires a bearer token for link API requests"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > requires a bearer token for link API requests"
+    },
+    {
+      "case_id": "worker-enricher-auth",
+      "platform": "worker",
+      "area": "security",
+      "description": "Bypass the separate bearer token for enrichment endpoints.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.971,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token",
+          "test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token; test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys"
+    },
+    {
+      "case_id": "worker-method-guard",
+      "platform": "worker",
+      "area": "routing",
+      "description": "Allow every HTTP method through routeMethod.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.02,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > validates enrichment result shapes and methods",
+          "test/index.test.ts.cairn-share worker > returns health, CORS preflight, 404 and 405 without leaking internals"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > validates enrichment result shapes and methods; test/index.test.ts.cairn-share worker > returns health, CORS preflight, 404 and 405 without leaking internals"
+    },
+    {
+      "case_id": "worker-create-content-type",
+      "platform": "worker",
+      "area": "validation",
+      "description": "Accept non-JSON content types on all JSON write endpoints.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.027,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 27,
+        "failed": 3,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > validates enrichment result shapes and methods",
+          "test/index.test.ts.cairn-share worker > requires JSON content for writes",
+          "test/index.test.ts.cairn-share worker > validates learned state writes"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > validates enrichment result shapes and methods; test/index.test.ts.cairn-share worker > requires JSON content for writes; test/index.test.ts.cairn-share worker > validates learned state writes"
+    },
+    {
+      "case_id": "worker-url-userinfo-validation",
+      "platform": "worker",
+      "area": "validation",
+      "description": "Allow HTTP URLs containing username/password userinfo.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.015,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > rejects invalid bodies and unsupported URL shapes with stable errors"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > rejects invalid bodies and unsupported URL shapes with stable errors"
+    },
+    {
+      "case_id": "worker-input-length-limits",
+      "platform": "worker",
+      "area": "validation",
+      "description": "Remove URL and note length limits from link creation.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.017,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > rejects invalid bodies and unsupported URL shapes with stable errors"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > rejects invalid bodies and unsupported URL shapes with stable errors"
+    },
+    {
+      "case_id": "worker-idempotent-create",
+      "platform": "worker",
+      "area": "persistence",
+      "description": "Remove client_id conflict handling from link creation.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.032,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > returns the original link when a queued upload retries with the same client id"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > returns the original link when a queued upload retries with the same client id"
+    },
+    {
+      "case_id": "worker-learned-filter",
+      "platform": "worker",
+      "area": "query",
+      "description": "Ignore the learned-state filter on public list requests.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.988,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > filters records by learned state",
+          "test/index.test.ts.cairn-share worker > searches URL and note while preserving learned filters"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > filters records by learned state; test/index.test.ts.cairn-share worker > searches URL and note while preserving learned filters"
+    },
+    {
+      "case_id": "worker-before-id-pagination",
+      "platform": "worker",
+      "area": "query",
+      "description": "Ignore before_id when listing public links.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.105,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > lists newest records first and paginates with before_id"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > lists newest records first and paginates with before_id"
+    },
+    {
+      "case_id": "worker-like-escaping",
+      "platform": "worker",
+      "area": "query",
+      "description": "Stop escaping SQL LIKE wildcard characters in searches.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test+worker_typecheck",
+      "status": "SURVIVED",
+      "elapsed_seconds": 6.057,
+      "return_code": 0,
+      "tests": {
+        "total": 30,
+        "passed": 30,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "worker-cache-hit",
+      "platform": "worker",
+      "area": "cache",
+      "description": "Ignore shared-cache hits and always query D1.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.023,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes",
+          "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes; test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete"
+    },
+    {
+      "case_id": "worker-cache-cookie-bypass",
+      "platform": "worker",
+      "area": "cache",
+      "description": "Cache requests carrying Cookie headers.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.065,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > bypasses shared read cache when a request carries cookie headers"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > bypasses shared read cache when a request carries cookie headers"
+    },
+    {
+      "case_id": "worker-cache-invalidation",
+      "platform": "worker",
+      "area": "cache",
+      "description": "Keep the cache generation unchanged after writes.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.034,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes",
+          "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > caches equivalent list reads and advances generation after writes; test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete"
+    },
+    {
+      "case_id": "worker-enrichment-reset-on-edit",
+      "platform": "worker",
+      "area": "enrichment",
+      "description": "Keep stale enrichment data after URL or note edits.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.04,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > returns expired leases to the queue and resets enrichment after content edits"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > returns expired leases to the queue and resets enrichment after content edits"
+    },
+    {
+      "case_id": "worker-learned-timestamp",
+      "platform": "worker",
+      "area": "persistence",
+      "description": "Never record learned_at when a link becomes learned.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.855,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > marks a link learned and can move it back to unlearned",
+          "test/index.test.ts.cairn-share worker > updates URL, note and learned state in one PATCH"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > marks a link learned and can move it back to unlearned; test/index.test.ts.cairn-share worker > updates URL, note and learned state in one PATCH"
+    },
+    {
+      "case_id": "worker-delete-persistence",
+      "platform": "worker",
+      "area": "persistence",
+      "description": "Return success from DELETE without removing the row.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.76,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete",
+          "test/index.test.ts.cairn-share worker > deletes links and keeps missing deletes JSON shaped"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > caches detail reads and advances generation after update and delete; test/index.test.ts.cairn-share worker > deletes links and keeps missing deletes JSON shaped"
+    },
+    {
+      "case_id": "worker-x-only-claim",
+      "platform": "worker",
+      "area": "enrichment",
+      "description": "Allow non-X links into the enrichment queue.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.877,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order",
+          "test/index.test.ts.cairn-share worker > lists X bookmarks, returns details and manually reclaims a selected item"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order; test/index.test.ts.cairn-share worker > lists X bookmarks, returns details and manually reclaims a selected item"
+    },
+    {
+      "case_id": "worker-enrichment-fifo",
+      "platform": "worker",
+      "area": "enrichment",
+      "description": "Claim newest enrichment jobs first instead of FIFO.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.848,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order"
+    },
+    {
+      "case_id": "worker-completion-lease",
+      "platform": "worker",
+      "area": "concurrency",
+      "description": "Accept any non-empty lease token when completing a job.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.823,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract",
+          "test/index.test.ts.cairn-share worker > returns expired leases to the queue and resets enrichment after content edits"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract; test/index.test.ts.cairn-share worker > returns expired leases to the queue and resets enrichment after content edits"
+    },
+    {
+      "case_id": "worker-retry-backoff",
+      "platform": "worker",
+      "area": "resilience",
+      "description": "Retry failed enrichment work immediately instead of backing off.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.924,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > backs off failed jobs, recovers expired work and exhausts bounded retries"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > backs off failed jobs, recovers expired work and exhausts bounded retries"
+    },
+    {
+      "case_id": "worker-image-source-allowlist",
+      "platform": "worker",
+      "area": "security",
+      "description": "Silently accept and drop image URLs outside the allow-list.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.896,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 29,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+    },
+    {
+      "case_id": "worker-image-content-type",
+      "platform": "worker",
+      "area": "security",
+      "description": "Stop rejecting unsupported image response content types.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test+worker_typecheck",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 5.794,
+      "return_code": 2,
+      "tests": {
+        "total": 30,
+        "passed": 30,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "worker-image-stream-limit",
+      "platform": "worker",
+      "area": "security",
+      "description": "Remove the streaming image-size cutoff.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test+worker_typecheck",
+      "status": "SURVIVED",
+      "elapsed_seconds": 5.812,
+      "return_code": 0,
+      "tests": {
+        "total": 30,
+        "passed": 30,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "worker-public-learned-mapping",
+      "platform": "worker",
+      "area": "contract",
+      "description": "Map every public link to learned=false.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 4.839,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > marks a link learned and can move it back to unlearned",
+          "test/index.test.ts.cairn-share worker > updates URL, note and learned state in one PATCH"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > marks a link learned and can move it back to unlearned; test/index.test.ts.cairn-share worker > updates URL, note and learned state in one PATCH"
+    },
+    {
+      "case_id": "worker-trailing-slash-routing",
+      "platform": "worker",
+      "area": "routing",
+      "description": "Stop normalizing trailing slashes in request paths.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test+worker_typecheck",
+      "status": "SURVIVED",
+      "elapsed_seconds": 5.865,
+      "return_code": 0,
+      "tests": {
+        "total": 30,
+        "passed": 30,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "worker-debug-console",
+      "platform": "worker",
+      "area": "debug-ui",
+      "description": "Remove the visible API operations from the debug console.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test+worker_typecheck",
+      "status": "SURVIVED",
+      "elapsed_seconds": 5.884,
+      "return_code": 0,
+      "tests": {
+        "total": 30,
+        "passed": 30,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "worker-cors-origin",
+      "platform": "worker",
+      "area": "contract",
+      "description": "Remove Access-Control-Allow-Origin from all responses.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_test",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.021,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 28,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > saves a link with a valid bearer token and preserves the exact URL and note",
+          "test/index.test.ts.cairn-share worker > returns health, CORS preflight, 404 and 405 without leaking internals"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > saves a link with a valid bearer token and preserves the exact URL and note; test/index.test.ts.cairn-share worker > returns health, CORS preflight, 404 and 405 without leaking internals"
+    },
+    {
+      "case_id": "worker-env-r2-contract",
+      "platform": "worker",
+      "area": "types",
+      "description": "Remove the typed R2 bucket contract from Env.",
+      "file": "worker/src/index.ts",
+      "verifier": "worker_typecheck",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 0.971,
+      "return_code": 2,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "migration-0001",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0001 from a fresh database.",
+      "file": "worker/migrations/0001_create_links.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 2.817,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 0,
+        "failed": 30,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads",
+          "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path",
+          "test/index.test.ts.cairn-share worker > requires a bearer token for link API requests",
+          "test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token",
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order",
+          "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract",
+          "test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys",
+          "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads; test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path; test/index.test.ts.cairn-share worker > requires a bearer token for link API requests; test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token; test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order; test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract; test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys; test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+    },
+    {
+      "case_id": "migration-0002",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0002 from a fresh database.",
+      "file": "worker/migrations/0002_add_learned_state.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 2.906,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 0,
+        "failed": 30,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads",
+          "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path",
+          "test/index.test.ts.cairn-share worker > requires a bearer token for link API requests",
+          "test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token",
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order",
+          "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract",
+          "test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys",
+          "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads; test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path; test/index.test.ts.cairn-share worker > requires a bearer token for link API requests; test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token; test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order; test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract; test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys; test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+    },
+    {
+      "case_id": "migration-0003",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0003 from a fresh database.",
+      "file": "worker/migrations/0003_add_cache_metadata.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 3.106,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 0,
+        "failed": 30,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads",
+          "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path",
+          "test/index.test.ts.cairn-share worker > requires a bearer token for link API requests",
+          "test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token",
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order",
+          "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract",
+          "test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys",
+          "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads; test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path; test/index.test.ts.cairn-share worker > requires a bearer token for link API requests; test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token; test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order; test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract; test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys; test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+    },
+    {
+      "case_id": "migration-0004",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0004 from a fresh database.",
+      "file": "worker/migrations/0004_add_client_id.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 3.276,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 0,
+        "failed": 30,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads",
+          "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path",
+          "test/index.test.ts.cairn-share worker > requires a bearer token for link API requests",
+          "test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token",
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order",
+          "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract",
+          "test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys",
+          "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads; test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path; test/index.test.ts.cairn-share worker > requires a bearer token for link API requests; test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token; test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order; test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract; test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys; test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+    },
+    {
+      "case_id": "migration-0005",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0005 from a fresh database.",
+      "file": "worker/migrations/0005_add_x_enrichment.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 3.416,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 0,
+        "failed": 30,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads",
+          "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path",
+          "test/index.test.ts.cairn-share worker > requires a bearer token for link API requests",
+          "test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token",
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order",
+          "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract",
+          "test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys",
+          "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads; test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path; test/index.test.ts.cairn-share worker > requires a bearer token for link API requests; test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token; test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order; test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract; test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys; test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+    },
+    {
+      "case_id": "migration-0006",
+      "platform": "worker",
+      "area": "schema",
+      "description": "Remove schema migration 0006 from a fresh database.",
+      "file": "worker/migrations/0006_add_rich_x_enrichment.sql",
+      "verifier": "worker_test",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 3.55,
+      "return_code": 1,
+      "tests": {
+        "total": 30,
+        "passed": 0,
+        "failed": 30,
+        "skipped": 0,
+        "failed_tests": [
+          "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads",
+          "test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path",
+          "test/index.test.ts.cairn-share worker > requires a bearer token for link API requests",
+          "test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token",
+          "test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order",
+          "test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract",
+          "test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys",
+          "test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "test/index.test.ts.cairn-share worker > applies schema migrations for pagination, cache generation and idempotent uploads; test/index.test.ts.cairn-share worker > serves an API debugging interface at the root path; test/index.test.ts.cairn-share worker > requires a bearer token for link API requests; test/index.test.ts.cairn-share worker > protects enrichment jobs with a separate bearer token; test/index.test.ts.cairn-share worker > atomically claims only X links in FIFO order; test/index.test.ts.cairn-share worker > stores completed enrichment without changing the public link contract; test/index.test.ts.cairn-share worker > copies allow-listed X images to R2 and serves only stored object keys; test/index.test.ts.cairn-share worker > rejects unsafe image sources and image uploads with a stale lease"
+    },
+    {
+      "case_id": "android-native-clip-text",
+      "platform": "android",
+      "area": "share-input",
+      "description": "Ignore text carried by ClipData items.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/NativeShareSources.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.145,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 22,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.NativeShareExtractionTest.clipTextsAreScannedWhetherExtraTextIsPresentEmptyOrMissing",
+          "com.alpenl.cairn.share.NativeShareExtractionTest.oneShareFlattensDataUrisExtraTextAndEveryClipTextInOrder"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.NativeShareExtractionTest.clipTextsAreScannedWhetherExtraTextIsPresentEmptyOrMissing; com.alpenl.cairn.share.NativeShareExtractionTest.oneShareFlattensDataUrisExtraTextAndEveryClipTextInOrder"
+    },
+    {
+      "case_id": "android-text-url-extraction",
+      "platform": "android",
+      "area": "share-input",
+      "description": "Extract URLs only from structured URI fields, not shared text.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.097,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 18,
+        "failed": 6,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.NativeShareExtractionTest.urlsThatShareALabelButDifferAfterThePathStaySeparateCandidates",
+          "com.alpenl.cairn.share.NativeShareExtractionTest.clipTextsAreScannedWhetherExtraTextIsPresentEmptyOrMissing",
+          "com.alpenl.cairn.share.NativeShareExtractionTest.oneShareFlattensDataUrisExtraTextAndEveryClipTextInOrder",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.chooserAppearsOnlyUntilMultipleCandidatesHaveASelection",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.selectedScreenShowsLabelAndAllowsSave",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.rowsRenderLabelsWhileSelectionCarriesVerbatimUrl"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.NativeShareExtractionTest.urlsThatShareALabelButDifferAfterThePathStaySeparateCandidates; com.alpenl.cairn.share.NativeShareExtractionTest.clipTextsAreScannedWhetherExtraTextIsPresentEmptyOrMissing; com.alpenl.cairn.share.NativeShareExtractionTest.oneShareFlattensDataUrisExtraTextAndEveryClipTextInOrder; com.alpenl.cairn.share.ShareCandidatePresenterTest.chooserAppearsOnlyUntilMultipleCandidatesHaveASelection; com.alpenl.cairn.share.ShareCandidatePresenterTest.selectedScreenShowsLabelAndAllowsSave; com.alpenl.cairn.share.ShareCandidatePresenterTest.rowsRenderLabelsWhileSelectionCarriesVerbatimUrl"
+    },
+    {
+      "case_id": "android-url-deduplication",
+      "platform": "android",
+      "area": "share-input",
+      "description": "Keep duplicate URL candidates from multiple share sources.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.053,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 23,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.NativeShareExtractionTest.duplicatesAcrossSourcesKeepTheFirstSubmissionString"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.NativeShareExtractionTest.duplicatesAcrossSourcesKeepTheFirstSubmissionString"
+    },
+    {
+      "case_id": "android-display-path",
+      "platform": "android",
+      "area": "presentation",
+      "description": "Remove URL paths from compact display labels.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlDisplayLabel.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 0.948,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 20,
+        "failed": 4,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.UrlDisplayLabelTest.labelIsLowercasedHostWithNonDefaultPortAndRawPath",
+          "com.alpenl.cairn.share.NativeShareExtractionTest.urlsThatShareALabelButDifferAfterThePathStaySeparateCandidates",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.selectedScreenShowsLabelAndAllowsSave",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.rowsRenderLabelsWhileSelectionCarriesVerbatimUrl"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.UrlDisplayLabelTest.labelIsLowercasedHostWithNonDefaultPortAndRawPath; com.alpenl.cairn.share.NativeShareExtractionTest.urlsThatShareALabelButDifferAfterThePathStaySeparateCandidates; com.alpenl.cairn.share.ShareCandidatePresenterTest.selectedScreenShowsLabelAndAllowsSave; com.alpenl.cairn.share.ShareCandidatePresenterTest.rowsRenderLabelsWhileSelectionCarriesVerbatimUrl"
+    },
+    {
+      "case_id": "android-single-auto-selection",
+      "platform": "android",
+      "area": "share-ui-model",
+      "description": "Do not preselect a single shared URL.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 0.933,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 23,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.singleCandidateIsSelectedButNeverSubmittedByThePresenter"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.ShareCandidatePresenterTest.singleCandidateIsSelectedButNeverSubmittedByThePresenter"
+    },
+    {
+      "case_id": "android-submit-lock",
+      "platform": "android",
+      "area": "share-ui-model",
+      "description": "Leave Save enabled while a submission is in progress.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 0.881,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 23,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.submittingBlocksSaveAndClose"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.ShareCandidatePresenterTest.submittingBlocksSaveAndClose"
+    },
+    {
+      "case_id": "android-client-id-json",
+      "platform": "android",
+      "area": "contract",
+      "description": "Omit client_id from upload request JSON.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/LinkRequestJson.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 0.889,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 22,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.ShareApiClientTest.saveSendsStableUserAgent",
+          "com.alpenl.cairn.share.network.LinkRequestJsonTest.queuedRequestIncludesStableClientId"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.ShareApiClientTest.saveSendsStableUserAgent; com.alpenl.cairn.share.network.LinkRequestJsonTest.queuedRequestIncludesStableClientId"
+    },
+    {
+      "case_id": "android-pending-failure-metadata",
+      "platform": "android",
+      "area": "local-queue",
+      "description": "Discard pending-upload attempt counts during JSON encoding.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 0.934,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 23,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.PendingUploadJsonTest.roundTripPreservesQueuedUploadMetadata"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.PendingUploadJsonTest.roundTripPreservesQueuedUploadMetadata"
+    },
+    {
+      "case_id": "android-share-auth-header",
+      "platform": "android",
+      "area": "security",
+      "description": "Do not attach the bearer token to share uploads.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/ShareApiClient.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 5.957,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 23,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.ShareApiClientTest.saveSendsStableUserAgent"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.ShareApiClientTest.saveSendsStableUserAgent"
+    },
+    {
+      "case_id": "android-semver-comparison",
+      "platform": "android",
+      "area": "updates",
+      "description": "Treat every release version as equal to the installed version.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/UpdateApiClient.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.089,
+      "return_code": 1,
+      "tests": {
+        "total": 24,
+        "passed": 20,
+        "failed": 4,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.UpdateApiClientTest.parserUsesAnExplicitFallbackWhenReleaseNotesAreEmpty",
+          "com.alpenl.cairn.share.network.UpdateApiClientTest.semverComparisonUsesNumericParts",
+          "com.alpenl.cairn.share.network.UpdateApiClientTest.parserFindsNewerApkAsset",
+          "com.alpenl.cairn.share.network.UpdateApiClientTest.parserFailsClosedForInvalidVersions"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.UpdateApiClientTest.parserUsesAnExplicitFallbackWhenReleaseNotesAreEmpty; com.alpenl.cairn.share.network.UpdateApiClientTest.semverComparisonUsesNumericParts; com.alpenl.cairn.share.network.UpdateApiClientTest.parserFindsNewerApkAsset; com.alpenl.cairn.share.network.UpdateApiClientTest.parserFailsClosedForInvalidVersions"
+    },
+    {
+      "case_id": "android-default-user-agent",
+      "platform": "android",
+      "area": "contract",
+      "description": "Replace the versioned Android User-Agent with an empty value.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/AppUserAgent.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 0.999,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-query-fragment-removal",
+      "platform": "android",
+      "area": "url-policy",
+      "description": "Keep query and fragment even when the preference disables them.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/LinkPresentation.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 0.879,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-links-page-decoding",
+      "platform": "android",
+      "area": "contract",
+      "description": "Decode every server list response as an empty page.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/LinksApiClient.kt",
+      "verifier": "android_unit+android_device_skipped",
+      "status": "SURVIVED",
+      "elapsed_seconds": 0.95,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": "launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks",
+      "diagnostic": "device baseline failed for launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks"
+    },
+    {
+      "case_id": "android-repository-load",
+      "platform": "android",
+      "area": "repository",
+      "description": "Return an empty library without contacting the API.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/LinkRepository.kt",
+      "verifier": "android_unit+android_device_skipped",
+      "status": "SURVIVED",
+      "elapsed_seconds": 0.949,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": "launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks",
+      "diagnostic": "device baseline failed for launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks"
+    },
+    {
+      "case_id": "android-viewmodel-library-filter",
+      "platform": "android",
+      "area": "view-model",
+      "description": "Hide every link from the library view model projection.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt",
+      "verifier": "android_unit+android_device_skipped",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.247,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": "launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks",
+      "diagnostic": "device baseline failed for launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks"
+    },
+    {
+      "case_id": "android-share-recreation-note",
+      "platform": "android",
+      "area": "activity-lifecycle",
+      "description": "Do not preserve the share note across Activity recreation.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt",
+      "verifier": "android_unit+android_device",
+      "status": "KILLED_DEVICE",
+      "elapsed_seconds": 47.248,
+      "return_code": 1,
+      "tests": {
+        "total": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.ShareActivityInstrumentedTest.recreationPreservesSelectionAndNoteWithoutSubmitting"
+        ]
+      },
+      "device_test": "recreationPreservesSelectionAndNoteWithoutSubmitting",
+      "diagnostic": "com.alpenl.cairn.share.ShareActivityInstrumentedTest.recreationPreservesSelectionAndNoteWithoutSubmitting"
+    },
+    {
+      "case_id": "android-durable-before-network",
+      "platform": "android",
+      "area": "local-queue",
+      "description": "Construct an upload in memory instead of persisting it before POST.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt",
+      "verifier": "android_unit+android_device",
+      "status": "KILLED_DEVICE",
+      "elapsed_seconds": 47.682,
+      "return_code": 1,
+      "tests": {
+        "total": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.ShareActivityInstrumentedTest.failedPostIsKeptLocallyWithoutASecondSubmission"
+        ]
+      },
+      "device_test": "failedPostIsKeptLocallyWithoutASecondSubmission",
+      "diagnostic": "com.alpenl.cairn.share.ShareActivityInstrumentedTest.failedPostIsKeptLocallyWithoutASecondSubmission"
+    },
+    {
+      "case_id": "android-preference-write",
+      "platform": "android",
+      "area": "settings",
+      "description": "Drop API-token preference writes.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/SharePreferencesStore.kt",
+      "verifier": "android_unit+android_device",
+      "status": "KILLED_DEVICE",
+      "elapsed_seconds": 49.798,
+      "return_code": 1,
+      "tests": {
+        "total": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.ShareActivityInstrumentedTest.singleLinkIsNotSubmittedUntilUserAddsNoteAndSaves"
+        ]
+      },
+      "device_test": "singleLinkIsNotSubmittedUntilUserAddsNoteAndSaves",
+      "diagnostic": "com.alpenl.cairn.share.ShareActivityInstrumentedTest.singleLinkIsNotSubmittedUntilUserAddsNoteAndSaves"
+    },
+    {
+      "case_id": "android-pending-remove",
+      "platform": "android",
+      "area": "local-queue",
+      "description": "Keep successfully uploaded entries in the pending queue.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt",
+      "verifier": "android_unit+android_device",
+      "status": "SURVIVED",
+      "elapsed_seconds": 54.843,
+      "return_code": 0,
+      "tests": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": "launcherAutomaticallyRetriesLocalQueueAndAllowsManualRetry",
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-update-download-success",
+      "platform": "android",
+      "area": "updates",
+      "description": "Report a completed APK download as failed.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/UpdateApkDownloader.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.123,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-debug-path-confinement",
+      "platform": "android",
+      "area": "security",
+      "description": "Allow absolute URLs in the in-app API debug client.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/ApiDebugClient.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.525,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-launcher-copy",
+      "platform": "android",
+      "area": "launcher",
+      "description": "Do not put links on the clipboard.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/LauncherActivity.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.046,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-theme-wrapper",
+      "platform": "android",
+      "area": "ui-theme",
+      "description": "Render content without the application Material theme.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnShareTheme.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.093,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-settings-navigation",
+      "platform": "android",
+      "area": "ui-navigation",
+      "description": "Remove the settings destination from bottom navigation.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksApp.kt",
+      "verifier": "android_unit+android_device_skipped",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.501,
+      "return_code": 0,
+      "tests": {
+        "total": 24,
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": "launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks",
+      "diagnostic": "device baseline failed for launcherEntryShowsLibraryAndCanEditToggleAndDeleteLinks"
+    },
+    {
+      "case_id": "android-share-intent-filter",
+      "platform": "android",
+      "area": "packaging",
+      "description": "Remove ACTION_SEND discovery from the Android manifest.",
+      "file": "android/app/src/main/AndroidManifest.xml",
+      "verifier": "android_build",
+      "status": "SURVIVED",
+      "elapsed_seconds": 40.321,
+      "return_code": 0,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-file-provider",
+      "platform": "android",
+      "area": "packaging",
+      "description": "Remove the FileProvider required by in-app APK installation.",
+      "file": "android/app/src/main/AndroidManifest.xml",
+      "verifier": "android_build",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 36.256,
+      "return_code": 1,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": "/tmp/cairn-share-ablation-_4n1xtpl/repo/android/app/src/main/res/xml/update_file_paths.xml:2: Error: The resource R.xml.update_file_paths appears to be unused [UnusedResources] | FAILURE: Build failed with an exception. | /tmp/cairn-share-ablation-_4n1xtpl/repo/android/app/src/main/res/xml/update_file_paths.xml:2: Error: The resource R.xml.update_file_paths appears to be unused [UnusedResources] | BUILD FAILED in 35s"
+    },
+    {
+      "case_id": "android-unsupported-share-message",
+      "platform": "android",
+      "area": "resources",
+      "description": "Replace the unsupported-share error with an empty message.",
+      "file": "android/app/src/main/res/values/strings.xml",
+      "verifier": "android_unit+android_device",
+      "status": "KILLED_DEVICE",
+      "elapsed_seconds": 60.122,
+      "return_code": 1,
+      "tests": {
+        "total": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.ShareActivityInstrumentedTest.unsupportedShareShowsNoSaveableLink"
+        ]
+      },
+      "device_test": "unsupportedShareShowsNoSaveableLink",
+      "diagnostic": "com.alpenl.cairn.share.ShareActivityInstrumentedTest.unsupportedShareShowsNoSaveableLink"
+    }
+  ],
+  "production_files": [
+    "android/app/src/main/AndroidManifest.xml",
+    "android/app/src/main/java/com/alpenl/cairn/share/AppUpdateState.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksApp.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/LauncherActivity.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/LinkPresentation.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/LinkRepository.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/NativeShareSources.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/SharePreferencesStore.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/UpdateApkDownloader.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/SharePayload.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidate.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlDisplayLabel.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ApiDebugClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/AppUserAgent.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkRequestJson.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinksApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ShareApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/UpdateApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnShareTheme.kt",
+    "android/app/src/main/res/values/strings.xml",
+    "worker/migrations/0001_create_links.sql",
+    "worker/migrations/0002_add_learned_state.sql",
+    "worker/migrations/0003_add_cache_metadata.sql",
+    "worker/migrations/0004_add_client_id.sql",
+    "worker/migrations/0005_add_x_enrichment.sql",
+    "worker/migrations/0006_add_rich_x_enrichment.sql",
+    "worker/src/env.d.ts",
+    "worker/src/index.ts"
+  ],
+  "coverage": {
+    "worker/src/index.ts": [
+      "worker-server-timing",
+      "worker-public-auth",
+      "worker-enricher-auth",
+      "worker-method-guard",
+      "worker-create-content-type",
+      "worker-url-userinfo-validation",
+      "worker-input-length-limits",
+      "worker-idempotent-create",
+      "worker-learned-filter",
+      "worker-before-id-pagination",
+      "worker-like-escaping",
+      "worker-cache-hit",
+      "worker-cache-cookie-bypass",
+      "worker-cache-invalidation",
+      "worker-enrichment-reset-on-edit",
+      "worker-learned-timestamp",
+      "worker-delete-persistence",
+      "worker-x-only-claim",
+      "worker-enrichment-fifo",
+      "worker-completion-lease",
+      "worker-retry-backoff",
+      "worker-image-source-allowlist",
+      "worker-image-content-type",
+      "worker-image-stream-limit",
+      "worker-public-learned-mapping",
+      "worker-trailing-slash-routing",
+      "worker-debug-console",
+      "worker-cors-origin",
+      "worker-env-r2-contract"
+    ],
+    "worker/migrations/0001_create_links.sql": [
+      "migration-0001"
+    ],
+    "worker/migrations/0002_add_learned_state.sql": [
+      "migration-0002"
+    ],
+    "worker/migrations/0003_add_cache_metadata.sql": [
+      "migration-0003"
+    ],
+    "worker/migrations/0004_add_client_id.sql": [
+      "migration-0004"
+    ],
+    "worker/migrations/0005_add_x_enrichment.sql": [
+      "migration-0005"
+    ],
+    "worker/migrations/0006_add_rich_x_enrichment.sql": [
+      "migration-0006"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/NativeShareSources.kt": [
+      "android-native-clip-text"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt": [
+      "android-text-url-extraction",
+      "android-url-deduplication"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/SharePayload.kt": [
+      "android-text-url-extraction"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidate.kt": [
+      "android-url-deduplication"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlDisplayLabel.kt": [
+      "android-display-path"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt": [
+      "android-single-auto-selection",
+      "android-submit-lock"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkRequestJson.kt": [
+      "android-client-id-json"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt": [
+      "android-pending-failure-metadata",
+      "android-pending-remove"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ShareApiClient.kt": [
+      "android-share-auth-header"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/UpdateApiClient.kt": [
+      "android-semver-comparison"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/AppUserAgent.kt": [
+      "android-default-user-agent"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/LinkPresentation.kt": [
+      "android-query-fragment-removal"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinksApiClient.kt": [
+      "android-links-page-decoding"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/LinkRepository.kt": [
+      "android-repository-load"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt": [
+      "android-viewmodel-library-filter"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt": [
+      "android-share-recreation-note",
+      "android-durable-before-network"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/SharePreferencesStore.kt": [
+      "android-preference-write"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/UpdateApkDownloader.kt": [
+      "android-update-download-success"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/AppUpdateState.kt": [
+      "android-update-download-success"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ApiDebugClient.kt": [
+      "android-debug-path-confinement"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/LauncherActivity.kt": [
+      "android-launcher-copy"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnShareTheme.kt": [
+      "android-theme-wrapper"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksApp.kt": [
+      "android-settings-navigation"
+    ],
+    "android/app/src/main/AndroidManifest.xml": [
+      "android-share-intent-filter",
+      "android-file-provider"
+    ],
+    "android/app/src/main/res/values/strings.xml": [
+      "android-unsupported-share-message"
+    ],
+    "worker/src/env.d.ts": [
+      "worker-env-r2-contract"
+    ]
+  }
+}

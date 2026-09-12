@@ -11,8 +11,11 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.printToString
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -181,12 +184,16 @@ class ShareActivityInstrumentedTest {
             compose.onAllNodesWithTag("save").assertCountEquals(0)
 
             compose.onNodeWithTag("nav_settings").performClick()
-            compose.onNodeWithText("检查更新").performClick()
-            compose.waitUntil(5_000) {
-                runCatching {
-                    compose.onNodeWithTag("update_title").assertTextContains("发现新版本 9.9.9", substring = true)
-                    true
-                }.getOrDefault(false)
+            compose.onNodeWithText("检查更新").performScrollTo().performClick()
+            try {
+                compose.waitUntil(15_000) {
+                    runCatching {
+                        compose.onNodeWithTag("update_title").assertTextContains("发现新版本 9.9.9", substring = true)
+                        true
+                    }.getOrDefault(false)
+                }
+            } catch (failure: Throwable) {
+                throw AssertionError(compose.onRoot().printToString(), failure)
             }
             compose.onNodeWithTag("download_update").assertIsEnabled()
             compose.onNodeWithText("- 新增离线上传队列").assertExists()
@@ -284,14 +291,16 @@ class ShareActivityInstrumentedTest {
         mockWebServer.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path.orEmpty()
+                val endpoint = request.requestUrl?.encodedPath
                 return when {
                     path == "/latest" -> latestReleaseResponse()
                     path.startsWith("/api/links") && request.getHeader("Authorization") != "Bearer $TEST_TOKEN" ->
                         MockResponse().setResponseCode(401).setBody("""{"error":"invalid_token"}""")
                     request.method == "POST" && path == "/api/links" ->
                         if (uploadResponseCode == 201) queuedUploadResponse() else MockResponse().setResponseCode(uploadResponseCode)
+                    request.method == "GET" && endpoint == "/api/links/1" -> updatedLinkResponse()
                     request.method == "GET" && path.startsWith("/api/links") -> linksResponse(path)
-                    request.method == "PATCH" && path == "/api/links/1" -> updatedLinkResponse()
+                    request.method == "PATCH" && endpoint == "/api/links/1" -> updatedLinkResponse()
                     request.method == "DELETE" && path == "/api/links/1" -> MockResponse().setResponseCode(204)
                     else -> MockResponse().setResponseCode(404).setBody("""{"error":"not_found"}""")
                 }
@@ -414,7 +423,16 @@ class ShareActivityInstrumentedTest {
             )
 
     private fun takeRequest(): okhttp3.mockwebserver.RecordedRequest {
-        val request = server!!.takeRequest(5, TimeUnit.SECONDS)
+        var request: RecordedRequest? = null
+        // Keep Compose's clock moving while the Activity persists and submits the task.
+        try {
+            compose.waitUntil(15_000) {
+                request = server!!.takeRequest(0, TimeUnit.MILLISECONDS)
+                request != null
+            }
+        } catch (failure: Throwable) {
+            throw AssertionError(compose.onRoot().printToString(), failure)
+        }
         assertNotNull(request)
         assertTrue(server!!.requestCount >= 1)
         assertAuthorizedApiRequest(request!!)
@@ -424,7 +442,7 @@ class ShareActivityInstrumentedTest {
     private fun takeRequest(method: String, path: String): RecordedRequest {
         repeat(20) {
             val request = takeRequest()
-            if (request.method == method && request.path == path) {
+            if (request.method == method && request.requestUrl?.encodedPath == path) {
                 assertTrue(request.getHeader("User-Agent")!!.startsWith("CairnShareAndroid/"))
                 return request
             }
@@ -433,6 +451,7 @@ class ShareActivityInstrumentedTest {
     }
 
     private fun waitForSaveEnabled() {
+        compose.onNodeWithTag("save").performScrollTo()
         compose.waitUntil(5_000) {
             runCatching {
                 compose.onNodeWithTag("save").assertIsEnabled()

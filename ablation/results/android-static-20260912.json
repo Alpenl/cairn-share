@@ -1,0 +1,857 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-12T06:23:37.659408+00:00",
+  "revision": "1ea43e7",
+  "command": "ablation/run.py --platform android --json ablation/results/android-static-20260912.json --report ablation/ANDROID-STATIC-20260912.md",
+  "device_enabled": false,
+  "device_serial": null,
+  "baselines": [
+    {
+      "verifier": "android_unit",
+      "status": "PASS",
+      "elapsed_seconds": 32.134,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_build",
+      "status": "PASS",
+      "elapsed_seconds": 27.296,
+      "return_code": 0,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    }
+  ],
+  "results": [
+    {
+      "case_id": "android-native-clip-text",
+      "platform": "android",
+      "area": "share-input",
+      "description": "Ignore text carried by ClipData items.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/NativeShareSources.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 3.714,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 29,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.NativeShareExtractionTest.clipTextsAreScannedWhetherExtraTextIsPresentEmptyOrMissing",
+          "com.alpenl.cairn.share.NativeShareExtractionTest.oneShareFlattensDataUrisExtraTextAndEveryClipTextInOrder"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.NativeShareExtractionTest.clipTextsAreScannedWhetherExtraTextIsPresentEmptyOrMissing; com.alpenl.cairn.share.NativeShareExtractionTest.oneShareFlattensDataUrisExtraTextAndEveryClipTextInOrder"
+    },
+    {
+      "case_id": "android-text-url-extraction",
+      "platform": "android",
+      "area": "share-input",
+      "description": "Extract URLs only from structured URI fields, not shared text.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 2.176,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 25,
+        "failed": 6,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.NativeShareExtractionTest.urlsThatShareALabelButDifferAfterThePathStaySeparateCandidates",
+          "com.alpenl.cairn.share.NativeShareExtractionTest.clipTextsAreScannedWhetherExtraTextIsPresentEmptyOrMissing",
+          "com.alpenl.cairn.share.NativeShareExtractionTest.oneShareFlattensDataUrisExtraTextAndEveryClipTextInOrder",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.chooserAppearsOnlyUntilMultipleCandidatesHaveASelection",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.selectedScreenShowsLabelAndAllowsSave",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.rowsRenderLabelsWhileSelectionCarriesVerbatimUrl"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.NativeShareExtractionTest.urlsThatShareALabelButDifferAfterThePathStaySeparateCandidates; com.alpenl.cairn.share.NativeShareExtractionTest.clipTextsAreScannedWhetherExtraTextIsPresentEmptyOrMissing; com.alpenl.cairn.share.NativeShareExtractionTest.oneShareFlattensDataUrisExtraTextAndEveryClipTextInOrder; com.alpenl.cairn.share.ShareCandidatePresenterTest.chooserAppearsOnlyUntilMultipleCandidatesHaveASelection; com.alpenl.cairn.share.ShareCandidatePresenterTest.selectedScreenShowsLabelAndAllowsSave; com.alpenl.cairn.share.ShareCandidatePresenterTest.rowsRenderLabelsWhileSelectionCarriesVerbatimUrl"
+    },
+    {
+      "case_id": "android-url-deduplication",
+      "platform": "android",
+      "area": "share-input",
+      "description": "Keep duplicate URL candidates from multiple share sources.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 3.197,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 30,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.NativeShareExtractionTest.duplicatesAcrossSourcesKeepTheFirstSubmissionString"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.NativeShareExtractionTest.duplicatesAcrossSourcesKeepTheFirstSubmissionString"
+    },
+    {
+      "case_id": "android-display-path",
+      "platform": "android",
+      "area": "presentation",
+      "description": "Remove URL paths from compact display labels.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlDisplayLabel.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 2.415,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 25,
+        "failed": 6,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.LinkEnrichmentTest.nullableSummaryFieldsNeverDisplayTheLiteralNull",
+          "com.alpenl.cairn.share.network.LinkEnrichmentTest.legacyLinksRemainReadable",
+          "com.alpenl.cairn.share.UrlDisplayLabelTest.labelIsLowercasedHostWithNonDefaultPortAndRawPath",
+          "com.alpenl.cairn.share.NativeShareExtractionTest.urlsThatShareALabelButDifferAfterThePathStaySeparateCandidates",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.selectedScreenShowsLabelAndAllowsSave",
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.rowsRenderLabelsWhileSelectionCarriesVerbatimUrl"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.LinkEnrichmentTest.nullableSummaryFieldsNeverDisplayTheLiteralNull; com.alpenl.cairn.share.network.LinkEnrichmentTest.legacyLinksRemainReadable; com.alpenl.cairn.share.UrlDisplayLabelTest.labelIsLowercasedHostWithNonDefaultPortAndRawPath; com.alpenl.cairn.share.NativeShareExtractionTest.urlsThatShareALabelButDifferAfterThePathStaySeparateCandidates; com.alpenl.cairn.share.ShareCandidatePresenterTest.selectedScreenShowsLabelAndAllowsSave; com.alpenl.cairn.share.ShareCandidatePresenterTest.rowsRenderLabelsWhileSelectionCarriesVerbatimUrl"
+    },
+    {
+      "case_id": "android-single-auto-selection",
+      "platform": "android",
+      "area": "share-ui-model",
+      "description": "Do not preselect a single shared URL.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.32,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 30,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.singleCandidateIsSelectedButNeverSubmittedByThePresenter"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.ShareCandidatePresenterTest.singleCandidateIsSelectedButNeverSubmittedByThePresenter"
+    },
+    {
+      "case_id": "android-submit-lock",
+      "platform": "android",
+      "area": "share-ui-model",
+      "description": "Leave Save enabled while a submission is in progress.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.79,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 30,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.ShareCandidatePresenterTest.submittingBlocksSaveAndClose"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.ShareCandidatePresenterTest.submittingBlocksSaveAndClose"
+    },
+    {
+      "case_id": "android-client-id-json",
+      "platform": "android",
+      "area": "contract",
+      "description": "Omit client_id from upload request JSON.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/LinkRequestJson.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 2.088,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 29,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.ShareApiClientTest.saveSendsStableUserAgent",
+          "com.alpenl.cairn.share.network.LinkRequestJsonTest.queuedRequestIncludesStableClientId"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.ShareApiClientTest.saveSendsStableUserAgent; com.alpenl.cairn.share.network.LinkRequestJsonTest.queuedRequestIncludesStableClientId"
+    },
+    {
+      "case_id": "android-pending-failure-metadata",
+      "platform": "android",
+      "area": "local-queue",
+      "description": "Discard pending-upload attempt counts during JSON encoding.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.448,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 30,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.PendingUploadJsonTest.roundTripPreservesQueuedUploadMetadata"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.PendingUploadJsonTest.roundTripPreservesQueuedUploadMetadata"
+    },
+    {
+      "case_id": "android-share-auth-header",
+      "platform": "android",
+      "area": "security",
+      "description": "Do not attach the bearer token to share uploads.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/ShareApiClient.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 6.508,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 30,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.ShareApiClientTest.saveSendsStableUserAgent"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.ShareApiClientTest.saveSendsStableUserAgent"
+    },
+    {
+      "case_id": "android-semver-comparison",
+      "platform": "android",
+      "area": "updates",
+      "description": "Treat every release version as equal to the installed version.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/UpdateApiClient.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.547,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 27,
+        "failed": 4,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.UpdateApiClientTest.parserUsesAnExplicitFallbackWhenReleaseNotesAreEmpty",
+          "com.alpenl.cairn.share.network.UpdateApiClientTest.semverComparisonUsesNumericParts",
+          "com.alpenl.cairn.share.network.UpdateApiClientTest.parserFindsNewerApkAsset",
+          "com.alpenl.cairn.share.network.UpdateApiClientTest.parserFailsClosedForInvalidVersions"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.UpdateApiClientTest.parserUsesAnExplicitFallbackWhenReleaseNotesAreEmpty; com.alpenl.cairn.share.network.UpdateApiClientTest.semverComparisonUsesNumericParts; com.alpenl.cairn.share.network.UpdateApiClientTest.parserFindsNewerApkAsset; com.alpenl.cairn.share.network.UpdateApiClientTest.parserFailsClosedForInvalidVersions"
+    },
+    {
+      "case_id": "android-default-user-agent",
+      "platform": "android",
+      "area": "contract",
+      "description": "Replace the versioned Android User-Agent with an empty value.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/AppUserAgent.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.366,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-query-fragment-removal",
+      "platform": "android",
+      "area": "url-policy",
+      "description": "Keep query and fragment even when the preference disables them.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/LinkPresentation.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.183,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-links-page-decoding",
+      "platform": "android",
+      "area": "contract",
+      "description": "Decode every server list response as an empty page.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/LinksApiClient.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.317,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-library-page-load",
+      "platform": "android",
+      "area": "view-model",
+      "description": "Return an empty library without contacting the API.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.8,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-viewmodel-library-filter",
+      "platform": "android",
+      "area": "view-model",
+      "description": "Hide every link from the library view model projection.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.561,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-share-recreation-note",
+      "platform": "android",
+      "area": "activity-lifecycle",
+      "description": "Do not preserve the share note across Activity recreation.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.929,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-durable-before-network",
+      "platform": "android",
+      "area": "local-queue",
+      "description": "Construct an upload in memory instead of persisting it before POST.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.414,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-preference-write",
+      "platform": "android",
+      "area": "settings",
+      "description": "Drop API-token preference writes.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/SharePreferencesStore.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.426,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-pending-remove",
+      "platform": "android",
+      "area": "local-queue",
+      "description": "Keep successfully uploaded entries in the pending queue.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.464,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-update-download-success",
+      "platform": "android",
+      "area": "updates",
+      "description": "Report a completed APK download as failed.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/UpdateApkDownloader.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.456,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-debug-path-confinement",
+      "platform": "android",
+      "area": "security",
+      "description": "Allow absolute URLs in the in-app API debug client.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/ApiDebugClient.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.356,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-launcher-copy",
+      "platform": "android",
+      "area": "launcher",
+      "description": "Do not put links on the clipboard.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/LauncherActivity.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.327,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-theme-wrapper",
+      "platform": "android",
+      "area": "ui-theme",
+      "description": "Render content without the application Material theme.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnShareTheme.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.316,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-settings-navigation",
+      "platform": "android",
+      "area": "ui-navigation",
+      "description": "Remove the settings destination from bottom navigation.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksApp.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 2.107,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-share-intent-filter",
+      "platform": "android",
+      "area": "packaging",
+      "description": "Remove ACTION_SEND discovery from the Android manifest.",
+      "file": "android/app/src/main/AndroidManifest.xml",
+      "verifier": "android_build",
+      "status": "SURVIVED",
+      "elapsed_seconds": 14.798,
+      "return_code": 0,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-file-provider",
+      "platform": "android",
+      "area": "packaging",
+      "description": "Remove the FileProvider required by in-app APK installation.",
+      "file": "android/app/src/main/AndroidManifest.xml",
+      "verifier": "android_build",
+      "status": "KILLED_BUILD",
+      "elapsed_seconds": 7.273,
+      "return_code": 1,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": "/tmp/cairn-share-ablation-clm204_m/repo/android/app/src/main/res/xml/update_file_paths.xml:2: Error: The resource R.xml.update_file_paths appears to be unused [UnusedResources] | FAILURE: Build failed with an exception. | /tmp/cairn-share-ablation-clm204_m/repo/android/app/src/main/res/xml/update_file_paths.xml:2: Error: The resource R.xml.update_file_paths appears to be unused [UnusedResources] | BUILD FAILED in 7s"
+    },
+    {
+      "case_id": "android-unsupported-share-message",
+      "platform": "android",
+      "area": "resources",
+      "description": "Replace the unsupported-share error with an empty message.",
+      "file": "android/app/src/main/res/values/strings.xml",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 2.823,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-enrichment-decoding",
+      "platform": "android",
+      "area": "app-sync",
+      "description": "Discard enhancement fields when decoding a bookmark.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/LinksApiClient.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.667,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 29,
+        "failed": 2,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.LinkEnrichmentTest.enhancedDetailsKeepBothLanguagesAndPreferTheAiTitle",
+          "com.alpenl.cairn.share.network.LinkEnrichmentTest.nullableSummaryFieldsNeverDisplayTheLiteralNull"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.LinkEnrichmentTest.enhancedDetailsKeepBothLanguagesAndPreferTheAiTitle; com.alpenl.cairn.share.network.LinkEnrichmentTest.nullableSummaryFieldsNeverDisplayTheLiteralNull"
+    },
+    {
+      "case_id": "android-content-revision",
+      "platform": "android",
+      "area": "app-sync",
+      "description": "Retain stale full text after the server changes the content revision.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/LinkEnrichment.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.496,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 30,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.LinkEnrichmentTest.summaryRefreshRetainsLoadedBodiesOnlyForTheSameContentRevision"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.LinkEnrichmentTest.summaryRefreshRetainsLoadedBodiesOnlyForTheSameContentRevision"
+    },
+    {
+      "case_id": "android-topic-filter",
+      "platform": "android",
+      "area": "curation",
+      "description": "Ignore the selected topic in the library.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/network/BookmarkFilters.kt",
+      "verifier": "android_unit",
+      "status": "KILLED_TEST",
+      "elapsed_seconds": 1.37,
+      "return_code": 1,
+      "tests": {
+        "total": 31,
+        "passed": 30,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.network.LinkEnrichmentTest.filtersUseHumanClassificationAndInclusiveDates"
+        ]
+      },
+      "device_test": null,
+      "diagnostic": "com.alpenl.cairn.share.network.LinkEnrichmentTest.filtersUseHumanClassificationAndInclusiveDates"
+    },
+    {
+      "case_id": "android-progressive-library",
+      "platform": "android",
+      "area": "performance",
+      "description": "Wait for all pages before making any links visible.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 1.604,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    },
+    {
+      "case_id": "android-archived-image",
+      "platform": "android",
+      "area": "app-sync",
+      "description": "Use an invalid archive key so App images cannot load.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/BookmarkContent.kt",
+      "verifier": "android_unit",
+      "status": "SURVIVED",
+      "elapsed_seconds": 2.587,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "device_test": null,
+      "diagnostic": ""
+    }
+  ],
+  "production_files": [
+    "android/app/src/main/AndroidManifest.xml",
+    "android/app/src/main/java/com/alpenl/cairn/share/AppUpdateState.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/BookmarkContent.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksApp.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/LauncherActivity.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/LinkPresentation.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/NativeShareSources.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/SharePreferencesStore.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/UpdateApkDownloader.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/SharePayload.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidate.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlDisplayLabel.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ApiDebugClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/AppUserAgent.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/BookmarkFilters.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkEnrichment.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkRequestJson.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinksApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ShareApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/UpdateApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnShareTheme.kt",
+    "android/app/src/main/res/values/strings.xml",
+    "worker/migrations/0001_create_links.sql",
+    "worker/migrations/0002_add_learned_state.sql",
+    "worker/migrations/0003_add_cache_metadata.sql",
+    "worker/migrations/0004_add_client_id.sql",
+    "worker/migrations/0005_add_x_enrichment.sql",
+    "worker/migrations/0006_add_rich_x_enrichment.sql",
+    "worker/migrations/0007_add_bookmark_curation.sql",
+    "worker/migrations/0008_invalidate_enriched_link_cache.sql",
+    "worker/src/curation.ts",
+    "worker/src/env.d.ts",
+    "worker/src/index.ts",
+    "worker/src/taxonomy.json"
+  ],
+  "coverage": {
+    "android/app/src/main/java/com/alpenl/cairn/share/NativeShareSources.kt": [
+      "android-native-clip-text"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt": [
+      "android-text-url-extraction",
+      "android-url-deduplication"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/SharePayload.kt": [
+      "android-text-url-extraction"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidate.kt": [
+      "android-url-deduplication"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlDisplayLabel.kt": [
+      "android-display-path"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt": [
+      "android-single-auto-selection",
+      "android-submit-lock"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkRequestJson.kt": [
+      "android-client-id-json"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt": [
+      "android-pending-failure-metadata",
+      "android-pending-remove"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ShareApiClient.kt": [
+      "android-share-auth-header"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/UpdateApiClient.kt": [
+      "android-semver-comparison"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/AppUserAgent.kt": [
+      "android-default-user-agent"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/LinkPresentation.kt": [
+      "android-query-fragment-removal"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinksApiClient.kt": [
+      "android-links-page-decoding",
+      "android-enrichment-decoding"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt": [
+      "android-library-page-load",
+      "android-viewmodel-library-filter",
+      "android-progressive-library"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt": [
+      "android-share-recreation-note",
+      "android-durable-before-network"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/SharePreferencesStore.kt": [
+      "android-preference-write"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/UpdateApkDownloader.kt": [
+      "android-update-download-success"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/AppUpdateState.kt": [
+      "android-update-download-success"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ApiDebugClient.kt": [
+      "android-debug-path-confinement"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/LauncherActivity.kt": [
+      "android-launcher-copy"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnShareTheme.kt": [
+      "android-theme-wrapper"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksApp.kt": [
+      "android-settings-navigation"
+    ],
+    "android/app/src/main/AndroidManifest.xml": [
+      "android-share-intent-filter",
+      "android-file-provider"
+    ],
+    "android/app/src/main/res/values/strings.xml": [
+      "android-unsupported-share-message"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkEnrichment.kt": [
+      "android-content-revision"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/network/BookmarkFilters.kt": [
+      "android-topic-filter"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/BookmarkContent.kt": [
+      "android-archived-image"
+    ],
+    "worker/src/env.d.ts": [
+      "worker-env-r2-contract"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "migration": "0008_invalidate_enriched_link_cache.sql",
+  "existing_row_preserved": true,
+  "cache_generation_incremented": true,
+  "engine": "3.51.2",
+  "database": "in-memory fixture"
+}

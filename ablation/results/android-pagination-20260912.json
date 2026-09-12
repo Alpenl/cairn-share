@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-12T06:42:20.712567+00:00",
+  "revision": "1ea43e7",
+  "command": "ablation/run.py --case android-progressive-library --device --serial emulator-5558 --json ablation/results/android-pagination-20260912.json --report ablation/ANDROID-PAGINATION-20260912.md",
+  "device_enabled": true,
+  "device_serial": "emulator-5558",
+  "baselines": [
+    {
+      "verifier": "android_unit",
+      "status": "PASS",
+      "elapsed_seconds": 10.916,
+      "return_code": 0,
+      "tests": {
+        "total": 31,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_build",
+      "status": "PASS",
+      "elapsed_seconds": 16.242,
+      "return_code": 0,
+      "tests": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    },
+    {
+      "verifier": "android_device:firstPageIsVisibleBeforeLaterPagesComplete",
+      "status": "PASS",
+      "elapsed_seconds": 68.6,
+      "return_code": 0,
+      "tests": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "failed_tests": []
+      },
+      "diagnostic": ""
+    }
+  ],
+  "results": [
+    {
+      "case_id": "android-progressive-library",
+      "platform": "android",
+      "area": "performance",
+      "description": "Wait for all pages before making any links visible.",
+      "file": "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt",
+      "verifier": "android_unit+android_device",
+      "status": "KILLED_DEVICE",
+      "elapsed_seconds": 79.877,
+      "return_code": 1,
+      "tests": {
+        "total": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "failed_tests": [
+          "com.alpenl.cairn.share.EnrichmentInstrumentedTest.firstPageIsVisibleBeforeLaterPagesComplete"
+        ]
+      },
+      "device_test": "firstPageIsVisibleBeforeLaterPagesComplete",
+      "diagnostic": "com.alpenl.cairn.share.EnrichmentInstrumentedTest.firstPageIsVisibleBeforeLaterPagesComplete"
+    }
+  ],
+  "production_files": [
+    "android/app/src/main/AndroidManifest.xml",
+    "android/app/src/main/java/com/alpenl/cairn/share/AppUpdateState.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/BookmarkContent.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksApp.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/LauncherActivity.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/LinkPresentation.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/NativeShareSources.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/PendingUploadStore.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareActivity.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ShareCandidatePresenter.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/SharePreferencesStore.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/UpdateApkDownloader.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/SharePayload.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidate.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidateExtractor.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlDisplayLabel.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ApiDebugClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/AppUserAgent.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/BookmarkFilters.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkEnrichment.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinkRequestJson.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/LinksApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/ShareApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/network/UpdateApiClient.kt",
+    "android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnShareTheme.kt",
+    "android/app/src/main/res/values/strings.xml",
+    "worker/migrations/0001_create_links.sql",
+    "worker/migrations/0002_add_learned_state.sql",
+    "worker/migrations/0003_add_cache_metadata.sql",
+    "worker/migrations/0004_add_client_id.sql",
+    "worker/migrations/0005_add_x_enrichment.sql",
+    "worker/migrations/0006_add_rich_x_enrichment.sql",
+    "worker/migrations/0007_add_bookmark_curation.sql",
+    "worker/migrations/0008_invalidate_enriched_link_cache.sql",
+    "worker/src/curation.ts",
+    "worker/src/env.d.ts",
+    "worker/src/index.ts",
+    "worker/src/taxonomy.json"
+  ],
+  "coverage": {
+    "android/app/src/main/java/com/alpenl/cairn/share/CairnLinksViewModel.kt": [
+      "android-progressive-library"
+    ],
+    "worker/src/env.d.ts": [
+      "worker-env-r2-contract"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/AppUpdateState.kt": [
+      "android-update-download-success"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/SharePayload.kt": [
+      "android-text-url-extraction"
+    ],
+    "android/app/src/main/java/com/alpenl/cairn/share/contract/UrlCandidate.kt": [
+      "android-url-deduplication"
+    ]
+  }
+}

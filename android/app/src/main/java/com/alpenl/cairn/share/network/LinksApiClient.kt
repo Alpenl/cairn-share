@@ -17,17 +17,13 @@ internal data class SavedLink(
     val createdAt: String,
     val learned: Boolean,
     val learnedAt: String?,
+    val enrichment: LinkEnrichment? = null,
 )
 
 internal enum class LinkFilter(val apiValue: String) {
     Unlearned("false"),
     Learned("true"),
     All("all"),
-}
-
-internal sealed interface LinkListResult {
-    data class Loaded(val items: List<SavedLink>) : LinkListResult
-    data class Failed(val kind: FailureKind) : LinkListResult
 }
 
 internal sealed interface LinkPageResult {
@@ -63,34 +59,8 @@ internal class LinksApiClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
-    fun list(filter: LinkFilter, query: String, apiToken: String): LinkListResult =
-        listAll(filter, query, apiToken)
-
-    fun listAll(
-        filter: LinkFilter,
-        query: String,
-        apiToken: String,
-        maxPages: Int = 50,
-    ): LinkListResult {
-        val collected = mutableListOf<SavedLink>()
-        var beforeId: Int? = null
-        repeat(maxPages) {
-            when (val result = listPage(filter, query, apiToken, beforeId)) {
-                is LinkPageResult.Failed -> return LinkListResult.Failed(result.kind)
-                is LinkPageResult.Loaded -> {
-                    collected += result.page.items
-                    beforeId = result.page.nextBeforeId
-                    if (beforeId == null) {
-                        return LinkListResult.Loaded(collected)
-                    }
-                }
-            }
-        }
-        return LinkListResult.Failed(FailureKind.Server)
-    }
-
-    fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null): LinkPageResult {
-        val endpoint = URL(listUrl(filter, query, beforeId))
+    fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null, filters: BookmarkFilters = BookmarkFilters()): LinkPageResult {
+        val endpoint = URL(listUrl(filter, query, beforeId, filters))
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
@@ -115,7 +85,7 @@ internal class LinksApiClient(
     }
 
     fun get(id: Int, apiToken: String): LinkGetResult {
-        val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id")
+        val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id?include=enrichment")
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
@@ -176,9 +146,14 @@ internal class LinksApiClient(
         note: String? = null,
         learned: Boolean? = null,
         apiToken: String,
-    ): LinkMutationResult {
-        val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id")
-        val body = LinkJson.encodeUpdate(url, note, learned).toByteArray(StandardCharsets.UTF_8)
+    ): LinkMutationResult = patch("/api/links/$id?include=enrichment", LinkJson.encodeUpdate(url, note, learned), apiToken)
+
+    fun curate(id: Int, update: CurationUpdate, apiToken: String): LinkMutationResult =
+        patch("/api/links/$id/curation", update.encode(), apiToken)
+
+    private fun patch(path: String, json: String, apiToken: String): LinkMutationResult {
+        val endpoint = URL("${baseUrl.trimEnd('/')}$path")
+        val body = json.toByteArray(StandardCharsets.UTF_8)
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "PATCH"
@@ -228,14 +203,16 @@ internal class LinksApiClient(
         }
     }
 
-    private fun listUrl(filter: LinkFilter, query: String, beforeId: Int?): String {
+    private fun listUrl(filter: LinkFilter, query: String, beforeId: Int?, filters: BookmarkFilters): String {
         val params = mutableListOf(
             "limit=100",
+            "include=enrichment",
             "learned=${filter.apiValue}",
         )
         if (beforeId != null) {
             params += "before_id=$beforeId"
         }
+        for ((key, value) in filters.parameters()) params += "$key=${URLEncoder.encode(value, "UTF-8")}"
         val trimmed = query.trim()
         if (trimmed.isNotEmpty()) {
             params += "q=${URLEncoder.encode(trimmed, "UTF-8")}"
@@ -246,6 +223,7 @@ internal class LinksApiClient(
     private fun configure(connection: HttpURLConnection, apiToken: String) {
         connection.connectTimeout = connectTimeoutMillis
         connection.readTimeout = readTimeoutMillis
+        connection.instanceFollowRedirects = false
         connection.setRequestProperty("Accept", "application/json")
         connection.setRequestProperty("User-Agent", userAgent)
         if (apiToken.isNotBlank()) {
@@ -258,6 +236,54 @@ internal class LinksApiClient(
             if (connection.responseCode >= 400) connection.errorStream else connection.inputStream
         }.getOrNull()
         return stream?.use { it.reader(Charsets.UTF_8).readText() }.orEmpty()
+    }
+
+    fun taxonomy(apiToken: String): TaxonomyResult {
+        val connection = URL("${baseUrl.trimEnd('/')}/api/taxonomy").openConnection() as HttpURLConnection
+        return try {
+            configure(connection, apiToken)
+            when (connection.responseCode) {
+                HttpURLConnection.HTTP_OK -> TaxonomyResult.Loaded(decodeTaxonomy(JSONObject(responseBody(connection))))
+                HttpURLConnection.HTTP_UNAUTHORIZED -> TaxonomyResult.Failed(FailureKind.Unauthorized)
+                else -> TaxonomyResult.Failed(FailureKind.Server)
+            }
+        } catch (_: SocketTimeoutException) {
+            TaxonomyResult.Failed(FailureKind.Timeout)
+        } catch (_: IOException) {
+            TaxonomyResult.Failed(FailureKind.Network)
+        } catch (_: JSONException) {
+            TaxonomyResult.Failed(FailureKind.Server)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    fun image(key: String, apiToken: String): ByteArray? {
+        if (!Regex("enrichment/[1-9][0-9]*/[0-9a-f]{64}\\.(jpg|png|webp|gif|avif)").matches(key)) return null
+        val connection = URL("${baseUrl.trimEnd('/')}/api/images/$key").openConnection() as HttpURLConnection
+        return try {
+            configure(connection, apiToken)
+            connection.setRequestProperty("Accept", "image/*")
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+            if (connection.contentType?.substringBefore(';') !in setOf("image/jpeg", "image/png", "image/webp", "image/gif", "image/avif")) return null
+            val limit = 15 * 1024 * 1024
+            if (connection.contentLengthLong > limit) return null
+            connection.inputStream.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (output.size() + count > limit) return null
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            }
+        } catch (_: IOException) {
+            null
+        } finally {
+            connection.disconnect()
+        }
     }
 }
 
@@ -301,5 +327,6 @@ internal object LinkJson {
             createdAt = json.getString("created_at"),
             learned = json.getBoolean("learned"),
             learnedAt = json.optString("learned_at").takeUnless { it.isBlank() || it == "null" },
+            enrichment = json.optJSONObject("enrichment")?.let(::decodeEnrichment),
         )
 }
