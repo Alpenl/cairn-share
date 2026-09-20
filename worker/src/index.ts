@@ -1,5 +1,6 @@
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { classificationRoute, sourceRoute } from "./classification";
+import { domainRoute } from "./domain-routes";
 
 export interface Env {
   DB: D1Database;
@@ -281,6 +282,14 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return sourceMatch ? sourceRoute(request, env, Number(sourceMatch[1])) : classificationRoute(request, env, path);
+  }
+
+  // Internal v2 domain API (evidence, specs, runs, decisions, overrides).
+  // Management-only and behind the enricher token; the App token cannot reach it.
+  if (path.startsWith("/api/v2/")) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return domainRoute(request, env, path);
   }
 
   if (path === "/api/enrichment/jobs/claim") {
