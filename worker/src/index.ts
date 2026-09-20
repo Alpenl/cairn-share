@@ -104,7 +104,18 @@ type ErrorCode =
   | "lease_conflict"
   | "job_busy"
   | "not_found"
-  | "method_not_allowed";
+  | "method_not_allowed"
+  | "invalid_classification_config"
+  | "invalid_classification"
+  | "invalid_source"
+  | "invalid_operation_key"
+  | "capability_mismatch"
+  | "target_changed"
+  | "input_changed"
+  | "lease_expired"
+  | "already_completed"
+  | "operation_conflict"
+  | "configuration_error";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -465,7 +476,13 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
   const body = raw as Record<string, unknown>;
   const updates: string[] = [];
   const bindings: Array<string | number | null> = [];
-  let enrichmentInputChanged = false;
+  // URL and note invalidate different things and must not be coupled:
+  //  - a URL change means the stored snapshot belongs to a different page, so
+  //    source/content is invalidated (human curation is preserved).
+  //  - a note change is a personal annotation. It must not discard the fetched
+  //    source, translation or images, and must not trigger a refetch.
+  let urlChanged = false;
+  let noteChanged = false;
 
   if ("url" in body) {
     if (typeof body.url !== "string") {
@@ -477,7 +494,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     }
     updates.push("url = ?");
     bindings.push(url);
-    enrichmentInputChanged = true;
+    urlChanged = true;
   }
 
   if ("note" in body) {
@@ -486,7 +503,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     }
     updates.push("note = ?");
     bindings.push(body.note);
-    enrichmentInputChanged = true;
+    noteChanged = true;
   }
 
   if ("learned" in body) {
@@ -501,7 +518,10 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     return error("invalid_update");
   }
 
-  if (enrichmentInputChanged) {
+  // A URL change invalidates the stored source and the derived reading content
+  // because they describe a different page. Human curation, why and status are
+  // deliberately preserved: they are the user's own decisions.
+  if (urlChanged) {
     updates.push(
       "enrichment_status = 'pending'",
       "enrichment_attempts = 0",

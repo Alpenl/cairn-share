@@ -153,8 +153,12 @@ describe("bookmark curation", () => {
     await complete(id);
     await request(`/api/enrichment/jobs/${id}/curation`, "PATCH", { why: "自己的理由", curation_status: "kept", classification: { topics: ["eng"], form: "method", use: "try" } });
     await request(`/api/links/${id}`, "PATCH", { note: "更新备注" }, appToken);
-    expect(await detail(id)).toMatchObject({ status: "pending", why: "自己的理由", curation_status: "kept", classification_reviewed: true,
+    // A note is personal: it invalidates the AI classification job but must not
+    // discard the stored reading content or force a refetch (B01-T07).
+    expect(await detail(id)).toMatchObject({ status: "completed", why: "自己的理由", curation_status: "kept", classification_reviewed: true,
       classification: { topics: ["eng"], why_suggestion: "", entities: [] } });
+    const job = await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first<any>();
+    expect(job.status).toBe("pending");
   });
 
   it("leaves shelved bookmarks out of automatic model processing", async () => {

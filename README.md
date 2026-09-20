@@ -122,8 +122,36 @@ curl -X PATCH https://share.alpenl.com/api/links/1 \
   --data '{"url":"https://example.com/updated","note":"updated note","learned":true}'
 ```
 
-`PATCH` 可单独或组合修改 `url`、`note`、`learned`。再次传 `{"learned":false}` 可以
-把已学习链接改回未学习。删除链接：
+`PATCH` 可单独或组合修改 `url`、`note`、`learned`。`url` 变化会让已存来源失效
+（等待重新抓取），但保留人工整理结果；`note` 只改个人备注，保留已抓取的原文、译文和
+图片，不触发重新抓取。再次传 `{"learned":false}` 可以把已学习链接改回未学习。
+
+### 分类目标握手（v2，可选）
+
+分类任务由 Worker 侧的**权威目标**（immutable spec + requested model + policy +
+单调递增 generation）决定，不由消费者在 `claim` 时提交的 policy/model 决定。旧版
+消费者继续使用 generation 0 的 legacy 目标，行为兼容。
+
+```bash
+# 查询当前目标，并声明消费者能力（GET 查询参数，或 POST JSON body）
+curl 'https://share.alpenl.com/api/enrichment/classifications/target?protocol=v2&spec_ids=classify-v2&policy_versions=jev-tags-v2&models=jev-pinned-1&taxonomy_versions=2026-09-20.1' \
+  -H 'Authorization: Bearer <enricher-token>'
+# => {"target":{"generation":1,"spec_id":"classify-v2",...},"supported":true}
+
+# 管理侧切换目标：总是产生新的 generation，回滚也是新 generation 指向旧 spec（不倒退）
+curl -X POST https://share.alpenl.com/api/enrichment/classifications/target \
+  -H 'Authorization: Bearer <enricher-token>' -H 'Content-Type: application/json' \
+  --data '{"spec_id":"classify-v2","spec_hash":"sha256:...","taxonomy_version":"2026-09-20.1","policy_version":"jev-tags-v2","requested_model":"jev-pinned-1","protocol":"v2","expected_generation":0}'
+```
+
+v2 `claim` 只领取与当前目标匹配的任务；能力不匹配返回 409 `capability_mismatch`（组件级
+状态，不消耗任务 attempt）。v2 `complete` 可携带 `operation_key` 与 `input_revision`：
+同一 key 与相同 payload 幂等返回既有结果（响应丢失后无需重新付费推断），不同 payload
+返回 409 `operation_conflict`。目标切换、输入变化和过期 lease 分别返回
+`target_changed`、`input_changed`、`lease_expired`，旧结果不会覆盖当前投影。
+管理目标接口只接受 enricher token，App token 无法改写目标。
+
+删除链接：
 
 ```bash
 curl -X DELETE https://share.alpenl.com/api/links/1 \

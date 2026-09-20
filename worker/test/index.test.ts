@@ -457,13 +457,42 @@ describe("cairn-share worker", () => {
         summary: string | null;
         enriched_at: string | null;
       }>();
+    // A note edit is personal: it must not throw away the fetched source or the
+    // reading aids, and must not trigger a refetch (B01-T07).
     expect(resetRow).toEqual({
-      enrichment_status: "pending",
-      enrichment_attempts: 0,
-      original_text: null,
-      summary: null,
-      enriched_at: null
+      enrichment_status: "completed",
+      enrichment_attempts: 2,
+      original_text: "fresh text",
+      summary: "fresh summary",
+      enriched_at: expect.any(String)
     });
+  });
+
+  it("invalidates stored source on URL change but preserves human curation", async () => {
+    const created = await create("https://x.com/example/status/401", "note");
+    const job = await json(await claimEnrichment());
+    expect((await completeEnrichment(created.id, {
+      lease_token: job.lease_token,
+      original_text: "fresh text",
+      summary: "fresh summary",
+      related_links: [],
+      model: "grok-test"
+    })).status).toBe(200);
+    const curation = await dispatch(`/api/links/${created.id}/curation`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ why: "我的理由" })
+    });
+    expect(curation.status).toBe(200);
+
+    await patchJson(created.id, { url: "https://x.com/example/status/999" });
+    const row = await env.DB.prepare(
+      `SELECT enrichment_status, original_text, summary, why FROM links WHERE id = ?`
+    ).bind(created.id).first<{ enrichment_status: string; original_text: string | null; summary: string | null; why: string | null }>();
+    // The snapshot belongs to the old URL, so it is invalidated...
+    expect(row).toMatchObject({ enrichment_status: "pending", original_text: null, summary: null });
+    // ...but the user's own decision is kept.
+    expect(row!.why).toBe("我的理由");
   });
 
   it("validates enrichment result shapes and methods", async () => {
