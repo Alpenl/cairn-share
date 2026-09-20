@@ -89,6 +89,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -887,7 +888,7 @@ private fun DetailScreen(
 
     ScreenColumn {
         DetailTopBar(
-            title = "链接 #$id",
+            title = link?.displayTitle() ?: "链接 #$id",
             onBack = onBack,
             actions = {
                 IconButton(onClick = onEdit, enabled = link != null) {
@@ -920,16 +921,29 @@ private fun DetailScreen(
                     }
                     if (readingText.isNotBlank()) {
                         item(key = "reading_controls") {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(if (showOriginal || enrichment.translatedText.isBlank()) "原文 ${enrichment.originalLanguage}" else "中文译文", style = MaterialTheme.typography.titleMedium)
-                                if (enrichment.originalText.isNotBlank() && enrichment.translatedText.isNotBlank()) TextButton(
-                                    onClick = { showOriginal = !showOriginal }, modifier = Modifier.testTag("toggle_original"),
-                                ) { Text(if (showOriginal) "查看译文" else "查看原文") }
-                                TextButton(onClick = { onCopy(readingText) }) { Text("复制全文") }
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    if (showOriginal || enrichment.translatedText.isBlank()) "原文 ${enrichment.originalLanguage}" else "中文译文",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (enrichment.originalText.isNotBlank() && enrichment.translatedText.isNotBlank()) TextButton(
+                                        onClick = { showOriginal = !showOriginal }, modifier = Modifier.testTag("toggle_original"),
+                                    ) { Text(if (showOriginal) "查看译文" else "查看原文") }
+                                    TextButton(onClick = { onCopy(readingText) }) { Text("复制全文") }
+                                }
                             }
                         }
                         items(paragraphs.size, key = { "paragraph_$it" }, contentType = { "paragraph" }) { index ->
-                            SelectionContainer { Text(paragraphs[index], style = MaterialTheme.typography.bodyLarge) }
+                            SelectionContainer {
+                                Text(
+                                    paragraphs[index],
+                                    style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 28.sp),
+                                )
+                            }
                         }
                     }
                     items(enrichment.imageKeys, key = { "image_$it" }, contentType = { "image" }) { key ->
@@ -937,7 +951,23 @@ private fun DetailScreen(
                     }
                     if (enrichment.relatedLinks.isNotEmpty()) item(key = "links_title") { SectionLabel("相关链接") }
                     items(enrichment.relatedLinks, key = { "related_$it" }, contentType = { "related" }) { url ->
-                        TextButton(onClick = { if (validateHttpUrl(url)) onOpenExternal(url) }) { Text(url) }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable(role = Role.Button) { if (validateHttpUrl(url)) onOpenExternal(url) }
+                                .padding(horizontal = 4.dp, vertical = 8.dp),
+                        ) {
+                            Text(
+                                url,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
                     }
                     // 次要区域：整理信息、备注与元数据，放在全部正文之后。
                     item(key = "secondary") {
@@ -1436,6 +1466,8 @@ private fun ColumnScope.LinkList(
                 LinearProgressIndicator(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp))
                         .testTag("list_refreshing"),
                 )
             }
@@ -1457,6 +1489,8 @@ private fun ColumnScope.LinkList(
                 LinearProgressIndicator(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp))
                         .testTag("list_loading_more"),
                 )
             }
@@ -1464,6 +1498,7 @@ private fun ColumnScope.LinkList(
             item {
                 OutlinedButton(
                     onClick = onLoadMore,
+                    shape = RoundedCornerShape(24.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("load_more"),
@@ -1830,8 +1865,8 @@ private fun HostAvatar(url: String) {
 private fun StateDot(learned: Boolean) {
     Box(
         modifier = Modifier
-            .padding(top = 8.dp)
-            .size(10.dp)
+            .padding(top = 6.dp)
+            .size(8.dp)
             .background(
                 color = if (learned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
                 shape = CircleShape,
@@ -1847,7 +1882,7 @@ private fun StatePill(learned: Boolean) {
         contentColor = if (learned) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onTertiary,
     ) {
         Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(6.dp).background(MaterialTheme.colorScheme.onPrimary, CircleShape))
+            Box(Modifier.size(6.dp).background(if (learned) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onTertiary, CircleShape))
             Text(if (learned) "已学习" else "待学习", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
         }
     }

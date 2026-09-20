@@ -7,6 +7,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.alpenl.cairn.share.network.BookmarkClassification
 import com.alpenl.cairn.share.network.BookmarkFilters
@@ -75,10 +77,16 @@ internal fun BookmarkCuration(
     onSave: (CurationUpdate, () -> Unit) -> Unit,
 ) {
     var editing by rememberSaveable(id) { mutableStateOf(false) }
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant) {
+    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 0.dp) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(enrichment.curationStatus.label, style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    enrichment.curationStatus.label,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
                 TextButton(onClick = { editing = true; onLoadTaxonomy() }, enabled = !busy, modifier = Modifier.testTag("edit_curation")) {
                     Text("整理")
                 }
@@ -175,8 +183,8 @@ private fun CurationDialog(
 internal fun TermSelector(label: String, value: String, terms: List<TaxonomyTerm>, enabled: Boolean = true, onChange: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Column {
-        TextButton(onClick = { expanded = true }, enabled = enabled) {
-            Text("$label：${terms.firstOrNull { it.id == value }?.label ?: value.ifBlank { "未指定" }}")
+        TextButton(onClick = { expanded = true }, enabled = enabled, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
+            Text("$label：${terms.firstOrNull { it.id == value }?.label ?: value.ifBlank { "未指定" }}", maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             DropdownMenuItem(text = { Text("未指定") }, onClick = { expanded = false; onChange("") })
@@ -217,7 +225,7 @@ internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String) 
     Column(Modifier.fillMaxWidth().testTag("bookmark_image")) {
         when {
             bitmap != null -> Image(bitmap!!.asImageBitmap(), contentDescription = "收藏图片", contentScale = ContentScale.FillWidth, modifier = Modifier.fillMaxWidth())
-            loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
+            loading -> LinearProgressIndicator(Modifier.fillMaxWidth().heightIn(max = 3.dp))
             else -> TextButton(onClick = { retry++ }) { Text("图片加载失败，点击重试") }
         }
     }
@@ -247,11 +255,15 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
     // 避免一堆标签把真正的链接列表挤到首屏之外。
     var expanded by rememberSaveable { mutableStateOf(filters != BookmarkFilters()) }
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag("bookmark_filters")) {
-                Text(if (expanded) "收起筛选" else filterPanelLabel(filters))
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag("bookmark_filters").weight(1f), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
+                Text(
+                    if (expanded) "收起筛选" else filterPanelLabel(filters),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-            if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) }) { Text("清除筛选") }
+            if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) }) { Text("清除") }
         }
         if (expanded) Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
