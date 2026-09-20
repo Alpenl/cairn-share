@@ -1,6 +1,7 @@
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { classificationRoute, sourceRoute } from "./classification";
 import { domainRoute } from "./domain-routes";
+import { taxonomyV2Route } from "./taxonomy-routes";
 
 export interface Env {
   DB: D1Database;
@@ -289,6 +290,9 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   if (path.startsWith("/api/v2/")) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
+    if (path.startsWith("/api/v2/taxonomy") || /^\/api\/v2\/links\/\d+\/selection/.test(path)) {
+      return taxonomyV2Route(request, env, path);
+    }
     return domainRoute(request, env, path);
   }
 

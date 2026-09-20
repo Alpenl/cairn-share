@@ -335,7 +335,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       // enforce them when the job is bound to a v2 target; the job is still
       // bound to the active generation, so a stale worker cannot win.
       const declaredGeneration = body.target_generation === undefined ? job.target_generation : Number(body.target_generation);
-      const declaredSpec = result.spec_id === undefined ? job.spec_id : String(result.spec_id);
+      const declaredSpec = body.spec_id === undefined ? job.spec_id : String(body.spec_id);
       if (declaredGeneration !== job.target_generation || declaredSpec !== job.spec_id ||
         job.target_generation !== target.generation) {
         return { failure: "target_changed" as const };
