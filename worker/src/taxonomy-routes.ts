@@ -85,22 +85,23 @@ export async function taxonomyV2Route(request: Request, env: Env, path: string):
 }
 
 async function getSelection(env: Env, id: number): Promise<Response> {
+  const link = await env.DB.prepare(`SELECT personal_revision, curation, classification, why, curation_status FROM links WHERE id = ?`).bind(id)
+    .first<{ personal_revision: number; curation: string | null; classification: string | null; why: string | null; curation_status: string | null }>();
+  if (!link) return fail("not_found", 404);
   const row = await env.DB.prepare(
     `SELECT taxonomy_version, definition_version, topics, content_functions, carriers, affordances, form, use, provenance, revised_at
      FROM link_selections_v2 WHERE link_id = ?`).bind(id).first<Record<string, unknown>>();
   if (!row) {
     // Fall back to the v1 projection so an old link still reads.
-    const link = await env.DB.prepare(`SELECT curation, classification, why, curation_status FROM links WHERE id = ?`).bind(id)
-      .first<{ curation: string | null; classification: string | null; why: string | null; curation_status: string | null }>();
-    if (!link) return fail("not_found", 404);
     const legacy = JSON.parse(link.curation ?? link.classification ?? "{}") as Partial<V2Selection>;
     return reply({
       id, selection: { ...EMPTY_SELECTION, topics: legacy.topics ?? [], form: legacy.form ?? "", use: legacy.use ?? "" },
-      v1_only: true, why: link.why, curation_status: link.curation_status
+      revision: link.personal_revision, v1_only: true, why: link.why, curation_status: link.curation_status
     });
   }
   return reply({
     id,
+    revision: link.personal_revision,
     selection: {
       topics: parseList(row.topics), content_functions: parseList(row.content_functions),
       carriers: parseList(row.carriers), affordances: parseList(row.affordances),
