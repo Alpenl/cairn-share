@@ -1,4 +1,5 @@
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
+import { classificationRoute, sourceRoute } from "./classification";
 
 export interface Env {
   DB: D1Database;
@@ -262,6 +263,13 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const key = decodePathComponent(appImageMatch[1]);
     if (key === null) return error("not_found", 404);
     return routeMethod(request, ["GET"], () => getEnrichmentImage(request, env, key));
+  }
+
+  const sourceMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/source$/);
+  if (sourceMatch || path.startsWith("/api/enrichment/classifications/")) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return sourceMatch ? sourceRoute(request, env, Number(sourceMatch[1])) : classificationRoute(request, env, path);
   }
 
   if (path === "/api/enrichment/jobs/claim") {
