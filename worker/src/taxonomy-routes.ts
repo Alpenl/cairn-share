@@ -234,7 +234,8 @@ async function patchSelection(request: Request, env: Env, id: number): Promise<R
   // what this write meant.
   const result = await persistSelectionOverrides(env, id, validated, {
     source: "human", operationPrefix: typeof body.operation_key === "string" ? body.operation_key : `patch-${id}-${Date.now()}`,
-    expectedRevision: Number.isSafeInteger(body.expected_revision) ? Number(body.expected_revision) : undefined
+    expectedRevision: Number.isSafeInteger(body.expected_revision) ? Number(body.expected_revision) : undefined,
+    rejectAutomaticExtras: true
   });
   if ("conflict" in result) return fail("revision_conflict", 409, { revision: result.conflict });
   const { view } = await computeEffective(env, id);
@@ -273,7 +274,8 @@ async function patchSelectionV1(request: Request, env: Env, id: number): Promise
   const validated = validateV2Selection(selection);
   if (!validated) return fail("invalid_v1_selection");
   const result = await persistSelectionOverrides(env, id, validated, {
-    source: "legacy_unknown", operationPrefix: typeof body.operation_key === "string" ? body.operation_key : `patch-v1-${id}-${Date.now()}`
+    source: "legacy_unknown", operationPrefix: typeof body.operation_key === "string" ? body.operation_key : `patch-v1-${id}-${Date.now()}`,
+    rejectAutomaticExtras: true
   });
   if ("conflict" in result) return fail("revision_conflict", 409, { revision: result.conflict });
   return reply({ id, revision: result.revision, v1_projection: projectV1(validated), preserved_hidden: true });

@@ -1,6 +1,7 @@
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
-import { classificationRoute, refreshSource, sourceRoute } from "./classification";
-import { domainRoute } from "./domain-routes";
+import { ackSourceRefresh, classificationRoute, refreshSource, sourceRoute } from "./classification";
+import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
+import { applyV1Write } from "./taxonomy-v2";
 import { taxonomyV2Route } from "./taxonomy-routes";
 
 export interface Env {
@@ -36,6 +37,7 @@ interface EnrichmentJobRow {
   enrichment_attempts: number;
   enrichment_lease_token: string;
   enrichment_lease_until: string;
+  refresh_epoch: number;
 }
 
 type EnrichmentStatus = "pending" | "processing" | "completed" | "failed" | "exhausted";
@@ -280,9 +282,14 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   const sourceMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/source$/);
   const refreshMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/refresh-source$/);
-  if (sourceMatch || refreshMatch || path.startsWith("/api/enrichment/classifications/")) {
+  const refreshAckMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/refresh-source\/ack$/);
+  if (sourceMatch || refreshMatch || refreshAckMatch || path.startsWith("/api/enrichment/classifications/")) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
+    if (refreshAckMatch) {
+      if (request.method !== "POST") return error("method_not_allowed", 405);
+      return ackSourceRefresh(request, env, Number(refreshAckMatch[1]));
+    }
     if (refreshMatch) {
       if (request.method !== "POST") return error("method_not_allowed", 405);
       return refreshSource(env, Number(refreshMatch[1]));
@@ -745,14 +752,43 @@ async function updateCuration(request: Request, env: Env, id: number, timing: Ti
     const selection = validateSelection(body.classification);
     if (body.classification !== null && (selection === null || !record(body.classification) ||
       Object.keys(body.classification).some((key) => !["topics", "form", "use"].includes(key)))) return error("invalid_curation");
-    updates.push("curation = ?");
-    bindings.push(selection === null ? null : JSON.stringify(selection));
   }
-  if (updates.length === 0) return error("invalid_curation");
-  const row = await timing.measure("db", () => env.DB.prepare(
-    `UPDATE links SET ${updates.join(", ")} WHERE id = ? RETURNING id`
-  ).bind(...bindings, id).first<{ id: number }>());
-  if (row === null) return error("not_found", 404);
+  if (updates.length === 0 && !("classification" in body)) return error("invalid_curation");
+  const exists = await timing.measure("db", () => env.DB.prepare(`SELECT id FROM links WHERE id = ?`).bind(id)
+    .first<{ id: number }>());
+  if (exists === null) return error("not_found", 404);
+  if (updates.length > 0) {
+    await timing.measure("db", () => env.DB.prepare(
+      `UPDATE links SET ${updates.join(", ")} WHERE id = ?`
+    ).bind(...bindings, id).run());
+  }
+  // The pre-v2 client writes only topics<=3 plus form/use. That write is
+  // translated into the same field-level override log the v2 UI uses, so the
+  // old endpoint and the new view derive from one effective result and the
+  // hidden v2 dimensions are preserved (R2-03).
+  if ("classification" in body) {
+    const { view } = await computeEffective(env, id);
+    const existing = {
+      topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
+      affordances: view.affordances, form: view.form, use: view.use
+    };
+    const selection = body.classification === null ? null : validateSelection(body.classification);
+    const { selection: desired } = applyV1Write(existing, selection === null
+      ? { topics: [], form: "", use: "" }
+      : { topics: selection.topics, form: selection.form, use: selection.use });
+    // The legacy write has no revision and no operation id. It is recorded as a
+    // legacy_unknown human action at the current revision; the CAS is not
+    // invented for a protocol that cannot carry one. `classification: null`
+    // restores the automatic value for exactly the v1-expressible dimensions
+    // and never clears hidden v2 dimensions (B05-T06/R2-03).
+    const result = await persistSelectionOverrides(env, id, desired, {
+      source: "legacy_unknown",
+      operationPrefix: `v1-${id}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+      rejectAutomaticExtras: true,
+      resetFields: selection === null ? ["topics", "form", "use"] : undefined
+    });
+    if ("conflict" in result) return json({ error: "revision_conflict", revision: result.conflict }, 409);
+  }
   if (app) {
     const item = await timing.measure("db", () => env.DB.prepare(
       `SELECT ${LINK_COLUMNS}, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)} FROM links WHERE id = ?`
@@ -798,7 +834,7 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
           LIMIT 1
         )
         RETURNING id, url, note, created_at, enrichment_attempts,
-                  enrichment_lease_token, enrichment_lease_until`
+                  enrichment_lease_token, enrichment_lease_until, refresh_epoch`
     )
       .bind(leaseToken, leaseUntil, nowIso, MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso)
       .first<EnrichmentJobRow>()
@@ -838,7 +874,7 @@ async function claimEnrichmentJobById(
             OR enrichment_lease_until <= ?
           )
         RETURNING id, url, note, created_at, enrichment_attempts,
-                  enrichment_lease_token, enrichment_lease_until`
+                  enrichment_lease_token, enrichment_lease_until, refresh_epoch`
     )
       .bind(leaseToken, leaseUntil, nowIso, id, nowIso)
       .first<EnrichmentJobRow>()
@@ -1555,7 +1591,10 @@ function mapEnrichmentJob(row: EnrichmentJobRow): Record<string, unknown> {
     created_at: row.created_at,
     attempt: row.enrichment_attempts,
     lease_token: row.enrichment_lease_token,
-    lease_until: row.enrichment_lease_until
+    lease_until: row.enrichment_lease_until,
+    // A non-zero epoch is an explicit, one-shot refresh intent the processor
+    // must consume instead of reusing a stored source (R2-06).
+    refresh_epoch: row.refresh_epoch ?? 0
   };
 }
 

@@ -1,7 +1,7 @@
 import type { Env } from "./index";
 import { record, taxonomy, validateClassification } from "./curation";
 import type { AutomaticView } from "./domain";
-import { decisionInsertStatement, rebuildProjection, runInsertStatement } from "./domain-routes";
+import { decisionInsertStatement, rebuildProjection, runInsertStatement, type WriteGuard } from "./domain-routes";
 
 const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers });
@@ -68,23 +68,30 @@ async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function readOperation(env: Env, key: string): Promise<{ link_id: number; payload_hash: string; status: string; response: string } | null> {
-  return env.DB.prepare(
+async function readOperation(env: Env, key: string, linkID: number): Promise<{ link_id: number; payload_hash: string; status: string; response: string } | null> {
+  const row = await env.DB.prepare(
     `SELECT link_id, payload_hash, status, response FROM classification_operations WHERE operation_key = ?`
-  ).bind(key).first();
+  ).bind(key).first<{ link_id: number; payload_hash: string; status: string; response: string }>();
+  if (!row) return null;
+  // An operation key is scoped to one bookmark. A key from another link must
+  // never replay that link's result for this one (R2-12).
+  if (row.link_id !== linkID) return { ...row, link_id: -1 };
+  return row;
 }
 
 // Idempotent commit wrapper. If the key was already used with an identical
-// payload, replay the stored response. If it was used with a different payload,
-// refuse rather than silently overwriting. Otherwise the result, the job, the
-// run, the decision, the projection and the operation record are committed in
-// one D1 batch: a failure leaves no partial state, and a concurrent duplicate
-// loses the UNIQUE constraint and replays instead of double-writing (F10).
+// payload for the same link, replay the stored response. A different link or
+// payload is a conflict. Otherwise every dependent write shares one in-batch
+// validity predicate: when the guard does not hold, no success run, decision or
+// operation record is written at all (R2-01). A post-batch check is only a
+// report of that atomic outcome, never a substitute for it.
 type CommitOutcome<T extends { id: number }> = {
   statements: D1PreparedStatement[];
-  // guardIndex is the statement whose zero-row result means the lease/guard was
-  // lost; the caller reports lease_expired rather than success.
+  // guardIndex is the statement whose zero-row result means the guarded write
+  // did not land; the whole batch then had no effect.
   guardIndex: number;
+  // operationGuard proves inside the transaction that the guarded write landed.
+  operationGuard?: { sql: string; bindings: Array<string | number | null> };
   response: T;
   body: unknown;
 };
@@ -93,37 +100,48 @@ async function idempotent<T extends { id: number }>(
   env: Env,
   key: string | null,
   payloadHash: string,
+  linkID: number,
   commit: () => Promise<CommitOutcome<T> | { failure: ClassificationErrorCode }>
 ): Promise<Response> {
   if (key !== null) {
-    const existing = await readOperation(env, key);
+    const existing = await readOperation(env, key, linkID);
     if (existing) {
+      if (existing.link_id !== linkID) return fail("operation_conflict", { reason: "operation_key belongs to another bookmark" });
       if (existing.payload_hash !== payloadHash) return fail("operation_conflict");
       return reply(JSON.parse(existing.response), 200);
     }
   }
   const outcome = await commit();
   if ("failure" in outcome) return fail(outcome.failure);
-  if (!key) {
-    // Legacy consumers keep the pre-v2 lease-guarded commit with no
-    // idempotency record; the batch is still atomic.
-    const results = await env.DB.batch(outcome.statements);
-    if (!results[outcome.guardIndex]?.results.length) return fail("lease_expired");
-    return reply(outcome.body, 200);
-  }
-  const operation = env.DB.prepare(
+  const operation = key === null ? null : env.DB.prepare(
     `INSERT INTO classification_operations(operation_key, link_id, payload_hash, status, response, created_at)
-     VALUES (?, ?, ?, 'applied', ?, ?)`
-  ).bind(key, outcome.response.id, payloadHash, JSON.stringify(outcome.body), new Date().toISOString());
+     SELECT ?, ?, ?, 'applied', ?, ?${outcome.operationGuard ? ` WHERE ${outcome.operationGuard.sql}` : ""}
+     RETURNING operation_key`
+  ).bind(key, linkID, payloadHash, JSON.stringify(outcome.body), new Date().toISOString(),
+    ...(outcome.operationGuard?.bindings ?? []));
+  const statements = operation === null ? outcome.statements : [...outcome.statements, operation];
   try {
-    const results = await env.DB.batch([...outcome.statements, operation]);
-    if (!results[outcome.guardIndex]?.results.length) return fail("lease_expired");
+    const results = await env.DB.batch(statements);
+    console.log("R2DEBUG", JSON.stringify(results.map((r) => ({ len: r.results.length, changes: (r.meta as { changes?: number })?.changes }))));
+    if (!results[outcome.guardIndex]?.results.length) {
+      // The guard did not hold, so every dependent insert was skipped by the
+      // same predicate; report the lost lease and leave no success record.
+      return fail("lease_expired");
+    }
+    if (operation !== null && !results[statements.length - 1]?.results.length) {
+      // The guarded write landed but the operation record did not, which means
+      // the predicate was false for it; treat it as a lost lease.
+      return fail("lease_expired");
+    }
   } catch (error) {
     // The only expected failure is the operation-key UNIQUE constraint from a
     // concurrent duplicate. Re-read it: an identical payload replays, a
-    // different payload is a conflict, and any other error is re-raised.
-    const existing = await readOperation(env, key);
-    if (existing && existing.payload_hash === payloadHash) return reply(JSON.parse(existing.response), 200);
+    // different payload or link is a conflict, and any other error is re-raised.
+    if (key === null) throw error;
+    const existing = await readOperation(env, key, linkID);
+    if (existing && existing.link_id === linkID && existing.payload_hash === payloadHash) {
+      return reply(JSON.parse(existing.response), 200);
+    }
     if (existing) return fail("operation_conflict");
     throw error;
   }
@@ -342,10 +360,18 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     const boundPolicy = isLegacy ? String(body.policy_version) : target.policy_version;
     const boundModel = isLegacy ? String(body.model) : target.requested_model;
     const boundTaxonomy = isLegacy ? taxonomy.version : target.taxonomy_version;
+    // The lease binds the exact evidence identity the inference will see: the
+    // content revision and the latest snapshot id/hash. A completion can then
+    // never re-stamp an old inference with a newer revision (R2-02).
     const job = await env.DB.prepare(`UPDATE classification_jobs SET status='processing',
       attempts=CASE WHEN target_generation<>? THEN 1 ELSE attempts+1 END,
       lease_token=?, lease_until=?, next_retry_at=NULL, error=NULL,
-      target_generation=?, spec_id=?, taxonomy_version=?, policy_version=?, requested_model=?, updated_at=?
+      target_generation=?, spec_id=?, taxonomy_version=?, policy_version=?, requested_model=?, updated_at=?,
+      content_revision=(SELECT content_revision FROM links WHERE id=classification_jobs.link_id),
+      evidence_snapshot_id=(SELECT id FROM evidence_snapshots WHERE link_id=classification_jobs.link_id
+        ORDER BY content_revision DESC, id DESC LIMIT 1),
+      evidence_hash=COALESCE((SELECT content_hash FROM evidence_snapshots WHERE link_id=classification_jobs.link_id
+        ORDER BY content_revision DESC, id DESC LIMIT 1),'')
       WHERE link_id=(SELECT j.link_id FROM classification_jobs j JOIN links l ON l.id=j.link_id
         WHERE COALESCE(l.original_text,'')<>'' AND l.curation_status<>'drop'
         AND (j.status<>'processing' OR j.lease_until<=?)
@@ -355,10 +381,11 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         ORDER BY COALESCE(j.updated_at,''), j.link_id LIMIT 1)
       AND (SELECT generation FROM classification_target_state WHERE id=1)=?
       RETURNING link_id AS id, revision, input_revision, attempts AS attempt, lease_token, lease_until,
-                target_generation, spec_id`)
+                target_generation, spec_id, content_revision, evidence_snapshot_id, evidence_hash`)
       .bind(target.generation, token, until,
         target.generation, target.spec_id, boundTaxonomy, boundPolicy, boundModel, now,
-        now, target.generation, now, now, target.generation).first<{ id: number; revision: number }>();
+        now, target.generation, now, now, target.generation)
+      .first<{ id: number; revision: number; content_revision: number; evidence_snapshot_id: number | null; evidence_hash: string }>();
     if (!job) return new Response(null, { status: 204, headers });
     const source = await env.DB.prepare(`SELECT l.url,l.note,l.original_text,l.related_links,
       CASE WHEN s.original_text=l.original_text AND s.url=l.url THEN COALESCE(json_extract(s.payload,'$.context_text'),'') ELSE '' END AS context_text
@@ -405,16 +432,19 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       return fail("invalid_classification");
     }
     const key = operationKey(body);
+    // The logical payload identity covers the link, the lease epoch and the
+    // full result, so a replayed key with a different payload is a conflict
+    // instead of a silent success (R2-12).
     const payloadHash = await sha256Hex(JSON.stringify({ id, revision: body.revision, result }));
-    const response = await idempotent(env, key, payloadHash, async () => {
+    const response = await idempotent(env, key, payloadHash, id, async () => {
       const target = await activeTarget(env);
       if (!target) return { failure: "configuration_error" as const };
       // Reject completions that no longer match the active target *before*
       // touching storage, so a stale worker cannot overwrite the projection.
-      const job = await env.DB.prepare(`SELECT status, target_generation, spec_id, taxonomy_version, revision, input_revision, lease_token, lease_until
+      const job = await env.DB.prepare(`SELECT status, target_generation, spec_id, taxonomy_version, revision, input_revision, lease_token, lease_until, content_revision, evidence_hash
         FROM classification_jobs WHERE link_id=?`).bind(id).first<{
           status: string; target_generation: number; spec_id: string; taxonomy_version: string; revision: number; input_revision: number;
-          lease_token: string | null; lease_until: string | null;
+          lease_token: string | null; lease_until: string | null; content_revision: number; evidence_hash: string;
         }>();
       if (!job) return { failure: "not_found" as const };
       if (job.status === "completed") return { failure: "already_completed" as const };
@@ -430,6 +460,15 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       if (body.input_revision !== undefined && Number(body.input_revision) !== job.input_revision) {
         return { failure: "input_changed" as const };
       }
+      // The consumer echoes the evidence identity it was leased against; a
+      // mismatch means the inference saw different material than the job
+      // records (R2-02).
+      if (body.content_revision !== undefined && Number(body.content_revision) !== job.content_revision) {
+        return { failure: "input_changed" as const };
+      }
+      if (text(body.evidence_hash, 128) && body.evidence_hash !== job.evidence_hash) {
+        return { failure: "input_changed" as const };
+      }
       if (job.lease_token !== body.lease_token || job.revision !== body.revision ||
         !job.lease_until || job.lease_until <= now) {
         return { failure: "lease_expired" as const };
@@ -437,25 +476,34 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       const link = await env.DB.prepare(`SELECT content_revision, personal_revision FROM links WHERE id=?`).bind(id)
         .first<{ content_revision: number; personal_revision: number }>();
       if (!link) return { failure: "not_found" as const };
+      // One predicate guards every dependent write. It repeats the lease, the
+      // bound input identity and the *current* target pointer, so a change
+      // between this preflight and the commit cannot produce a success record.
+      const guard: WriteGuard = {
+        sql: `EXISTS (SELECT 1 FROM classification_jobs WHERE link_id=? AND status='processing' AND lease_token=?
+            AND revision=? AND input_revision=? AND lease_until>? AND policy_version=? AND taxonomy_version=?
+            AND target_generation=? AND spec_id=?
+            AND content_revision=(SELECT content_revision FROM links WHERE id=classification_jobs.link_id))
+          AND (SELECT generation FROM classification_target_state WHERE id=1)=?`,
+        bindings: [id, String(body.lease_token), Number(body.revision), job.input_revision, now,
+          String(result.policy_version), job.taxonomy_version, target.generation, target.spec_id, target.generation]
+      };
       const statements: D1PreparedStatement[] = [
-        env.DB.prepare(`UPDATE links SET classification=? WHERE id=? AND EXISTS(
-          SELECT 1 FROM classification_jobs WHERE link_id=? AND status='processing' AND lease_token=?
-          AND revision=? AND input_revision=? AND lease_until>? AND policy_version=? AND taxonomy_version=?
-          AND target_generation=? AND spec_id=?) RETURNING id`)
-          .bind(JSON.stringify(classification), id, id, body.lease_token, body.revision, job.input_revision, now,
-            result.policy_version, job.taxonomy_version, target.generation, target.spec_id),
-        env.DB.prepare(`UPDATE classification_jobs SET status='completed',result=?,error=NULL,
-          lease_token=NULL,lease_until=NULL,updated_at=? WHERE link_id=? AND status='processing'
-          AND lease_token=? AND revision=? AND input_revision=? AND lease_until>? AND policy_version=? AND taxonomy_version=?
-          AND target_generation=? AND spec_id=? RETURNING link_id`)
-          .bind(JSON.stringify({ ...result, classification }), now, id, body.lease_token, body.revision,
-            job.input_revision, now, result.policy_version, job.taxonomy_version, target.generation, target.spec_id)
+        // The guarded writes run first: the predicate requires the job to still
+        // be processing, and the job completion below clears that state. All of
+        // them share one predicate inside one transaction, so either every
+        // dependent write lands or none of them does (R2-01).
+        env.DB.prepare(`UPDATE links SET classification=? WHERE id=? AND ${guard.sql} RETURNING id`)
+          .bind(JSON.stringify(classification), id, ...guard.bindings)
       ];
+      let operationGuard: { sql: string; bindings: Array<string | number | null> } | undefined;
       if (isV2 && automatic) {
         const createdAt = new Date().toISOString();
         const runKey = `${key ?? `complete-${id}-${body.revision}`}:run`;
         statements.push(runInsertStatement(env, {
-          linkId: id, contentRevision: link.content_revision, specId: String(result.spec_id),
+          // The run records the revision bound at claim time, never a newer one
+          // read at completion.
+          linkId: id, contentRevision: job.content_revision, specId: String(result.spec_id),
           specHash: String(result.spec_hash), targetGeneration: target.generation,
           requestedModel: text(result.requested_model, 200) ? result.requested_model : String(result.model),
           resolvedModel: String(result.model), policyVersion: String(result.policy_version),
@@ -464,16 +512,31 @@ export async function classificationRoute(request: Request, env: Env, path: stri
           attempt: Number.isSafeInteger(body.attempt) ? Number(body.attempt) : job.revision,
           operationKey: runKey, coverage: result.coverage === "partial" ? "partial" : "complete",
           evidenceCoverage: text(result.evidence_coverage, 40) ? result.evidence_coverage : "",
-          aliasDrift: result.alias_drift === true, createdAt
-        }));
+          aliasDrift: result.alias_drift === true, createdAt, payloadHash
+        }, guard));
         statements.push(decisionInsertStatement(env, {
-          linkId: id, runOperationKey: runKey, contentRevision: link.content_revision,
+          linkId: id, runOperationKey: runKey, contentRevision: job.content_revision,
           policyVersion: String(result.policy_version), policy: result.policy ?? {}, automatic,
-          operationKey: `${key ?? `complete-${id}-${body.revision}`}:decision`, createdAt
-        }));
+          operationKey: `${key ?? `complete-${id}-${body.revision}`}:decision`, createdAt, payloadHash
+        }, guard));
+        operationGuard = { sql: `EXISTS (SELECT 1 FROM classification_runs WHERE operation_key=?)`, bindings: [runKey] };
+      } else {
+        // A legacy completion has no run; the operation record is only written
+        // when the guarded job update actually landed.
+        operationGuard = {
+          sql: `EXISTS (SELECT 1 FROM classification_jobs WHERE link_id=? AND status='completed' AND revision=?)`,
+          bindings: [id, body.revision]
+        };
       }
-      return { statements, guardIndex: 0, response: { id }, body: { id, status: "completed" } };
+      statements.push(env.DB.prepare(`UPDATE classification_jobs SET status='completed',result=?,error=NULL,
+        lease_token=NULL,lease_until=NULL,updated_at=? WHERE link_id=? AND status='processing'
+        AND lease_token=? AND revision=? AND input_revision=? AND lease_until>? AND policy_version=? AND taxonomy_version=?
+        AND target_generation=? AND spec_id=? RETURNING link_id`)
+        .bind(JSON.stringify({ ...result, classification }), now, id, body.lease_token, body.revision,
+          job.input_revision, now, result.policy_version, job.taxonomy_version, target.generation, target.spec_id));
+      return { statements, guardIndex: 0, operationGuard, response: { id }, body: { id, status: "completed" } };
     });
+    // The derived projection converges immediately after the atomic commit;
     // The derived projection converges immediately after the atomic commit;
     // it is a cache, never a source of truth.
     if (response.status === 200) await rebuildProjection(env, id);
@@ -535,6 +598,27 @@ export async function refreshSource(env: Env, id: number): Promise<Response> {
     preserves: ["original_text", "translated_text", "summary", "images", "curation", "why", "classification"]
   });
 }
+
+// ackSourceRefresh consumes the one-shot refresh intent. It is called by the
+// processor after the fetch attempt, so a failed fetch cannot loop forever
+// while the old readable content and human data are kept (R2-06).
+export async function ackSourceRefresh(request: Request, env: Env, id: number): Promise<Response> {
+  const body = await bodyOf(request);
+  if (!body || !Number.isSafeInteger(body.epoch) || !["completed", "failed", "blocked"].includes(String(body.status))) {
+    return fail("invalid_source");
+  }
+  const epoch = Number(body.epoch);
+  const reason = text(body.reason, 500) ? body.reason : null;
+  const row = await env.DB.prepare(
+    `UPDATE links SET refresh_requested_at=NULL,
+       enrichment_error=CASE WHEN ?='completed' THEN enrichment_error ELSE ? END
+     WHERE id=? AND refresh_epoch=? RETURNING id`
+  ).bind(String(body.status), reason, id, epoch).first();
+  if (!row) return fail("not_found");
+  return reply({ id, status: body.status, epoch });
+}
+
+// (the evidence read by snapshot id lives in domain-routes; see latestSnapshot)
 
 export async function sourceRoute(request: Request, env: Env, id: number): Promise<Response> {
   if (request.method === "GET") {

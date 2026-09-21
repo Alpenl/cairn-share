@@ -171,11 +171,26 @@ it("makes run submission idempotent and returns structured answers and policy (F
   // answers must be an object, not a quoted JSON string.
   expect((listed.runs[0].answers as Record<string, unknown>).topic_llm).toEqual({ type: "noul", noul: 0.93 });
   expect((listed.runs[0].policy as Record<string, unknown>).version).toBe("jev-policy-v2");
-  const replay = await request(`v2/links/${id}/runs`, {
-    operation_key: "run-1", spec_id: "classify-v1", spec_hash: await storedSpecHash(), content_revision: 1,
-    target_generation: 0, policy_version: "jev-policy-v2", answers: { topic_llm: { type: "noul", noul: 0.93 } }
-  });
+  // A replay of the identical logical payload returns the stored run (R2-12).
+  const specHash = await storedSpecHash();
+  const runBody = {
+    operation_key: "run-1", spec_id: "classify-v1", spec_hash: specHash, content_revision: 1,
+    target_generation: 0, policy_version: "jev-policy-v2",
+    policy: { version: "jev-policy-v2", calibrated: false, topic_accept: 0.8, topic_reject: 0.2, choice_accept: 0.65, choice_margin: 0.15, max_display_topics: 3, max_effective_topics: 64 },
+    requested_model: "jev-latest", resolved_model: "jev-1.13.0",
+    answers: { topic_llm: { type: "noul", noul: 0.93 } }, usage: { input_tokens: 12, output_tokens: 4 }, coverage: "complete"
+  };
+  const replay = await request(`v2/links/${id}/runs`, runBody);
   expect((await replay.json() as { replayed: boolean }).replayed).toBe(true);
+  // The same key with a different payload is a conflict, not a silent success.
+  const conflicting = await request(`v2/links/${id}/runs`, { ...runBody, answers: { topic_llm: { type: "noul", noul: 0.1 } } });
+  expect(conflicting.status).toBe(409);
+  expect((await conflicting.json() as { error: string }).error).toBe("operation_conflict");
+  // The same key from another bookmark is a conflict too, never a replay of the
+  // other link's result.
+  const other = await createLink();
+  const crossLink = await request(`v2/links/${other}/runs`, runBody);
+  expect(crossLink.status).toBe(409);
   const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM classification_runs WHERE link_id = ?").bind(id).first<{ n: number }>();
   expect(count!.n).toBe(1);
 });
@@ -495,4 +510,131 @@ it("generates a proposal only from repeated human corrections and never applies 
   const applied = await request(`v2/taxonomy/proposals/${created[0].id}/apply`, {});
   expect(applied.status).toBe(409);
   expect((await applied.json() as { error: string }).error).toBe("requires_new_version");
+});
+
+// --- R2-01/R2-02/R2-12: transaction guard and write identity ----------------
+
+it("R2-01: a failed completion guard leaves no success run, decision or operation", async () => {
+  const id = await createLink();
+  const { default: taxonomy } = await import("../src/taxonomy.json");
+  await env.DB.prepare("UPDATE links SET original_text = 'source body' WHERE id = ?").bind(id).run();
+  await request("enrichment/classifications/target", {
+    spec_id: "classify-v1", spec_hash: await storedSpecHash(), taxonomy_version: taxonomy.version,
+    policy_version: "jev-policy-v2", requested_model: "jev-latest", protocol: "v2"
+  });
+  const caps = { protocol: "v2", spec_ids: ["classify-v1"], taxonomy_versions: [taxonomy.version], policy_versions: ["jev-policy-v2"], models: ["jev-latest"] };
+  const job = await (await request("enrichment/classifications/claim", caps)).json() as Record<string, unknown>;
+  // The source changes after the lease: the bound input identity no longer
+  // matches the link. The completion body deliberately omits input_revision and
+  // content_revision so the preflight passes and the in-transaction guard is
+  // what rejects it.
+  await env.DB.prepare("UPDATE links SET original_text = 'changed source body' WHERE id = ?").bind(id).run();
+  const completionBody = {
+    ...job, operation_key: `r2-01-${id}`,
+    result: {
+      model: "jev-1.13.0", requested_model: "jev-latest", policy_version: "jev-policy-v2",
+      spec_id: "classify-v1", spec_hash: await storedSpecHash(),
+      answers: { topic_llm: { type: "noul", noul: 0.9 } }, coverage: "complete",
+      automatic: { topics: ["llm"], content_functions: [], carriers: [], affordances: [], form: "", use: "", entities: [] },
+      classification: { topics: ["llm"], form: "method", use: "try", uncertainty: false,
+        taxonomy_version: taxonomy.version, why_suggestion: "", entities: [], discarded_tags: [] }
+    }
+  };
+  const first = await request(`enrichment/classifications/${id}/complete`, completionBody);
+  expect(first.status).toBe(409);
+  const replay = await request(`enrichment/classifications/${id}/complete`, completionBody);
+  expect(replay.status).toBe(409);
+  // No success history and no operation record exist.
+  for (const table of ["classification_runs", "classification_decisions", "classification_operations"]) {
+    const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE link_id = ?`).bind(id).first<{ n: number }>();
+    expect(row!.n, `${table} must stay empty`).toBe(0);
+  }
+  const link = await env.DB.prepare("SELECT classification FROM links WHERE id = ?").bind(id).first<{ classification: string | null }>();
+  expect(link!.classification).toBeNull();
+  // The input change re-arms the job instead of completing it; it is not a
+  // success and it holds no lease.
+  const jobRow = await env.DB.prepare("SELECT status, lease_token FROM classification_jobs WHERE link_id = ?").bind(id)
+    .first<{ status: string; lease_token: string | null }>();
+  expect(jobRow!.status).toBe("pending");
+  expect(jobRow!.lease_token).toBeNull();
+});
+
+it("R2-02: the claim binds the evidence identity and the run records it", async () => {
+  const id = await createLink();
+  const { default: taxonomy } = await import("../src/taxonomy.json");
+  await env.DB.prepare("UPDATE links SET original_text = 'source body' WHERE id = ?").bind(id).run();
+  await request("enrichment/classifications/target", {
+    spec_id: "classify-v1", spec_hash: await storedSpecHash(), taxonomy_version: taxonomy.version,
+    policy_version: "jev-policy-v2", requested_model: "jev-latest", protocol: "v2"
+  });
+  const caps = { protocol: "v2", spec_ids: ["classify-v1"], taxonomy_versions: [taxonomy.version], policy_versions: ["jev-policy-v2"], models: ["jev-latest"] };
+  const job = await (await request("enrichment/classifications/claim", caps)).json() as {
+    content_revision: number; evidence_hash: string; evidence_snapshot_id: number | null; lease_token: string; revision: number;
+  };
+  expect(job.content_revision).toBe(2); // create (1) + source update (2)
+  expect(job.evidence_hash).toBe("");
+  expect(job.evidence_snapshot_id).toBeNull();
+  const link = await env.DB.prepare("SELECT content_revision FROM links WHERE id = ?").bind(id).first<{ content_revision: number }>();
+  expect(job.content_revision).toBe(link!.content_revision);
+  // A completion that echoes a different content revision is rejected as input
+  // changed before it can be stored.
+  const completion = {
+    ...job, operation_key: `r2-02-${id}`, content_revision: 1,
+    result: {
+      model: "jev-1.13.0", requested_model: "jev-latest", policy_version: "jev-policy-v2",
+      spec_id: "classify-v1", spec_hash: await storedSpecHash(),
+      answers: { topic_llm: { type: "noul", noul: 0.9 } }, coverage: "complete",
+      automatic: { topics: ["llm"], content_functions: [], carriers: [], affordances: [], form: "", use: "", entities: [] },
+      classification: { topics: ["llm"], form: "method", use: "try", uncertainty: false,
+        taxonomy_version: taxonomy.version, why_suggestion: "", entities: [], discarded_tags: [] }
+    }
+  };
+  const rejected = await request(`enrichment/classifications/${id}/complete`, completion);
+  expect(rejected.status).toBe(409);
+  expect((await rejected.json() as { error: string }).error).toBe("input_changed");
+  // The valid completion records the bound revision, not a newer one.
+  const accepted = await request(`enrichment/classifications/${id}/complete`, { ...completion, content_revision: job.content_revision });
+  expect(accepted.status).toBe(200);
+  const run = await env.DB.prepare("SELECT content_revision FROM classification_runs WHERE link_id = ?").bind(id).first<{ content_revision: number }>();
+  expect(run!.content_revision).toBe(job.content_revision);
+});
+
+it("R2-12: the same operation key with a different payload or link conflicts", async () => {
+  const id = await createLink();
+  const other = await createLink();
+  const first = await request(`v2/links/${id}/overrides`, {
+    operation_key: "r2-12-override", field: "topics", term: "llm", action: "accept"
+  });
+  expect(first.status).toBe(200);
+  // Same key, different action on the same link.
+  const differentAction = await request(`v2/links/${id}/overrides`, {
+    operation_key: "r2-12-override", field: "topics", term: "llm", action: "reject"
+  });
+  expect(differentAction.status).toBe(409);
+  expect((await differentAction.json() as { error: string }).error).toBe("operation_conflict");
+  // Same key from another bookmark.
+  const crossLink = await request(`v2/links/${other}/overrides`, {
+    operation_key: "r2-12-override", field: "topics", term: "llm", action: "accept"
+  });
+  expect(crossLink.status).toBe(409);
+  const overrides = await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_overrides").first<{ n: number }>();
+  expect(overrides!.n).toBe(1);
+});
+
+it("R2-08: the entity success baseline appears in the effective view", async () => {
+  const id = await createLink();
+  await request(`v2/links/${id}/entity-state`, {
+    operation_key: `r2-08-${id}`, state: "completed_nonempty", entities: ["acme"], content_revision: 1
+  });
+  const view = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as {
+    effective: { entities: string[] }; projected: boolean;
+  };
+  expect(view.effective.entities).toEqual(["acme"]);
+  // A human reject removes it; a reset restores the entity baseline.
+  await request(`v2/links/${id}/entities`, { operation_key: `r2-08-r-${id}`, action: "reject", term: "acme" });
+  const rejected = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: { entities: string[] } };
+  expect(rejected.effective.entities).toEqual([]);
+  await request(`v2/links/${id}/entities`, { operation_key: `r2-08-x-${id}`, action: "reset", term: "acme" });
+  const restored = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: { entities: string[] } };
+  expect(restored.effective.entities).toEqual(["acme"]);
 });

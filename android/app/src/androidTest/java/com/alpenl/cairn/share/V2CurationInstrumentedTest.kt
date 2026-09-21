@@ -125,6 +125,7 @@ class V2CurationInstrumentedTest {
 
     @Test fun aConflictKeepsTheDraftAndOffersReapply() {
         val attempts = java.util.concurrent.atomic.AtomicInteger()
+        val bodies = java.util.Collections.synchronizedList(mutableListOf<JSONObject>())
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.requestUrl!!.encodedPath
@@ -134,10 +135,15 @@ class V2CurationInstrumentedTest {
                     path == "/api/bookmarks/4/v2-selection" -> response(selection(3))
                     path == "/api/v2-taxonomy" -> response(taxonomy())
                     path == "/api/bookmarks/4/v2-override" -> {
-                        attempts.incrementAndGet()
-                        MockResponse().setResponseCode(409)
-                            .setHeader("Content-Type", "application/json")
-                            .setBody(JSONObject("""{"error":"revision_conflict","revision":9}""").toString())
+                        val body = JSONObject(request.body.readUtf8())
+                        bodies.add(body)
+                        if (attempts.incrementAndGet() == 1) {
+                            MockResponse().setResponseCode(409)
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(JSONObject("""{"error":"revision_conflict","revision":9}""").toString())
+                        } else {
+                            response(JSONObject("""{"id":4,"field":"topics","term":"llm","action":"reject","revision":10,"replayed":false}"""))
+                        }
                     }
                     else -> response(JSONObject("""{"items":[],"counts":{}}"""))
                 }
@@ -153,6 +159,18 @@ class V2CurationInstrumentedTest {
             // The draft is preserved and an explicit re-apply is offered.
             compose.onNodeWithTag("v2_conflict_reapply").assertExists()
             compose.onNodeWithTag("v2_conflict_discard").assertExists()
+            compose.onNodeWithTag("v2_conflict_reapply").performClick()
+            compose.waitUntil(20_000) { bodies.size >= 2 }
+            // The re-apply replays the original logical action with the same
+            // operation key: the reject must not be rewritten into an accept and
+            // the retry must be the same logical commit (R2-05).
+            assertEquals("reject", bodies[1].getString("action"))
+            assertEquals("llm", bodies[1].getString("term"))
+            assertEquals(bodies[0].getString("operation_key"), bodies[1].getString("operation_key"))
+            assertEquals(9L, bodies[1].getLong("expected_revision"))
+            compose.waitUntil(20_000) {
+                runCatching { compose.onNodeWithTag("v2_conflict").assertDoesNotExist(); true }.getOrDefault(false)
+            }
         }
     }
 }

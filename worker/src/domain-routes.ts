@@ -35,7 +35,10 @@ export async function domainRoute(request: Request, env: Env, path: string): Pro
   let match = path.match(/^\/api\/v2\/links\/(\d+)\/evidence$/);
   if (match) {
     const id = Number(match[1]);
-    if (request.method === "GET") return latestSnapshot(env, id);
+    if (request.method === "GET") {
+      const snapshotID = new URL(request.url).searchParams.get("snapshot_id");
+      return latestSnapshot(env, id, snapshotID === null ? null : Number(snapshotID));
+    }
     if (request.method !== "POST") return fail("method_not_allowed", 405);
     return saveSnapshot(request, env, id);
   }
@@ -117,7 +120,9 @@ async function entitiesView(env: Env, id: number): Promise<Response> {
   const state = await env.DB.prepare(
     `SELECT state, content_revision, entities, updated_at FROM entity_states WHERE link_id = ?`
   ).bind(id).first<{ state: string; content_revision: number; entities: string; updated_at: string }>();
-  const { view, stale } = await computeEffective(env, id);
+  const { view } = await computeEffective(env, id);
+  const linkRevision = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
+    .first<{ content_revision: number }>();
   const overrides = await env.DB.prepare(
     `SELECT id, term, action, source, revision, created_at FROM curation_overrides WHERE link_id = ? AND field = 'entities' ORDER BY id`
   ).bind(id).all();
@@ -125,7 +130,9 @@ async function entitiesView(env: Env, id: number): Promise<Response> {
     id,
     state: state?.state ?? "not_run",
     state_content_revision: state?.content_revision ?? 0,
-    stale: state !== null && stale,
+    // Entity staleness is judged against the entity input revision, never
+    // against an unrelated classification decision (R2-08).
+    stale: state !== null && (linkRevision?.content_revision ?? 0) !== state.content_revision,
     updated_at: state?.updated_at ?? null,
     automatic: state ? parseJSON(state.entities, []) : [],
     entities: view.entities,
@@ -164,9 +171,12 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
     ? body.entities.filter((entry): entry is string => typeof entry === "string" && entry.length > 0 && entry.length <= 120)
     : [];
   if (entities.length > 50) return fail("invalid_entity_state");
-  const existing = await env.DB.prepare(`SELECT operation_key FROM entity_states WHERE operation_key = ?`).bind(operationKey)
-    .first();
-  if (existing) return reply({ id, replayed: true });
+  const existing = await env.DB.prepare(`SELECT link_id, content_hash FROM entity_states WHERE operation_key = ?`)
+    .bind(operationKey).first<{ link_id: number; content_hash: string }>();
+  if (existing) {
+    if (existing.link_id !== id) return fail("operation_conflict", 409);
+    return reply({ id, replayed: true });
+  }
   const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
     .first<{ content_revision: number }>();
   if (!link) return fail("not_found", 404);
@@ -224,9 +234,12 @@ async function createEvidenceRequest(request: Request, env: Env, id: number): Pr
     .first<{ content_revision: number }>();
   if (!link) return fail("not_found", 404);
   const dedupe = text(body.dedupe_key, 200) ? body.dedupe_key : `${id}:${body.scope}:${link.content_revision}`;
-  const existing = await env.DB.prepare(`SELECT id, status FROM evidence_requests WHERE dedupe_key = ?`).bind(dedupe)
-    .first<{ id: string; status: string }>();
-  if (existing) return reply({ id: existing.id, status: existing.status, replayed: true });
+  const existing = await env.DB.prepare(`SELECT id, link_id, status FROM evidence_requests WHERE dedupe_key = ?`).bind(dedupe)
+    .first<{ id: string; link_id: number; status: string }>();
+  if (existing) {
+    if (existing.link_id !== id) return fail("operation_conflict", 409);
+    return reply({ id: existing.id, status: existing.status, replayed: true });
+  }
   const requestID = crypto.randomUUID();
   const now = new Date().toISOString();
   await env.DB.prepare(
@@ -256,13 +269,21 @@ async function decideEvidenceRequest(request: Request, env: Env, requestID: stri
 
 // --- Evidence snapshots -----------------------------------------------------
 
-async function latestSnapshot(env: Env, id: number): Promise<Response> {
-  const row = await env.DB.prepare(
-    `SELECT s.id, s.content_revision, s.content_hash, s.payload, s.truncated, s.completeness, s.created_at,
+async function latestSnapshot(env: Env, id: number, snapshotID: number | null): Promise<Response> {
+  // A claim binds a specific snapshot id, so the consumer can read exactly the
+  // material it was leased against instead of the latest revision (R2-07).
+  const query = snapshotID === null
+    ? `SELECT s.id, s.content_revision, s.content_hash, s.payload, s.truncated, s.completeness, s.created_at,
             l.content_revision AS current_revision
      FROM evidence_snapshots s JOIN links l ON l.id = s.link_id
      WHERE s.link_id = ? ORDER BY s.content_revision DESC LIMIT 1`
-  ).bind(id).first<{ id: number; content_revision: number; content_hash: string; payload: string; truncated: number; completeness: string; created_at: string; current_revision: number }>();
+    : `SELECT s.id, s.content_revision, s.content_hash, s.payload, s.truncated, s.completeness, s.created_at,
+            l.content_revision AS current_revision
+     FROM evidence_snapshots s JOIN links l ON l.id = s.link_id
+     WHERE s.link_id = ? AND s.id = ?`;
+  const statement = env.DB.prepare(query);
+  const row = await (snapshotID === null ? statement.bind(id) : statement.bind(id, snapshotID))
+    .first<{ id: number; content_revision: number; content_hash: string; payload: string; truncated: number; completeness: string; created_at: string; current_revision: number }>();
   if (!row) return fail("not_found", 404);
   return reply({
     id: row.id, content_revision: row.content_revision, content_hash: row.content_hash,
@@ -419,9 +440,26 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
   if (body.policy !== undefined && (typeof body.policy !== "object" || body.policy === null || Array.isArray(body.policy))) {
     return fail("invalid_run");
   }
-  const existing = await env.DB.prepare(`SELECT id, coverage, status, created_at FROM classification_runs WHERE operation_key = ?`)
-    .bind(operationKey).first();
-  if (existing) return reply({ id, run: existing, replayed: true });
+  const payloadHash = await sha256Hex(canonicalJSON({
+    link_id: id, content_revision: body.content_revision, spec_id: body.spec_id, spec_hash: body.spec_hash,
+    target_generation: body.target_generation, policy_version: body.policy_version, answers: body.answers,
+    requested_model: body.requested_model ?? null, resolved_model: body.resolved_model ?? null,
+    coverage: body.coverage ?? "complete"
+  }));
+  const existing = await env.DB.prepare(`SELECT id, link_id, payload_hash, coverage, status, created_at FROM classification_runs WHERE operation_key = ?`)
+    .bind(operationKey).first<{ id: number; link_id: number; payload_hash: string; coverage: string; status: string; created_at: string }>();
+  if (existing) {
+    if (existing.link_id !== id || existing.payload_hash !== payloadHash) return fail("operation_conflict", 409);
+    return reply({ id, run: { id: existing.id, coverage: existing.coverage, status: existing.status, created_at: existing.created_at }, replayed: true });
+  }
+  const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
+    .first<{ content_revision: number }>();
+  if (!link) return fail("not_found", 404);
+  // A run must describe the current input revision; a stale run is refused
+  // rather than stored as if it were current (R2-02).
+  if (Number(body.content_revision) !== link.content_revision) {
+    return fail("run_stale", 409, { content_revision: link.content_revision });
+  }
   const spec = await env.DB.prepare(`SELECT spec_hash FROM question_specs WHERE spec_id = ?`).bind(body.spec_id)
     .first<{ spec_hash: string }>();
   if (!spec) return fail("unknown_spec", 409);
@@ -431,8 +469,8 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
   const row = await env.DB.prepare(
     `INSERT INTO classification_runs(link_id, content_revision, spec_id, spec_hash, target_generation, requested_model,
        resolved_model, policy_version, policy, answers, usage, attempt, operation_key, coverage, evidence_coverage,
-       alias_drift, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+       alias_drift, status, created_at, payload_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
   ).bind(id, body.content_revision, body.spec_id, body.spec_hash, body.target_generation,
     text(body.requested_model, 200) ? body.requested_model : "",
     text(body.resolved_model, 200) ? body.resolved_model : "",
@@ -440,8 +478,16 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
     Number.isSafeInteger(body.attempt) ? body.attempt : 1, operationKey, coverage,
     text(body.evidence_coverage, 40) ? body.evidence_coverage : "",
     body.alias_drift === true ? 1 : 0,
-    coverage === "complete" ? "succeeded" : "partial", now).first<{ id: number }>();
+    coverage === "complete" ? "succeeded" : "partial", now, payloadHash).first<{ id: number }>();
   return reply({ id, run: { id: row?.id, coverage, status: coverage === "complete" ? "succeeded" : "partial", created_at: now }, replayed: false });
+}
+
+// guardClause is the single in-transaction validity predicate shared by every
+// dependent write of one completion. If it does not hold, no success run,
+// decision, operation record or projection update is written at all (R2-01).
+export interface WriteGuard {
+  sql: string;
+  bindings: Array<string | number | null>;
 }
 
 // runInsertStatement is the statement form used inside an atomic completion so
@@ -450,34 +496,34 @@ export function runInsertStatement(env: Env, run: {
   linkId: number; contentRevision: number; specId: string; specHash: string; targetGeneration: number;
   requestedModel: string; resolvedModel: string; policyVersion: string; policy: unknown; answers: unknown;
   usage: unknown; attempt: number; operationKey: string; coverage: string; evidenceCoverage: string;
-  aliasDrift: boolean; createdAt: string;
-}): D1PreparedStatement {
+  aliasDrift: boolean; createdAt: string; payloadHash: string;
+}, guard: WriteGuard): D1PreparedStatement {
   return env.DB.prepare(
     `INSERT INTO classification_runs(link_id, content_revision, spec_id, spec_hash, target_generation, requested_model,
        resolved_model, policy_version, policy, answers, usage, attempt, operation_key, coverage, evidence_coverage,
-       alias_drift, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(operation_key) DO NOTHING`
+       alias_drift, status, created_at, payload_hash)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`
   ).bind(run.linkId, run.contentRevision, run.specId, run.specHash, run.targetGeneration, run.requestedModel,
     run.resolvedModel, run.policyVersion, canonicalJSON(run.policy), canonicalJSON(run.answers),
     canonicalJSON(run.usage), run.attempt, run.operationKey, run.coverage, run.evidenceCoverage,
-    run.aliasDrift ? 1 : 0, run.coverage === "complete" ? "succeeded" : "partial", run.createdAt);
+    run.aliasDrift ? 1 : 0, run.coverage === "complete" ? "succeeded" : "partial", run.createdAt,
+    run.payloadHash, ...guard.bindings);
 }
 
 export function decisionInsertStatement(env: Env, decision: {
   linkId: number; runOperationKey: string; contentRevision: number; policyVersion: string; policy: unknown;
-  automatic: AutomaticView; operationKey: string; createdAt: string;
-}): D1PreparedStatement {
+  automatic: AutomaticView; operationKey: string; createdAt: string; payloadHash: string;
+}, guard: WriteGuard): D1PreparedStatement {
   // The run is appended in the same batch, so its id is resolved by the
   // operation key rather than by a pre-read that a concurrent writer could
-  // invalidate.
+  // invalidate; the same guard proves the run actually landed.
   return env.DB.prepare(
-    `INSERT INTO classification_decisions(link_id, run_id, content_revision, policy_version, policy, automatic, operation_key, created_at)
-     SELECT ?, id, ?, ?, ?, ?, ?, ? FROM classification_runs WHERE operation_key = ?
-     ON CONFLICT(operation_key) DO NOTHING`
+    `INSERT INTO classification_decisions(link_id, run_id, content_revision, policy_version, policy, automatic, operation_key, created_at, payload_hash)
+     SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ? FROM classification_runs r WHERE r.operation_key = ? AND ${guard.sql}
+     RETURNING id`
   ).bind(decision.linkId, decision.contentRevision, decision.policyVersion,
     canonicalJSON(decision.policy), canonicalJSON(decision.automatic), decision.operationKey,
-    decision.createdAt, decision.runOperationKey);
+    decision.createdAt, decision.payloadHash, decision.runOperationKey, ...guard.bindings);
 }
 
 // --- Decisions --------------------------------------------------------------
@@ -496,9 +542,10 @@ async function latestDecision(env: Env, id: number): Promise<Response> {
 }
 
 // submitDecision records a pure recomputation over stored runs. The caller may
-// propose an automatic view, but the server validates it against the stored
-// runs and then derives the effective view from the stored overrides itself.
-// A caller-supplied `effective` is never trusted (F07).
+// propose an automatic view, but the server validates every referenced run,
+// re-derives the effective view from the stored overrides itself and writes the
+// decision under the same in-transaction guard as the rest of the domain
+// (R2-01/R2-02/R2-12). A caller-supplied `effective` is never trusted.
 async function submitDecision(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
@@ -514,39 +561,66 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
   const link = await env.DB.prepare(`SELECT content_revision, personal_revision FROM links WHERE id = ?`).bind(id)
     .first<{ content_revision: number; personal_revision: number }>();
   if (!link) return fail("not_found", 404);
+  // The caller's expected revision is validated on every path, including a new
+  // operation, not only when the key already exists.
+  if (body.expected_revision !== undefined && Number(body.expected_revision) !== link.personal_revision) {
+    return fail("revision_conflict", 409, { revision: link.personal_revision });
+  }
   // Every referenced run must exist, belong to this link, match the requested
   // spec/model and still correspond to the current content revision.
   const runs = await env.DB.prepare(
-    `SELECT id, content_revision, spec_id, spec_hash, requested_model, resolved_model, coverage, status, operation_key
+    `SELECT id, content_revision, spec_id, spec_hash, requested_model, resolved_model, coverage, status, operation_key, target_generation
      FROM classification_runs WHERE link_id = ? AND id IN (${runIDs.map(() => "?").join(",")})`
-  ).bind(id, ...runIDs).all<{ id: number; content_revision: number; spec_id: string; spec_hash: string; requested_model: string; resolved_model: string; coverage: string; status: string; operation_key: string }>();
+  ).bind(id, ...runIDs).all<{ id: number; content_revision: number; spec_id: string; spec_hash: string; requested_model: string; resolved_model: string; coverage: string; status: string; operation_key: string; target_generation: number }>();
   if (runs.results.length !== runIDs.length) return fail("unknown_run", 409, { found: runs.results.map((run) => run.id) });
   for (const run of runs.results) {
     if (run.status !== "succeeded") return fail("run_not_succeeded", 409, { run_id: run.id, status: run.status });
     if (run.content_revision !== link.content_revision) return fail("run_stale", 409, { run_id: run.id, content_revision: link.content_revision });
     if (text(body.spec_id, 64) && body.spec_id !== run.spec_id) return fail("run_spec_mismatch", 409, { run_id: run.id });
+    if (text(body.spec_hash, 128) && body.spec_hash !== run.spec_hash) return fail("run_spec_mismatch", 409, { run_id: run.id });
     if (text(body.requested_model, 200) && body.requested_model !== run.requested_model) return fail("run_model_mismatch", 409, { run_id: run.id });
   }
+  // All referenced runs must describe the same input identity: a decision may
+  // not silently mix runs from different specs, models or revisions.
+  const identity = new Set(runs.results.map((run) => `${run.spec_id}|${run.spec_hash}|${run.requested_model}|${run.content_revision}`));
+  if (identity.size > 1) return fail("run_identity_mismatch", 409, { identities: [...identity] });
   const operationKey = text(body.operation_key, 200) ? body.operation_key : `decision-${id}-${runIDs.join("-")}-${body.policy_version}`;
-  const existing = await env.DB.prepare(`SELECT id, operation_key FROM classification_decisions WHERE operation_key = ?`).bind(operationKey)
-    .first<{ id: number }>();
+  // The logical payload identity: same key, same link and same payload replays;
+  // anything else is a conflict.
+  const payloadHash = await sha256Hex(canonicalJSON({
+    link_id: id, run_ids: [...runIDs].sort((a, b) => a - b), policy_version: body.policy_version,
+    policy: body.policy ?? {}, automatic, spec_id: body.spec_id ?? null, requested_model: body.requested_model ?? null
+  }));
+  const existing = await env.DB.prepare(`SELECT id, link_id, payload_hash FROM classification_decisions WHERE operation_key = ?`)
+    .bind(operationKey).first<{ id: number; link_id: number; payload_hash: string }>();
   if (existing) {
-    if (body.expected_revision !== undefined && body.expected_revision !== link.personal_revision) {
-      return fail("revision_conflict", 409, { revision: link.personal_revision });
-    }
+    if (existing.link_id !== id || existing.payload_hash !== payloadHash) return fail("operation_conflict", 409);
     const view = await computeEffective(env, id);
     return reply({ id, run_ids: runIDs, policy_version: body.policy_version, decision_id: existing.id, effective: view.view, replayed: true });
   }
   const now = new Date().toISOString();
   const primaryRun = runs.results[0];
+  // The guard repeats the run validity and the current target pointer inside the
+  // transaction, so a change between the checks above and the commit cannot
+  // write a decision that no longer describes the current state.
+  const guard: WriteGuard = {
+    sql: `EXISTS (SELECT 1 FROM classification_runs r WHERE r.id=? AND r.link_id=? AND r.status='succeeded'
+        AND r.content_revision=(SELECT content_revision FROM links WHERE id=?)
+        AND r.spec_id=? AND r.spec_hash=? AND r.requested_model=?
+        AND r.target_generation=(SELECT generation FROM classification_target_state WHERE id=1))`,
+    bindings: [primaryRun.id, id, id, primaryRun.spec_id, primaryRun.spec_hash, primaryRun.requested_model]
+  };
   const statements = [
     decisionInsertStatement(env, {
       linkId: id, runOperationKey: primaryRun.operation_key ?? "", contentRevision: link.content_revision,
       policyVersion: body.policy_version, policy: body.policy ?? {}, automatic,
-      operationKey, createdAt: now
-    })
+      operationKey, createdAt: now, payloadHash
+    }, guard)
   ];
   const decision = await env.DB.batch(statements);
+  if (!decision[0].results.length) {
+    return fail("run_stale", 409, { content_revision: link.content_revision });
+  }
   const decisionID = Number((decision[0].results[0] as { id?: number } | undefined)?.id ?? 0);
   await persistEffective(env, id, link.personal_revision);
   const view = await computeEffective(env, id);
@@ -598,9 +672,15 @@ async function recordOverride(
   env: Env, id: number, field: OverrideField, action: OverrideAction, term: string,
   operationKey: string, expectedRevision: unknown
 ): Promise<Response> {
-  const existing = await env.DB.prepare(`SELECT id, field, term, action, revision FROM curation_overrides WHERE operation_key = ?`)
-    .bind(operationKey).first();
-  if (existing) return reply({ override: existing, replayed: true });
+  const payloadHash = await sha256Hex(canonicalJSON({ link_id: id, field, term, action }));
+  const existing = await env.DB.prepare(`SELECT id, link_id, field, term, action, revision, payload_hash FROM curation_overrides WHERE operation_key = ?`)
+    .bind(operationKey).first<{ id: number; link_id: number; field: string; term: string; action: string; revision: number; payload_hash: string }>();
+  if (existing) {
+    // Same key, same link and same logical action replays; anything else is a
+    // conflict, never another bookmark's override (R2-12).
+    if (existing.link_id !== id || existing.payload_hash !== payloadHash) return fail("operation_conflict", 409);
+    return reply({ override: existing, replayed: true });
+  }
   const link = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
     .first<{ personal_revision: number }>();
   if (!link) return fail("not_found", 404);
@@ -617,9 +697,9 @@ async function recordOverride(
   const guard = `SELECT 1 FROM links WHERE id = ? AND personal_revision = ?`;
   const results = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO curation_overrides(link_id, field, term, action, source, confirmed, revision, operation_key, created_at)
-       SELECT ?, ?, ?, ?, 'human', 1, ?, ?, ? WHERE EXISTS (${guard})`
-    ).bind(id, field, term, action, revision, operationKey, now, id, link.personal_revision),
+      `INSERT INTO curation_overrides(link_id, field, term, action, source, confirmed, revision, operation_key, created_at, payload_hash)
+       SELECT ?, ?, ?, ?, 'human', 1, ?, ?, ?, ? WHERE EXISTS (${guard})`
+    ).bind(id, field, term, action, revision, operationKey, now, payloadHash, id, link.personal_revision),
     env.DB.prepare(
       `INSERT INTO curation_events(link_id, kind, payload, revision, operation_key, created_at)
        SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (${guard})`
@@ -647,7 +727,17 @@ export async function persistSelectionOverrides(
   env: Env,
   id: number,
   desired: { topics: string[]; content_functions: string[]; carriers: string[]; affordances: string[]; form: string; use: string },
-  options: { source: "human" | "legacy_unknown"; operationPrefix: string; expectedRevision?: number }
+  options: {
+    source: "human" | "legacy_unknown"; operationPrefix: string; expectedRevision?: number;
+    // A whole-selection write (v1 replacement or a v2 PATCH) expresses the full
+    // desired set, so an automatic candidate that is not in it must be rejected
+    // explicitly; otherwise a later automatic result would silently reappear.
+    rejectAutomaticExtras?: boolean;
+    // resetFields restores the automatic value for exactly these fields. It is
+    // how the legacy `classification: null` ("restore automatic") is expressed
+    // without clearing hidden v2 dimensions or the user's intent.
+    resetFields?: OverrideField[];
+  }
 ): Promise<{ revision: number } | { conflict: number }> {
   const link = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
     .first<{ personal_revision: number }>();
@@ -656,19 +746,43 @@ export async function persistSelectionOverrides(
     return { conflict: link.personal_revision };
   }
   const { view } = await computeEffective(env, id);
+  const automatic = options.rejectAutomaticExtras ? await automaticOf(env, id) : null;
   const actions: Array<{ field: OverrideField; term: string; action: OverrideAction }> = [];
+  const resetSet = new Set(options.resetFields ?? []);
+  if (options.resetFields) {
+    for (const field of options.resetFields) {
+      actions.push({ field, term: "", action: "reset" });
+    }
+  }
   const multi: Array<[OverrideField, string[], string[]]> = [
     ["topics", view.topics, desired.topics],
     ["content_functions", view.content_functions, desired.content_functions],
     ["affordances", view.affordances, desired.affordances]
   ];
   for (const [field, current, wanted] of multi) {
+    if (resetSet.has(field)) continue;
+    const automaticTerms = automatic === null
+      ? []
+      : ((automatic[field as keyof AutomaticView] as string[] | undefined) ?? []);
     if (wanted.length === 0) {
-      if (current.length > 0 && !view.empty[field as keyof typeof view.empty]) actions.push({ field, term: "", action: "set_empty" });
+      if (current.length > 0 || automaticTerms.length > 0) {
+        if (!view.empty[field as keyof typeof view.empty]) actions.push({ field, term: "", action: "set_empty" });
+      }
       continue;
     }
-    for (const term of wanted) if (!current.includes(term)) actions.push({ field, term, action: "accept" });
-    for (const term of current) if (!wanted.includes(term)) actions.push({ field, term, action: "reject" });
+    if (automatic !== null) {
+      // A whole-selection write expresses the complete desired set. When it
+      // differs from the automatic baseline it is a replacement: the automatic
+      // candidates are cleared and only the chosen ones remain, until an
+      // explicit reset restores the automatic value.
+      const sameAsAutomatic = wanted.length === automaticTerms.length && wanted.every((term) => automaticTerms.includes(term));
+      if (!sameAsAutomatic) actions.push({ field, term: "", action: "set_empty" });
+    }
+    for (const term of wanted) actions.push({ field, term, action: "accept" });
+    for (const term of current) {
+      if (wanted.includes(term)) continue;
+      actions.push({ field, term, action: "reject" });
+    }
   }
   const single: Array<[OverrideField, string, string]> = [
     ["carriers", view.carriers[0] ?? "", desired.carriers[0] ?? ""],
@@ -676,6 +790,7 @@ export async function persistSelectionOverrides(
     ["use", view.use, desired.use]
   ];
   for (const [field, current, wanted] of single) {
+    if (resetSet.has(field)) continue;
     if (wanted === current) continue;
     if (wanted === "") actions.push({ field, term: "", action: "set_empty" });
     else actions.push({ field, term: wanted, action: "accept" });
@@ -726,34 +841,89 @@ async function loadOverrides(env: Env, id: number): Promise<Override[]> {
   }));
 }
 
-// legacyAutomatic recovers the pre-decision values so an old link still reads.
-// It is explicitly not a decision: the caller reports projected=false for it.
-async function legacyAutomatic(env: Env, id: number): Promise<AutomaticView> {
-  const selection = await env.DB.prepare(
-    `SELECT topics, content_functions, carriers, affordances, form, use FROM link_selections_v2 WHERE link_id = ?`
-  ).bind(id).first<Record<string, unknown>>();
-  if (selection) {
-    const list = (value: unknown): string[] => {
-      if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string");
-      return [];
-    };
-    return {
-      topics: list(parseJSON(String(selection.topics ?? "[]"), [])),
-      content_functions: list(parseJSON(String(selection.content_functions ?? "[]"), [])),
-      carriers: list(parseJSON(String(selection.carriers ?? "[]"), [])),
-      affordances: list(parseJSON(String(selection.affordances ?? "[]"), [])),
-      form: String(selection.form ?? ""), use: String(selection.use ?? ""), entities: []
-    };
-  }
-  const link = await env.DB.prepare(`SELECT curation, classification FROM links WHERE id = ?`).bind(id)
-    .first<{ curation: string | null; classification: string | null }>();
-  const legacy = parseJSON(link?.curation ?? link?.classification ?? "{}", {}) as Record<string, unknown>;
+// classificationAutomatic is the AI suggestion baseline: links.classification is
+// the generated result and never contains human edits. The previous code read
+// link_selections_v2 here, which is a projection of the *effective* (already
+// human-resolved) view; using it as the automatic baseline made `reset` unable
+// to restore the real automatic value (R2-03).
+async function classificationAutomatic(env: Env, id: number): Promise<AutomaticView> {
+  const link = await env.DB.prepare(`SELECT classification FROM links WHERE id = ?`).bind(id)
+    .first<{ classification: string | null }>();
+  const generated = parseJSON(link?.classification ?? "{}", {}) as Record<string, unknown>;
   const list = (value: unknown): string[] => Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
   return {
-    ...EMPTY_AUTOMATIC, topics: list(legacy.topics),
-    form: typeof legacy.form === "string" ? legacy.form : "",
-    use: typeof legacy.use === "string" ? legacy.use : ""
+    ...EMPTY_AUTOMATIC, topics: list(generated.topics),
+    form: typeof generated.form === "string" ? generated.form : "",
+    use: typeof generated.use === "string" ? generated.use : ""
   };
+}
+
+// automaticOf returns the current automatic baseline (decision automatic or the
+// stored AI classification) without applying any human override.
+export async function automaticOf(env: Env, id: number): Promise<AutomaticView> {
+  const decision = await env.DB.prepare(
+    `SELECT automatic FROM classification_decisions WHERE link_id = ? ORDER BY id DESC LIMIT 1`
+  ).bind(id).first<{ automatic: string }>();
+  const automatic = decision
+    ? (parseJSON(decision.automatic, EMPTY_AUTOMATIC) as AutomaticView)
+    : await classificationAutomatic(env, id);
+  automatic.entities = await entityAutomatic(env, id);
+  return automatic;
+}
+
+// entityAutomatic is the entity run's own success baseline. It is independent
+// of the classification decision, so an entity result is visible in the
+// effective view even before/without a decision (R2-08).
+async function entityAutomatic(env: Env, id: number): Promise<string[]> {
+  const row = await env.DB.prepare(`SELECT state, entities FROM entity_states WHERE link_id = ?`).bind(id)
+    .first<{ state: string; entities: string }>();
+  if (!row || (row.state !== "completed_nonempty" && row.state !== "completed_empty")) return [];
+  const parsed = parseJSON(row.entities, []) as unknown;
+  return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+// legacyCurationOverrides turns the pre-v2 human curation into an explicit,
+// lower-priority legacy_unknown override layer. The value is preserved as a
+// human decision instead of being silently overwritten by the first v2 AI
+// result, and it is never promoted to reliable gold (R2-03).
+async function legacyCurationOverrides(env: Env, id: number): Promise<Override[]> {
+  const link = await env.DB.prepare(`SELECT curation FROM links WHERE id = ?`).bind(id)
+    .first<{ curation: string | null }>();
+  const legacy = parseJSON(link?.curation ?? "null", null) as Record<string, unknown> | null;
+  if (!legacy) return [];
+  const overrides: Override[] = [];
+  const topics = Array.isArray(legacy.topics) ? legacy.topics.filter((entry): entry is string => typeof entry === "string") : [];
+  for (const term of topics) {
+    overrides.push({ field: "topics", term, action: "accept", source: "legacy_unknown", confirmed: false, revision: 0 });
+  }
+  if (typeof legacy.form === "string" && legacy.form !== "") {
+    overrides.push({ field: "form", term: legacy.form, action: "accept", source: "legacy_unknown", confirmed: false, revision: 0 });
+  }
+  if (typeof legacy.use === "string" && legacy.use !== "") {
+    overrides.push({ field: "use", term: legacy.use, action: "accept", source: "legacy_unknown", confirmed: false, revision: 0 });
+  }
+  return overrides;
+}
+
+// importLegacyCuration persists the synthesized legacy layer exactly once, so a
+// later projection write cannot lose it. It only runs when the link has no
+// persisted override history yet.
+async function importLegacyCuration(env: Env, id: number): Promise<void> {
+  const existing = await env.DB.prepare(`SELECT COUNT(*) AS n FROM curation_overrides WHERE link_id = ?`).bind(id)
+    .first<{ n: number }>();
+  if ((existing?.n ?? 0) > 0) return;
+  const legacy = await legacyCurationOverrides(env, id);
+  if (legacy.length === 0) return;
+  const now = new Date().toISOString();
+  const statements = legacy.map((override) => {
+    const key = `legacy:${id}:${override.field}:${override.term}`;
+    return env.DB.prepare(
+      `INSERT INTO curation_overrides(link_id, field, term, action, source, confirmed, revision, operation_key, created_at, payload_hash)
+       SELECT ?, ?, ?, ?, 'legacy_unknown', 0, 0, ?, ?, ? WHERE NOT EXISTS (
+         SELECT 1 FROM curation_overrides WHERE operation_key = ?)`
+    ).bind(id, override.field, override.term, override.action, key, now, key, key);
+  });
+  await env.DB.batch(statements);
 }
 
 // computeEffective derives the single effective view from the latest decision
@@ -764,18 +934,25 @@ export async function computeEffective(env: Env, id: number): Promise<{ view: Ef
     `SELECT content_revision, automatic FROM classification_decisions WHERE link_id = ? ORDER BY id DESC LIMIT 1`
   ).bind(id).first<{ content_revision: number; automatic: string }>();
   const overrides = await loadOverrides(env, id);
+  const legacy = await legacyCurationOverrides(env, id);
   const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
     .first<{ content_revision: number }>();
+  const entities = await entityAutomatic(env, id);
+  // Legacy overrides sort first (revision 0), so a persisted human action or a
+  // reset always wins over the imported historical value.
+  const layered = [...legacy, ...overrides];
   if (decision) {
     const automatic = parseJSON(decision.automatic, EMPTY_AUTOMATIC) as AutomaticView;
+    automatic.entities = entities;
     return {
-      view: effectiveView(automatic, overrides), projected: true,
+      view: effectiveView(automatic, layered), projected: true,
       stale: link !== null && decision.content_revision !== link.content_revision,
       contentRevision: link?.content_revision ?? decision.content_revision
     };
   }
-  const automatic = await legacyAutomatic(env, id);
-  return { view: effectiveView(automatic, overrides), projected: false, stale: false, contentRevision: link?.content_revision ?? 0 };
+  const automatic = await classificationAutomatic(env, id);
+  automatic.entities = entities;
+  return { view: effectiveView(automatic, layered), projected: false, stale: false, contentRevision: link?.content_revision ?? 0 };
 }
 
 // persistEffective writes the query projections (current_projections and
@@ -809,8 +986,29 @@ export function projectionStatements(env: Env, id: number, personalRevision: num
 }
 
 async function persistEffective(env: Env, id: number, personalRevision: number): Promise<void> {
+  // Preserve the pre-v2 human curation before it can be overwritten by a new
+  // automatic result.
+  await importLegacyCuration(env, id);
   const { view, projected, stale, contentRevision } = await computeEffective(env, id);
-  await env.DB.batch(projectionStatements(env, id, personalRevision, view, projected, contentRevision, stale));
+  const automatic = await automaticOf(env, id);
+  const statements = projectionStatements(env, id, personalRevision, view, projected, contentRevision, stale);
+  // links.curation is the v1 human projection. Old clients and the new view must
+  // read the same effective result, so the derived v1 values are written here
+  // (the AI suggestion in links.classification is never overwritten). When the
+  // effective v1 values equal the automatic baseline and no explicit empty was
+  // set, there is no active human curation and the column is cleared so old
+  // clients keep seeing "not reviewed".
+  const topicsProjection = view.topics.slice(0, 3);
+  const sameAsAutomatic = topicsProjection.length === automatic.topics.length &&
+    topicsProjection.every((term) => automatic.topics.includes(term)) &&
+    view.form === automatic.form && view.use === automatic.use;
+  const humanCuration = sameAsAutomatic && !view.empty.topics && !view.empty.form && !view.empty.use
+    ? null
+    : canonicalJSON({ topics: topicsProjection, form: view.form, use: view.use });
+  statements.push(env.DB.prepare(
+    `UPDATE links SET curation = ? WHERE id = ? AND personal_revision = ?`
+  ).bind(humanCuration, id, personalRevision));
+  await env.DB.batch(statements);
 }
 
 async function currentTaxonomyVersion(): Promise<string> {

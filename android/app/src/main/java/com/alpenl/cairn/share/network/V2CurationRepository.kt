@@ -99,7 +99,13 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         }
     }
 
-    /** Replays queued actions in order, stopping at the first conflict/failure. */
+    /**
+     * Replays queued actions in order. Only a server-confirmed [Applied] result
+     * removes an action: a still-offline [Queued] outcome, a conflict or a
+     * failure keeps the action, its operation key, its expected revision and
+     * the caller's draft, and stops the flush so nothing is reported as synced
+     * while it is not (R2-04).
+     */
     fun flush(actions: List<QueuedCurationAction>, apiToken: String): List<QueuedCurationAction> {
         var remaining = actions
         for (action in actions) {
@@ -109,7 +115,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
                 operationKey = action.operationKey,
             )
             when (result) {
-                is CurationSubmitResult.Applied, is CurationSubmitResult.Queued -> {
+                is CurationSubmitResult.Applied -> {
                     remaining = remaining.filterNot { it.operationKey == action.operationKey }
                 }
                 else -> return remaining

@@ -73,8 +73,12 @@ export function canonicalJSON(value: unknown): string {
   return "{" + entries.map(([key, entry]) => JSON.stringify(key) + ":" + canonicalJSON(entry)).join(",") + "}";
 }
 
+// The content hash covers the objective evidence only. `fetched_at` is
+// deliberately excluded: a re-fetch that returns identical bytes must not
+// create a new content revision, otherwise every refresh loop manufactures a
+// new version and re-queues classification forever (R2-07).
 export async function contentHash(snapshot: EvidenceSnapshot): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalJSON(snapshot)));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(objectivePayload(snapshot)));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
@@ -93,7 +97,6 @@ export function objectivePayload(snapshot: EvidenceSnapshot): string {
       id: block.id, role: block.role, text: block.text, url: block.url ?? "",
       relation: block.relation ?? "", acquired: block.acquired ?? ""
     })),
-    fetched_at: snapshot.fetched_at,
     retrieval: snapshot.retrieval,
     truncation: { truncated: snapshot.truncation.truncated, reason: snapshot.truncation.reason ?? "" }
   });

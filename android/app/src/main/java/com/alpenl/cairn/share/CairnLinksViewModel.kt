@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.ZoneId
@@ -168,6 +169,10 @@ internal class CairnLinksViewModel(
     private var retryPendingUploadsAgainWithSummary = false
     private var loadedPreferencesOnce = false
     private var automaticUploadRetryStarted = false
+    // The serial curation action queue. A pending action is only removed after
+    // the server confirms it (R2-04/R2-05).
+    private val pendingV2Actions = mutableListOf<PendingV2Action>()
+    private var v2Pumping = false
 
     init {
         observeSettings()
@@ -231,85 +236,122 @@ internal class CairnLinksViewModel(
 
     /**
      * Applies one field action. Each new logical action gets its own UUID; a
-     * queued retry keeps the original key. A conflict keeps the draft and
-     * exposes the server revision instead of discarding the edit.
+     * retry of the same action reuses it. Actions are serialised through a
+     * queue, so a rapid second edit is never dropped while the first is in
+     * flight (R2-05), and the local draft is updated with the same semantics the
+     * server uses.
      */
     fun applyV2Action(id: Int, field: String, term: String, action: String) {
         val token = uiState.preferences.apiToken
-        if (token.isBlank() || uiState.v2Busy.contains(id)) return
+        if (token.isBlank()) return
         val selection = uiState.v2Selections[id] ?: return
         val current = uiState.v2Drafts[id] ?: selection
         val draft = v2Repository.applyLocal(current, selection, field, term, action)
+        pendingV2Actions += PendingV2Action(
+            id = id, field = field, term = term, action = action,
+            operationKey = UUID.randomUUID().toString(),
+        )
         uiState = uiState.copy(
             v2Drafts = uiState.v2Drafts + (id to draft),
             v2Busy = uiState.v2Busy + id,
             v2Conflicts = uiState.v2Conflicts - id,
         )
+        pumpV2Actions()
+    }
+
+    private fun pumpV2Actions() {
+        if (v2Pumping || pendingV2Actions.isEmpty()) return
+        val token = uiState.preferences.apiToken
+        if (token.isBlank()) return
+        v2Pumping = true
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                v2Repository.submit(id, field, term, action, selection.revision, token)
+            while (pendingV2Actions.isNotEmpty()) {
+                val pending = pendingV2Actions.first()
+                val selection = uiState.v2Selections[pending.id] ?: break
+                val result = withContext(Dispatchers.IO) {
+                    v2Repository.submit(
+                        pending.id, pending.field, pending.term, pending.action,
+                        selection.revision, token, pending.operationKey,
+                    )
+                }
+                when (result) {
+                    is CurationSubmitResult.Applied -> {
+                        pendingV2Actions.removeAt(0)
+                        uiState = uiState.copy(
+                            v2Selections = uiState.v2Selections + (pending.id to selection.copy(revision = result.revision)),
+                            v2Busy = if (pendingV2Actions.any { it.id == pending.id }) uiState.v2Busy else uiState.v2Busy - pending.id,
+                        )
+                        if (pendingV2Actions.none { it.id == pending.id }) {
+                            // Reload the server state before dropping the draft,
+                            // so the UI never flickers back to a stale value.
+                            loadV2Selection(pending.id, force = true)
+                            uiState = uiState.copy(v2Drafts = uiState.v2Drafts - pending.id)
+                            uiState = uiState.copy(message = nextMessage("已保存多维整理。"))
+                        }
+                    }
+                    is CurationSubmitResult.Queued -> {
+                        // Still offline: persist the action with its identity and
+                        // keep the draft; nothing is reported as synced.
+                        curationActionStore.enqueue(
+                            QueuedCurationAction(
+                                linkId = pending.id, operationKey = result.operationKey, field = pending.field,
+                                term = pending.term, action = pending.action,
+                                expectedRevision = selection.revision, accountKey = curationAccountKey(),
+                            ),
+                        )
+                        pendingV2Actions.removeAt(0)
+                        uiState = uiState.copy(
+                            v2Busy = uiState.v2Busy - pending.id,
+                            message = nextMessage("网络不可用，已保存到离线队列，稍后会自动重试。"),
+                        )
+                    }
+                    is CurationSubmitResult.Conflict -> {
+                        // Keep the pending action and the draft; the user must
+                        // explicitly re-apply after adopting the server revision.
+                        uiState = uiState.copy(
+                            v2Busy = uiState.v2Busy - pending.id,
+                            v2Conflicts = uiState.v2Conflicts + (pending.id to result.revision),
+                            message = nextMessage("这条整理已被其他客户端更新。草稿已保留，可重新应用或放弃。"),
+                        )
+                        break
+                    }
+                    is CurationSubmitResult.Failed -> {
+                        uiState = uiState.copy(
+                            v2Busy = uiState.v2Busy - pending.id,
+                            message = nextMessage("保存失败：${failureLabel(result.kind)}"),
+                        )
+                        break
+                    }
+                }
             }
-            when (result) {
-                is CurationSubmitResult.Applied -> {
-                    uiState = uiState.copy(
-                        v2Selections = uiState.v2Selections + (id to selection.copy(revision = result.revision)),
-                        v2Busy = uiState.v2Busy - id,
-                    )
-                    // Drop the draft only once the server state has been
-                    // reloaded, so the UI never flickers back to a stale value.
-                    loadV2Selection(id, force = true)
-                    uiState = uiState.copy(v2Drafts = uiState.v2Drafts - id)
-                    uiState = uiState.copy(message = nextMessage("已保存多维整理。"))
-                }
-                is CurationSubmitResult.Queued -> {
-                    curationActionStore.enqueue(
-                        QueuedCurationAction(
-                            linkId = id, operationKey = result.operationKey, field = field, term = term,
-                            action = action, expectedRevision = selection.revision, accountKey = curationAccountKey(),
-                        ),
-                    )
-                    uiState = uiState.copy(v2Busy = uiState.v2Busy - id)
-                    uiState = uiState.copy(message = nextMessage("网络不可用，已保存到离线队列，稍后会自动重试。"))
-                }
-                is CurationSubmitResult.Conflict -> {
-                    uiState = uiState.copy(
-                        v2Busy = uiState.v2Busy - id,
-                        v2Conflicts = uiState.v2Conflicts + (id to result.revision),
-                    )
-                    uiState = uiState.copy(message = nextMessage("这条整理已被其他客户端更新。草稿已保留，可重新应用或放弃。"))
-                }
-                is CurationSubmitResult.Failed -> {
-                    uiState = uiState.copy(v2Busy = uiState.v2Busy - id)
-                    uiState = uiState.copy(message = nextMessage("保存失败：${failureLabel(result.kind)}"))
-                }
-            }
+            v2Pumping = false
         }
     }
 
-    /** Re-applies the preserved draft after adopting the server revision. */
+    /**
+     * Re-applies the preserved actions after adopting the server revision. It
+     * replays the original logical actions (rejects, set_empty, resets and
+     * multi-tag edits included) with their original operation keys instead of
+     * rewriting the draft into accepts (R2-05).
+     */
     fun reapplyV2Draft(id: Int) {
         val revision = uiState.v2Conflicts[id] ?: return
         val selection = uiState.v2Selections[id] ?: return
         uiState = uiState.copy(
             v2Selections = uiState.v2Selections + (id to selection.copy(revision = revision)),
             v2Conflicts = uiState.v2Conflicts - id,
+            v2Busy = uiState.v2Busy + id,
         )
-        val draft = uiState.v2Drafts[id] ?: return
-        // Re-submit the draft as a whole-selection write is not supported by the
-        // field API, so re-apply each dimension that differs from the server.
-        val fields = listOf("topics", "content_functions", "carriers", "affordances", "form", "use")
-        for (field in fields) {
-            val server = valueOf(selection, field)
-            val local = valueOf(draft, field)
-            if (server == local) continue
-            if (local.isEmpty()) applyV2Action(id, field, "", "set_empty")
-            else if (server.isEmpty()) applyV2Action(id, field, local.first(), "accept")
-            else applyV2Action(id, field, local.first(), "accept")
-        }
+        pumpV2Actions()
     }
 
     fun discardV2Draft(id: Int) {
-        uiState = uiState.copy(v2Drafts = uiState.v2Drafts - id, v2Conflicts = uiState.v2Conflicts - id)
+        pendingV2Actions.removeAll { it.id == id }
+        uiState = uiState.copy(
+            v2Drafts = uiState.v2Drafts - id,
+            v2Conflicts = uiState.v2Conflicts - id,
+            v2Busy = uiState.v2Busy - id,
+        )
         loadV2Selection(id, force = true)
     }
 
@@ -1219,3 +1261,12 @@ internal class CairnLinksViewModelFactory(
             currentVersionCode = currentVersionCode,
         ) as T
 }
+
+/** One queued logical curation action with its stable operation identity. */
+internal data class PendingV2Action(
+    val id: Int,
+    val field: String,
+    val term: String,
+    val action: String,
+    val operationKey: String,
+)

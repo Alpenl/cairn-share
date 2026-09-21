@@ -120,6 +120,74 @@ class V2CurationRepositoryTest {
     }
 
     @Test
+    fun `a still-offline flush keeps every action and its operation key (R2-04)`() {
+        val transport = FakeTransport(applyResults = mutableListOf(
+            V2Result.Failed(FailureKind.Network),
+        ))
+        val repository = V2CurationRepository(transport)
+        val queued = listOf(
+            QueuedCurationAction(7, "op-a", "topics", "llm", "reject", 9, "account"),
+            QueuedCurationAction(7, "op-b", "content_functions", "data", "accept", 9, "account"),
+        )
+        val remaining = repository.flush(queued, "token")
+        // Nothing was confirmed, so nothing may be reported as synced or
+        // removed from the durable queue.
+        assertEquals(queued, remaining)
+        assertEquals("op-a", transport.overrides.single().operationKey)
+        assertEquals("reject", transport.overrides.single().action)
+    }
+
+    @Test
+    fun `a timeout keeps the action and stops the flush (R2-04)`() {
+        val transport = FakeTransport(applyResults = mutableListOf(
+            V2Result.Failed(FailureKind.Timeout),
+        ))
+        val repository = V2CurationRepository(transport)
+        val queued = listOf(QueuedCurationAction(7, "op-a", "carriers", "single", "accept", 3, "account"))
+        assertEquals(queued, repository.flush(queued, "token"))
+    }
+
+    @Test
+    fun `a mixed flush removes only the confirmed action (R2-04)`() {
+        val transport = FakeTransport(applyResults = mutableListOf(
+            V2Result.Loaded(JSONObject().put("revision", 10)),
+            V2Result.Failed(FailureKind.Network),
+        ))
+        val repository = V2CurationRepository(transport)
+        val queued = listOf(
+            QueuedCurationAction(7, "op-a", "topics", "llm", "accept", 9, "account"),
+            QueuedCurationAction(7, "op-b", "topics", "eng", "accept", 10, "account"),
+        )
+        val remaining = repository.flush(queued, "token")
+        assertEquals(listOf("op-b"), remaining.map { it.operationKey })
+    }
+
+    @Test
+    fun `a multi-field draft keeps reject set_empty and single-value intent (R2-05)`() {
+        val repository = V2CurationRepository(FakeTransport())
+        val automatic = selection(
+            topics = listOf("llm", "eng"), contentFunctions = listOf("method"),
+            carriers = listOf("single"), form = "method", use = "try", revision = 3,
+        )
+        // The user deletes one topic, adds two functions, empties affordances and
+        // changes the single-valued carrier.
+        var draft = repository.applyLocal(automatic, automatic, "topics", "llm", "reject")
+        draft = repository.applyLocal(draft, automatic, "content_functions", "data", "accept")
+        draft = repository.applyLocal(draft, automatic, "content_functions", "case", "accept")
+        draft = repository.applyLocal(draft, automatic, "affordances", "", "set_empty")
+        draft = repository.applyLocal(draft, automatic, "carriers", "external_article", "accept")
+        assertEquals(listOf("eng"), draft.topics)
+        assertEquals(listOf("method", "data", "case"), draft.contentFunctions)
+        assertEquals(emptyList<String>(), draft.affordances)
+        assertEquals(listOf("external_article"), draft.carriers)
+        // The original automatic baseline is unchanged, so a later reset restores
+        // the real automatic values rather than the human-resolved cache.
+        assertEquals(listOf("llm", "eng"), automatic.topics)
+        val reset = repository.applyLocal(draft, automatic, "topics", "", "reset")
+        assertEquals(listOf("llm", "eng"), reset.topics)
+    }
+
+    @Test
     fun `a conflict exposes the server revision and keeps the caller's draft`() {
         val transport = FakeTransport(applyResults = mutableListOf(V2Result.Conflict(42)))
         val repository = V2CurationRepository(transport)
