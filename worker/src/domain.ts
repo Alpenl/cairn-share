@@ -2,7 +2,8 @@
 // overrides. Everything here is shared by the Worker route handlers and the
 // cross-language golden vectors, so the canonicalisation rules live in one
 // place and Go can be checked against the same bytes.
-import { record, taxonomy, validTerm } from "./curation";
+import { record, taxonomy } from "./curation";
+import { validV2Term } from "./taxonomy-v2";
 
 export const CONTENT_HASH_ALGORITHM = "sha256";
 export const MAX_BLOCK_TEXT = 100_000;
@@ -102,6 +103,7 @@ export interface QuestionSpec {
   spec_id: string;
   spec_version: number;
   questions: unknown;
+  score_enabled?: boolean;
   display_only?: boolean;
 }
 
@@ -114,12 +116,33 @@ export function validQuestionSpec(value: unknown): value is QuestionSpec {
   return canonicalJSON(value).length <= MAX_SPEC_BYTES;
 }
 
-export type OverrideField = "topic" | "form" | "use" | "entity";
+export type OverrideField =
+  | "topics" | "content_functions" | "carriers" | "affordances"
+  | "form" | "use" | "entities";
 export type OverrideAction = "accept" | "reject" | "set_empty" | "reset";
 
-export const OVERRIDE_FIELDS: OverrideField[] = ["topic", "form", "use", "entity"];
-export const TERM_FIELDS: OverrideField[] = ["topic", "form", "use"];
+// The v2 dimension vocabulary. The legacy singular names are still accepted
+// from old clients and normalized before they are stored, so one effective
+// view exists regardless of which client wrote last (F04).
+export const OVERRIDE_FIELDS: OverrideField[] = [
+  "topics", "content_functions", "carriers", "affordances", "form", "use", "entities"
+];
+export const TERM_FIELDS: OverrideField[] = [
+  "topics", "content_functions", "carriers", "affordances", "form", "use", "entities"
+];
 export const OVERRIDE_ACTIONS: OverrideAction[] = ["accept", "reject", "set_empty", "reset"];
+
+const FIELD_ALIASES: Record<string, OverrideField> = {
+  topic: "topics", content_function: "content_functions", carrier: "carriers",
+  affordance: "affordances", entity: "entities",
+  topics: "topics", content_functions: "content_functions", carriers: "carriers",
+  affordances: "affordances", form: "form", use: "use", entities: "entities"
+};
+
+export function normalizeField(value: unknown): OverrideField | null {
+  if (typeof value !== "string") return null;
+  return FIELD_ALIASES[value] ?? null;
+}
 
 // A field cannot be set empty or reset a specific term at the same time; the
 // distinction matters because `set []` is an explicit empty and `reset` returns
@@ -130,9 +153,12 @@ export function validOverride(field: OverrideField, action: OverrideAction, term
   if (action === "reset") return term === "" || TERM_FIELDS.includes(field);
   if (action === "accept" || action === "reject") {
     if (term === "") return false;
-    if (field === "topic") return validTerm("topics", term, false);
-    if (field === "form") return validTerm("forms", term, false);
-    if (field === "use") return validTerm("uses", term, false);
+    if (field === "topics") return validV2Term("topics", term);
+    if (field === "content_functions") return validV2Term("content_functions", term);
+    if (field === "carriers") return validV2Term("carriers", term);
+    if (field === "affordances") return validV2Term("affordances", term);
+    if (field === "form") return validV2Term("forms", term);
+    if (field === "use") return validV2Term("uses", term);
     return term.length > 0 && term.length <= 80;
   }
   return false;
@@ -147,61 +173,177 @@ export interface Override {
   revision: number;
 }
 
-// Resolve the effective tags for a field from automatic suggestions and
-// overrides. `reset` removes overrides of that field from scope; `reject`
-// survives a policy replay because it is applied after the automatic value.
-export function resolveField(automatic: string[], overrides: Override[]): { value: string[]; empty: boolean } {
-  let value = [...automatic];
-  let empty = false;
-  for (const override of overrides) {
-    switch (override.action) {
-      case "accept":
-        if (!value.includes(override.term)) value.push(override.term);
-        empty = false;
-        break;
-      case "reject":
-        value = value.filter((term) => term !== override.term);
-        break;
-      case "set_empty":
-        value = [];
-        empty = true;
-        break;
-      case "reset":
-        if (override.term === "") {
-          value = [...automatic];
-          empty = false;
-        }
-        break;
-    }
-  }
-  return { value, empty };
+// fieldState is the deterministic per-tag override state shared with the Go
+// resolver. Both sides are checked against the same golden vectors so a human
+// decision can never mean one thing in the UI and another in replay (F11).
+interface FieldState {
+  action: Map<string, OverrideAction>;
+  order: string[];
+  empty: boolean;
+  /** set_empty suppresses automatic values until a per-tag reset re-admits one. */
+  clearedAutomatic: boolean;
+  readmit: Set<string>;
 }
 
-export interface EffectiveView {
+function newFieldState(): FieldState {
+  return { action: new Map(), order: [], empty: false, clearedAutomatic: false, readmit: new Set() };
+}
+
+function applyOverride(state: FieldState, override: Override): void {
+  switch (override.action) {
+    case "accept":
+      if (!state.action.has(override.term)) state.order.push(override.term);
+      state.action.set(override.term, "accept");
+      state.empty = false;
+      break;
+    case "reject":
+      if (!state.action.has(override.term)) state.order.push(override.term);
+      state.action.set(override.term, "reject");
+      state.empty = false;
+      break;
+    case "set_empty":
+      state.action = new Map();
+      state.order = [];
+      state.empty = true;
+      state.clearedAutomatic = true;
+      state.readmit = new Set();
+      break;
+    case "reset":
+      if (override.term === "") {
+        state.action = new Map();
+        state.order = [];
+        state.empty = false;
+        state.clearedAutomatic = false;
+        state.readmit = new Set();
+      } else {
+        // A per-tag reset removes exactly that tag's override so the tag falls
+        // back to the automatic value.
+        state.action.delete(override.term);
+        state.order = state.order.filter((term) => term !== override.term);
+        if (state.clearedAutomatic) state.readmit.add(override.term);
+      }
+      break;
+  }
+}
+
+// resolveMulti resolves a multi-valued field: accepts accumulate, rejects are
+// removed and reset restores the automatic value.
+export function resolveMulti(automatic: string[], state: FieldState): string[] {
+  if (state.empty) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (term: string) => {
+    if (term === "" || seen.has(term)) return;
+    seen.add(term);
+    out.push(term);
+  };
+  for (const term of automatic) {
+    if (state.action.get(term) === "reject") continue;
+    if (state.clearedAutomatic && !state.readmit.has(term)) continue;
+    add(term);
+  }
+  for (const term of state.order) {
+    if (state.action.get(term) === "accept") add(term);
+  }
+  return out;
+}
+
+// resolveSingle resolves a single-valued field. An accept replaces both the
+// automatic value and a previous accept; a reject of the active value clears
+// it; a reset restores the automatic value (F11).
+export function resolveSingle(automatic: string, state: FieldState): string {
+  if (state.empty) return "";
+  let current = state.clearedAutomatic && !state.readmit.has(automatic) ? "" : automatic;
+  for (const term of state.order) {
+    const action = state.action.get(term);
+    if (action === "accept") current = term;
+    else if (action === "reject" && current === term) current = "";
+  }
+  if (automatic !== "" && state.action.get(automatic) === "reject" && current === automatic) current = "";
+  return current;
+}
+
+export interface AutomaticView {
   topics: string[];
+  content_functions: string[];
+  carriers: string[];
+  affordances: string[];
   form: string;
   use: string;
   entities: string[];
-  empty: { topics: boolean; form: boolean; use: boolean };
-  reviewed: boolean;
 }
 
-// Build the effective view. Human overrides win over automatic suggestions, and
-// legacy override groups are marked reviewed because their confirmation
-// behaviour is unknown rather than because they were confirmed.
-export function effectiveView(automatic: { topics: string[]; form: string; use: string; entities: string[] }, overrides: Override[]): EffectiveView {
-  const byField = (field: OverrideField) => overrides.filter((override) => override.field === field);
-  const topics = resolveField(automatic.topics, byField("topic"));
-  const form = resolveField(automatic.form ? [automatic.form] : [], byField("form"));
-  const use = resolveField(automatic.use ? [automatic.use] : [], byField("use"));
+export const EMPTY_AUTOMATIC: AutomaticView = {
+  topics: [], content_functions: [], carriers: [], affordances: [], form: "", use: "", entities: []
+};
+
+export interface EffectiveView extends AutomaticView {
+  empty: {
+    topics: boolean; content_functions: boolean; carriers: boolean;
+    affordances: boolean; form: boolean; use: boolean;
+  };
+  reviewed: boolean;
+  /** Latest human override revision the view incorporates. */
+  revision: number;
+}
+
+// Build the effective view from the automatic proposals of the latest decision
+// and the human override log. This is the only derivation of user-facing
+// values; list, detail, filters and exports all read its projection.
+export function effectiveView(automatic: AutomaticView, overrides: Override[]): EffectiveView {
+  const ordered = [...overrides].sort((left, right) => left.revision - right.revision);
+  const states: Record<string, FieldState> = {};
+  for (const field of OVERRIDE_FIELDS) states[field] = newFieldState();
+  for (const override of ordered) {
+    const state = states[override.field];
+    if (state) applyOverride(state, override);
+  }
+  const carrier = resolveSingle(automatic.carriers[0] ?? "", states.carriers);
   return {
-    topics: topics.value,
-    form: form.value[0] ?? "",
-    use: use.value[0] ?? "",
-    entities: resolveField(automatic.entities, byField("entity")).value,
-    empty: { topics: topics.empty, form: form.empty, use: use.empty },
-    reviewed: overrides.length > 0
+    topics: resolveMulti(automatic.topics, states.topics),
+    content_functions: resolveMulti(automatic.content_functions, states.content_functions),
+    // Carrier is single-valued: an accept replaces the automatic carrier.
+    carriers: carrier === "" ? [] : [carrier],
+    affordances: resolveMulti(automatic.affordances, states.affordances),
+    form: resolveSingle(automatic.form, states.form),
+    use: resolveSingle(automatic.use, states.use),
+    entities: resolveMulti(automatic.entities, states.entities),
+    empty: {
+      topics: states.topics.empty,
+      content_functions: states.content_functions.empty,
+      carriers: states.carriers.empty,
+      affordances: states.affordances.empty,
+      form: states.form.empty,
+      use: states.use.empty
+    },
+    reviewed: ordered.length > 0,
+    revision: ordered.length > 0 ? ordered[ordered.length - 1].revision : 0
   };
 }
 
 export function taxonomyVersion(): string { return taxonomy.version; }
+
+// semanticSpecHash is the cross-language identity of a question spec. It covers
+// exactly the provider-visible semantics (type, instructions, criteria) plus
+// the spec id, version and score flag — never internal handles or display
+// metadata. The Go classifier computes the same hash over the same projection
+// and both sides assert the same golden vectors, so a spec registered by the
+// consumer verifies against the Worker's stored copy (F14).
+export async function semanticSpecHash(spec: QuestionSpec): Promise<string> {
+  const questions = Array.isArray(spec.questions)
+    ? (spec.questions as Array<Record<string, unknown>>).map((question) => ({
+        id: question.id,
+        kind: question.kind,
+        instructions: question.instructions,
+        criteria: question.criteria
+      }))
+    : spec.questions;
+  const payload = {
+    spec_id: spec.spec_id,
+    spec_version: spec.spec_version,
+    score_enabled: spec.score_enabled === true,
+    questions
+  };
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalJSON(payload)));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}

@@ -1,5 +1,7 @@
 import type { Env } from "./index";
 import { record, taxonomy, validateClassification } from "./curation";
+import type { AutomaticView } from "./domain";
+import { decisionInsertStatement, rebuildProjection, runInsertStatement } from "./domain-routes";
 
 const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers });
@@ -21,6 +23,7 @@ export type ClassificationErrorCode =
   | "invalid_source"
   | "invalid_operation_key"
   | "configuration_error"
+  | "lease_conflict"
   | "not_found"
   | "method_not_allowed"
   | "invalid_json";
@@ -37,6 +40,7 @@ const ERROR_STATUS: Record<ClassificationErrorCode, number> = {
   invalid_source: 400,
   invalid_operation_key: 400,
   configuration_error: 500,
+  lease_conflict: 409,
   not_found: 404,
   method_not_allowed: 405,
   invalid_json: 400
@@ -72,18 +76,25 @@ async function readOperation(env: Env, key: string): Promise<{ link_id: number; 
 
 // Idempotent commit wrapper. If the key was already used with an identical
 // payload, replay the stored response. If it was used with a different payload,
-// refuse rather than silently overwriting. Otherwise run `commit` and persist
-// its response in the same D1 batch so a crash cannot record a result without
-// recording the operation.
+// refuse rather than silently overwriting. Otherwise the result, the job, the
+// run, the decision, the projection and the operation record are committed in
+// one D1 batch: a failure leaves no partial state, and a concurrent duplicate
+// loses the UNIQUE constraint and replays instead of double-writing (F10).
+type CommitOutcome<T extends { id: number }> = {
+  statements: D1PreparedStatement[];
+  // guardIndex is the statement whose zero-row result means the lease/guard was
+  // lost; the caller reports lease_expired rather than success.
+  guardIndex: number;
+  response: T;
+  body: unknown;
+};
+
 async function idempotent<T extends { id: number }>(
   env: Env,
   key: string | null,
   payloadHash: string,
-  commit: () => Promise<{ response: T; body: unknown } | { failure: ClassificationErrorCode }>
+  commit: () => Promise<CommitOutcome<T> | { failure: ClassificationErrorCode }>
 ): Promise<Response> {
-  // Legacy consumers do not send an operation key; they keep the pre-v2
-  // lease-guarded commit with no idempotency record. v2 consumers supply a key
-  // and get exactly-once completion semantics.
   if (key !== null) {
     const existing = await readOperation(env, key);
     if (existing) {
@@ -92,16 +103,62 @@ async function idempotent<T extends { id: number }>(
     }
   }
   const outcome = await commit();
-  if ("failure" in outcome) {
-    return fail(outcome.failure);
+  if ("failure" in outcome) return fail(outcome.failure);
+  if (!key) {
+    // Legacy consumers keep the pre-v2 lease-guarded commit with no
+    // idempotency record; the batch is still atomic.
+    const results = await env.DB.batch(outcome.statements);
+    if (!results[outcome.guardIndex]?.results.length) return fail("lease_expired");
+    return reply(outcome.body, 200);
   }
-  if (key) {
-    await env.DB.prepare(
-      `INSERT OR IGNORE INTO classification_operations(operation_key, link_id, payload_hash, status, response, created_at)
-       VALUES (?, ?, ?, 'applied', ?, ?)`
-    ).bind(key, outcome.response.id, payloadHash, JSON.stringify(outcome.body), new Date().toISOString()).run();
+  const operation = env.DB.prepare(
+    `INSERT INTO classification_operations(operation_key, link_id, payload_hash, status, response, created_at)
+     VALUES (?, ?, ?, 'applied', ?, ?)`
+  ).bind(key, outcome.response.id, payloadHash, JSON.stringify(outcome.body), new Date().toISOString());
+  try {
+    const results = await env.DB.batch([...outcome.statements, operation]);
+    if (!results[outcome.guardIndex]?.results.length) return fail("lease_expired");
+  } catch (error) {
+    // The only expected failure is the operation-key UNIQUE constraint from a
+    // concurrent duplicate. Re-read it: an identical payload replays, a
+    // different payload is a conflict, and any other error is re-raised.
+    const existing = await readOperation(env, key);
+    if (existing && existing.payload_hash === payloadHash) return reply(JSON.parse(existing.response), 200);
+    if (existing) return fail("operation_conflict");
+    throw error;
   }
   return reply(outcome.body, 200);
+}
+
+// automaticView validates the pure decision's per-dimension proposals that the
+// v2 consumer computed. The server never treats this as the effective view: it
+// stores it as the automatic baseline and re-applies the stored human
+// overrides deterministically (F07).
+function automaticView(value: unknown): AutomaticView | null {
+  if (!record(value)) return null;
+  const list = (entry: unknown, max: number): string[] | null => {
+    if (entry === undefined) return [];
+    if (!Array.isArray(entry) || entry.length > max) return null;
+    return entry.every((item) => typeof item === "string" && item.length > 0 && item.length <= 80) ? entry as string[] : null;
+  };
+  const topics = list(value.topics, 64);
+  const contentFunctions = list(value.content_functions, 8);
+  const carriers = list(value.carriers, 1);
+  const affordances = list(value.affordances, 8);
+  const entities = list(value.entities, 10);
+  if (!topics || !contentFunctions || !carriers || !affordances || !entities) return null;
+  return {
+    topics, content_functions: contentFunctions, carriers, affordances, entities,
+    form: typeof value.form === "string" && value.form.length <= 40 ? value.form : "",
+    use: typeof value.use === "string" && value.use.length <= 40 ? value.use : ""
+  };
+}
+
+// v2ResultShape reports whether a completion carries the multidimensional
+// records. A legacy consumer sends only the v1 projection and is still
+// accepted; a v2 consumer sends the immutable identity and the automatic view.
+function v2ResultShape(result: Record<string, unknown>): boolean {
+  return result.spec_id !== undefined || result.automatic !== undefined || result.spec_hash !== undefined;
 }
 
 type Target = {
@@ -269,6 +326,22 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     // consumer announced a different policy; that was the version-competition
     // loop this batch removes. Jobs bound to an older generation are migrated
     // to the active target with a fresh attempt budget.
+    //
+    // Every v2 bound value comes from the authoritative target row, never from
+    // the consumer's claim body. A v2 consumer sends plural `policy_versions`
+    // and `models` capability arrays; reading the legacy singular fields from
+    // that body used to store the literal string "undefined" and made the
+    // completion match zero rows. The legacy protocol keeps the pre-v2 contract
+    // (the consumer announces the policy/model it was compiled with) because
+    // generation 0 exists exactly for those consumers.
+    //
+    // The subquery in the WHERE clause makes the read and the write one atomic
+    // boundary: if the target pointer moved between activeTarget() and this
+    // UPDATE, no job is claimed.
+    const isLegacy = target.protocol === "legacy";
+    const boundPolicy = isLegacy ? String(body.policy_version) : target.policy_version;
+    const boundModel = isLegacy ? String(body.model) : target.requested_model;
+    const boundTaxonomy = isLegacy ? taxonomy.version : target.taxonomy_version;
     const job = await env.DB.prepare(`UPDATE classification_jobs SET status='processing',
       attempts=CASE WHEN target_generation<>? THEN 1 ELSE attempts+1 END,
       lease_token=?, lease_until=?, next_retry_at=NULL, error=NULL,
@@ -280,11 +353,12 @@ export async function classificationRoute(request: Request, env: Env, path: stri
           OR (j.attempts<5 AND (j.status='pending' OR (j.status='failed' AND j.next_retry_at<=?)
             OR (j.status='processing' AND j.lease_until<=?))))
         ORDER BY COALESCE(j.updated_at,''), j.link_id LIMIT 1)
+      AND (SELECT generation FROM classification_target_state WHERE id=1)=?
       RETURNING link_id AS id, revision, input_revision, attempts AS attempt, lease_token, lease_until,
                 target_generation, spec_id`)
       .bind(target.generation, token, until,
-        target.generation, target.spec_id, taxonomy.version, String(body.policy_version), String(body.model), now,
-        now, target.generation, now, now).first<{ id: number; revision: number }>();
+        target.generation, target.spec_id, boundTaxonomy, boundPolicy, boundModel, now,
+        now, target.generation, now, now, target.generation).first<{ id: number; revision: number }>();
     if (!job) return new Response(null, { status: 204, headers });
     const source = await env.DB.prepare(`SELECT l.url,l.note,l.original_text,
       CASE WHEN s.original_text=l.original_text AND s.url=l.url THEN COALESCE(json_extract(s.payload,'$.context_text'),'') ELSE '' END AS context_text
@@ -317,9 +391,16 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     if (!classification || !text(result.model, 200) || !text(result.policy_version, 100) || !record(result.answers)) {
       return fail("invalid_classification");
     }
+    // A v2 completion must carry its immutable identity and the typed answers,
+    // because those are what the replayable run is built from.
+    const isV2 = v2ResultShape(result);
+    const automatic = isV2 ? automaticView(result.automatic) : null;
+    if (isV2 && (!text(result.spec_id, 64) || !text(result.spec_hash, 128) || automatic === null)) {
+      return fail("invalid_classification");
+    }
     const key = operationKey(body);
     const payloadHash = await sha256Hex(JSON.stringify({ id, revision: body.revision, result }));
-    return idempotent(env, key, payloadHash, async () => {
+    const response = await idempotent(env, key, payloadHash, async () => {
       const target = await activeTarget(env);
       if (!target) return { failure: "configuration_error" as const };
       // Reject completions that no longer match the active target *before*
@@ -347,7 +428,10 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         !job.lease_until || job.lease_until <= now) {
         return { failure: "lease_expired" as const };
       }
-      const results = await env.DB.batch([
+      const link = await env.DB.prepare(`SELECT content_revision, personal_revision FROM links WHERE id=?`).bind(id)
+        .first<{ content_revision: number; personal_revision: number }>();
+      if (!link) return { failure: "not_found" as const };
+      const statements: D1PreparedStatement[] = [
         env.DB.prepare(`UPDATE links SET classification=? WHERE id=? AND EXISTS(
           SELECT 1 FROM classification_jobs WHERE link_id=? AND status='processing' AND lease_token=?
           AND revision=? AND input_revision=? AND lease_until>? AND policy_version=? AND taxonomy_version=?
@@ -360,10 +444,34 @@ export async function classificationRoute(request: Request, env: Env, path: stri
           AND target_generation=? AND spec_id=? RETURNING link_id`)
           .bind(JSON.stringify({ ...result, classification }), now, id, body.lease_token, body.revision,
             job.input_revision, now, result.policy_version, job.taxonomy_version, target.generation, target.spec_id)
-      ]);
-      if (!results[0].results.length) return { failure: "lease_expired" as const };
-      return { response: { id }, body: { id, status: "completed" } };
+      ];
+      if (isV2 && automatic) {
+        const createdAt = new Date().toISOString();
+        const runKey = `${key ?? `complete-${id}-${body.revision}`}:run`;
+        statements.push(runInsertStatement(env, {
+          linkId: id, contentRevision: link.content_revision, specId: String(result.spec_id),
+          specHash: String(result.spec_hash), targetGeneration: target.generation,
+          requestedModel: text(result.requested_model, 200) ? result.requested_model : String(result.model),
+          resolvedModel: String(result.model), policyVersion: String(result.policy_version),
+          policy: result.policy ?? {}, answers: result.answers,
+          usage: result.usage ?? { missing: true },
+          attempt: Number.isSafeInteger(body.attempt) ? Number(body.attempt) : job.revision,
+          operationKey: runKey, coverage: result.coverage === "partial" ? "partial" : "complete",
+          evidenceCoverage: text(result.evidence_coverage, 40) ? result.evidence_coverage : "",
+          aliasDrift: result.alias_drift === true, createdAt
+        }));
+        statements.push(decisionInsertStatement(env, {
+          linkId: id, runOperationKey: runKey, contentRevision: link.content_revision,
+          policyVersion: String(result.policy_version), policy: result.policy ?? {}, automatic,
+          operationKey: `${key ?? `complete-${id}-${body.revision}`}:decision`, createdAt
+        }));
+      }
+      return { statements, guardIndex: 0, response: { id }, body: { id, status: "completed" } };
     });
+    // The derived projection converges immediately after the atomic commit;
+    // it is a cache, never a source of truth.
+    if (response.status === 200) await rebuildProjection(env, id);
+    return response;
   }
   if (match[2] === "fail") {
     if (!text(body.error, 1800)) return fail("invalid_classification");
@@ -395,6 +503,31 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     return row ? reply({ id, status }) : fail("lease_expired");
   }
   return fail("not_found");
+}
+
+// refreshSource explicitly re-arms the *retrieval* queue for a link. It is
+// deliberately different from a classification retry and from a policy replay:
+// it schedules a bounded fetch, keeps the old readable content and all human
+// curation until a new source actually arrives, and does not call a model
+// itself (F13).
+export async function refreshSource(env: Env, id: number): Promise<Response> {
+  const link = await env.DB.prepare(`SELECT id, content_revision, enrichment_status FROM links WHERE id = ?`).bind(id)
+    .first<{ id: number; content_revision: number; enrichment_status: string }>();
+  if (!link) return fail("not_found");
+  if (link.enrichment_status === "processing") {
+    // Never preempt an active retrieval lease; the caller can retry later.
+    return fail("lease_conflict");
+  }
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE links SET enrichment_status='pending', enrichment_attempts=0, enrichment_next_retry_at=NULL,
+       enrichment_lease_token=NULL, enrichment_lease_until=NULL, enrichment_error=NULL, enrichment_updated_at=?
+     WHERE id=? AND enrichment_status<>'processing'`
+  ).bind(now, id).run();
+  return reply({
+    id, status: "pending", action: "refresh_source", content_revision: link.content_revision,
+    preserves: ["original_text", "translated_text", "summary", "images", "curation", "why", "classification"]
+  });
 }
 
 export async function sourceRoute(request: Request, env: Env, id: number): Promise<Response> {

@@ -1,4 +1,5 @@
 import type { Env } from "./index";
+import { computeEffective, persistSelectionOverrides } from "./domain-routes";
 import {
   applyV1Write, findTerm, proposalImpact, projectV1, taxonomyV2, validateTaxonomy, validateV2Selection,
   type TaxonomyProposal, type V2Selection
@@ -84,63 +85,36 @@ export async function taxonomyV2Route(request: Request, env: Env, path: string):
   return fail("not_found", 404);
 }
 
+// getSelection reads the same effective view that the field-level override API
+// derives. There is exactly one source of truth (decision + override log);
+// link_selections_v2 is a query projection of it, never a parallel truth (F04).
 async function getSelection(env: Env, id: number): Promise<Response> {
-  const link = await env.DB.prepare(`SELECT personal_revision, curation, classification, why, curation_status FROM links WHERE id = ?`).bind(id)
-    .first<{ personal_revision: number; curation: string | null; classification: string | null; why: string | null; curation_status: string | null }>();
+  const link = await env.DB.prepare(`SELECT personal_revision, why, curation_status FROM links WHERE id = ?`).bind(id)
+    .first<{ personal_revision: number; why: string | null; curation_status: string | null }>();
   if (!link) return fail("not_found", 404);
-  const row = await env.DB.prepare(
-    `SELECT taxonomy_version, definition_version, topics, content_functions, carriers, affordances, form, use, provenance, revised_at
-     FROM link_selections_v2 WHERE link_id = ?`).bind(id).first<Record<string, unknown>>();
-  if (!row) {
-    // Fall back to the v1 projection so an old link still reads.
-    const legacy = JSON.parse(link.curation ?? link.classification ?? "{}") as Partial<V2Selection>;
-    return reply({
-      id, selection: { ...EMPTY_SELECTION, topics: legacy.topics ?? [], form: legacy.form ?? "", use: legacy.use ?? "" },
-      revision: link.personal_revision, v1_only: true, why: link.why, curation_status: link.curation_status
-    });
-  }
+  const { view, projected, stale } = await computeEffective(env, id);
+  const selection: V2Selection = {
+    topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
+    affordances: view.affordances, form: view.form, use: view.use
+  };
   return reply({
-    id,
-    revision: link.personal_revision,
-    selection: {
-      topics: parseList(row.topics), content_functions: parseList(row.content_functions),
-      carriers: parseList(row.carriers), affordances: parseList(row.affordances),
-      form: String(row.form ?? ""), use: String(row.use ?? "")
-    },
-    taxonomy_version: row.taxonomy_version, definition_version: row.definition_version,
-    provenance: JSON.parse(String(row.provenance ?? "{}")), revised_at: row.revised_at,
-    v1_projection: projectV1({
-      topics: parseList(row.topics), content_functions: parseList(row.content_functions),
-      carriers: parseList(row.carriers), affordances: parseList(row.affordances),
-      form: String(row.form ?? ""), use: String(row.use ?? "")
-    })
+    id, revision: link.personal_revision, selection,
+    taxonomy_version: taxonomyV2().version, definition_version: taxonomyV2().definition_version,
+    provenance: { source: projected ? "decision" : "legacy", overrides: view.reviewed, revision: view.revision, stale },
+    v1_only: !projected,
+    v1_projection: projectV1(selection),
+    empty: view.empty, why: link.why, curation_status: link.curation_status
   });
 }
 
+// loadSelection reads the effective view. It exists for the v1 compatibility
+// path, which needs the hidden v2 dimensions before applying a bounded write.
 async function loadSelection(env: Env, id: number): Promise<V2Selection> {
-  const row = await env.DB.prepare(
-    `SELECT topics, content_functions, carriers, affordances, form, use FROM link_selections_v2 WHERE link_id = ?`).bind(id).first<Record<string, unknown>>();
-  if (!row) return { ...EMPTY_SELECTION };
+  const { view } = await computeEffective(env, id);
   return {
-    topics: parseList(row.topics), content_functions: parseList(row.content_functions),
-    carriers: parseList(row.carriers), affordances: parseList(row.affordances),
-    form: String(row.form ?? ""), use: String(row.use ?? "")
+    topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
+    affordances: view.affordances, form: view.form, use: view.use
   };
-}
-
-async function persistSelection(env: Env, id: number, selection: V2Selection, provenance: Record<string, unknown>): Promise<void> {
-  const vocabulary = taxonomyV2();
-  await env.DB.prepare(
-    `INSERT INTO link_selections_v2(link_id, taxonomy_version, definition_version, topics, content_functions, carriers, affordances, form, use, provenance, revised_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(link_id) DO UPDATE SET taxonomy_version=excluded.taxonomy_version, definition_version=excluded.definition_version,
-       topics=excluded.topics, content_functions=excluded.content_functions, carriers=excluded.carriers,
-       affordances=excluded.affordances, form=excluded.form, use=excluded.use,
-       provenance=excluded.provenance, revised_at=excluded.revised_at`
-  ).bind(id, vocabulary.version, vocabulary.definition_version,
-    JSON.stringify(selection.topics), JSON.stringify(selection.content_functions),
-    JSON.stringify(selection.carriers), JSON.stringify(selection.affordances),
-    selection.form, selection.use, JSON.stringify(provenance), new Date().toISOString()).run();
 }
 
 async function patchSelection(request: Request, env: Env, id: number): Promise<Response> {
@@ -159,8 +133,20 @@ async function patchSelection(request: Request, env: Env, id: number): Promise<R
   };
   const validated = validateV2Selection(candidate);
   if (!validated) return fail("invalid_selection");
-  await persistSelection(env, id, validated, { source: "human", action: "patch_v2" });
-  return reply({ id, selection: validated, v1_projection: projectV1(validated) });
+  // The write is recorded as field-level human overrides and the effective view
+  // is rebuilt from them, so a later read (or a second client) sees exactly
+  // what this write meant.
+  const result = await persistSelectionOverrides(env, id, validated, {
+    source: "human", operationPrefix: typeof body.operation_key === "string" ? body.operation_key : `patch-${id}-${Date.now()}`,
+    expectedRevision: Number.isSafeInteger(body.expected_revision) ? Number(body.expected_revision) : undefined
+  });
+  if ("conflict" in result) return fail("revision_conflict", 409, { revision: result.conflict });
+  const { view } = await computeEffective(env, id);
+  const selection: V2Selection = {
+    topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
+    affordances: view.affordances, form: view.form, use: view.use
+  };
+  return reply({ id, revision: result.revision, selection, v1_projection: projectV1(selection) });
 }
 
 // A v1 write can only express topics<=3 plus form/use. It must not clear the
@@ -169,7 +155,7 @@ async function patchSelection(request: Request, env: Env, id: number): Promise<R
 async function patchSelectionV1(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
-  if (Object.keys(body).some((key) => !["topics", "form", "use"].includes(key))) return fail("invalid_v1_selection");
+  if (Object.keys(body).some((key) => !["topics", "form", "use", "operation_key"].includes(key))) return fail("invalid_v1_selection");
   const link = await env.DB.prepare(`SELECT id FROM links WHERE id = ?`).bind(id).first<{ id: number }>();
   if (!link) return fail("not_found", 404);
   const existing = await loadSelection(env, id);
@@ -190,8 +176,11 @@ async function patchSelectionV1(request: Request, env: Env, id: number): Promise
   const { selection } = applyV1Write(existing, payload);
   const validated = validateV2Selection(selection);
   if (!validated) return fail("invalid_v1_selection");
-  await persistSelection(env, id, validated, { source: "legacy_v1", action: "patch_v1" });
-  return reply({ id, v1_projection: projectV1(validated), preserved_hidden: true });
+  const result = await persistSelectionOverrides(env, id, validated, {
+    source: "legacy_unknown", operationPrefix: typeof body.operation_key === "string" ? body.operation_key : `patch-v1-${id}-${Date.now()}`
+  });
+  if ("conflict" in result) return fail("revision_conflict", 409, { revision: result.conflict });
+  return reply({ id, revision: result.revision, v1_projection: projectV1(validated), preserved_hidden: true });
 }
 
 // --- Taxonomy proposals -----------------------------------------------------

@@ -182,6 +182,63 @@ it("only hands v2 jobs to a matching consumer and migrates stale generations", a
   expect(job.spec_id).toBe("classify-v2");
 });
 
+it("binds a v2 claim to the server target and completes it (F02 regression)", async () => {
+  const { id, source } = await setup();
+  const target = {
+    spec_id: "classify-v1",
+    spec_hash: "sha256:go-spec",
+    taxonomy_version: taxonomy.version,
+    policy_version: "jev-policy-v2",
+    requested_model: "jev-latest",
+    protocol: "v2"
+  };
+  expect((await switchTarget(target)).status).toBe(200);
+  const caps = {
+    protocol: "v2",
+    spec_ids: ["classify-v1"],
+    taxonomy_versions: [taxonomy.version],
+    policy_versions: ["jev-policy-v2"],
+    models: ["jev-latest"]
+  };
+  const response = await request("enrichment/classifications/claim", caps);
+  expect(response.status).toBe(200);
+  const job = await response.json() as { id: number; lease_token: string; revision: number; target_generation: number; spec_id: string; original_text: string };
+  expect(job.id).toBe(id);
+  expect(job.target_generation).toBe(1);
+  expect(job.spec_id).toBe("classify-v1");
+  expect(job.original_text).toBe(source.original_text);
+  // No column may contain the literal "undefined": the old code read singular
+  // policy_version/model fields out of the v2 plural capability body.
+  const bound = await env.DB.prepare(
+    "SELECT taxonomy_version, policy_version, requested_model, spec_id FROM classification_jobs WHERE link_id=?"
+  ).bind(id).first<any>();
+  expect(bound).toEqual({
+    taxonomy_version: taxonomy.version,
+    policy_version: "jev-policy-v2",
+    requested_model: "jev-latest",
+    spec_id: "classify-v1"
+  });
+  const body = {
+    ...job,
+    result: {
+      model: "jev-latest", policy_version: "jev-policy-v2",
+      answers: { topic_llm: { type: "noul", noul: 0.93 } },
+      usage: { input_tokens: 12, output_tokens: 4 },
+      classification: { topics: ["llm"], form: "method", use: "try", uncertainty: false,
+        taxonomy_version: taxonomy.version, why_suggestion: "", entities: [], discarded_tags: [] }
+    }
+  };
+  const complete = await request(`enrichment/classifications/${id}/complete`, body);
+  expect(complete.status).toBe(200);
+  const row = await env.DB.prepare("SELECT classification, original_text FROM links WHERE id=?").bind(id).first<any>();
+  expect(JSON.parse(row.classification).topics).toEqual(["llm"]);
+  expect(row.original_text).toBe(source.original_text);
+  const jobs = await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first<any>();
+  expect(jobs.status).toBe("completed");
+  // The queue stays empty afterwards: the completed v2 job is not re-armed.
+  expect((await request("enrichment/classifications/claim", caps)).status).toBe(204);
+});
+
 it("guards completion against a target switch (no stale overwrite)", async () => {
   const { id } = await setup();
   const job = await claim();

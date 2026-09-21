@@ -1,5 +1,5 @@
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
-import { classificationRoute, sourceRoute } from "./classification";
+import { classificationRoute, refreshSource, sourceRoute } from "./classification";
 import { domainRoute } from "./domain-routes";
 import { taxonomyV2Route } from "./taxonomy-routes";
 
@@ -279,9 +279,14 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   }
 
   const sourceMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/source$/);
-  if (sourceMatch || path.startsWith("/api/enrichment/classifications/")) {
+  const refreshMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/refresh-source$/);
+  if (sourceMatch || refreshMatch || path.startsWith("/api/enrichment/classifications/")) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
+    if (refreshMatch) {
+      if (request.method !== "POST") return error("method_not_allowed", 405);
+      return refreshSource(env, Number(refreshMatch[1]));
+    }
     return sourceMatch ? sourceRoute(request, env, Number(sourceMatch[1])) : classificationRoute(request, env, path);
   }
 
