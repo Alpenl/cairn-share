@@ -166,3 +166,21 @@ it("validates a partial v2 selection against the vocabulary", () => {
   expect(validateV2Selection({ topics: ["llm"], form: "method", use: "try" })).toBeNull();
   expect(validateV2Selection({ topics: ["llm"], content_functions: ["method"], carriers: [], affordances: ["practice"], form: "method", use: "try" })).not.toBeNull();
 });
+
+// --- B05-T01 mapping --------------------------------------------------------
+
+it("maps every legacy term explicitly without inventing v2 equivalents", async () => {
+  const { V1_V2_MAPPING, validateMapping } = await import("../src/taxonomy-mapping");
+  expect(validateMapping()).toEqual([]);
+  const uncertain = V1_V2_MAPPING.filter((entry) => entry.status === "uncertain");
+  expect(uncertain.map((entry) => `${entry.legacy.dimension}:${entry.legacy.id}`).sort())
+    .toEqual(["forms:longform", "uses:contra"]);
+  // Every legacy dimension term is covered exactly once.
+  const covered = new Set(V1_V2_MAPPING.map((entry) => `${entry.legacy.dimension}:${entry.legacy.id}`));
+  expect(covered.size).toBe(V1_V2_MAPPING.length);
+  const response = await request("v2/taxonomy/mapping", undefined, "GET");
+  expect(response.status).toBe(200);
+  const payload = await response.json() as { entries: unknown[]; problems: string[] };
+  expect(payload.problems).toEqual([]);
+  expect(payload.entries.length).toBe(V1_V2_MAPPING.length);
+});

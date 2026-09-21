@@ -283,6 +283,11 @@ internal fun CairnLinksApp(
                     onToggleLearned = viewModel::toggleLearned,
                     onLoadTaxonomy = viewModel::loadTaxonomy,
                     onSaveCuration = { update, onSuccess -> viewModel.saveCuration(id, update, onSuccess) },
+                    onLoadV2 = viewModel::loadV2Selection,
+                    onV2Action = { field, term, action -> viewModel.applyV2Action(id, field, term, action) },
+                    onV2Reapply = { viewModel.reapplyV2Draft(id) },
+                    onV2Discard = { viewModel.discardV2Draft(id) },
+                    onFlushV2 = viewModel::flushV2Queue,
                     onDelete = { viewModel.deleteLink(id) { navController.popBackStack() } },
                 )
             }
@@ -874,6 +879,11 @@ private fun DetailScreen(
     onToggleLearned: (SavedLink) -> Unit,
     onLoadTaxonomy: () -> Unit,
     onSaveCuration: (CurationUpdate, () -> Unit) -> Unit,
+    onLoadV2: (Int, Boolean) -> Unit,
+    onV2Action: (String, String, String) -> Unit,
+    onV2Reapply: () -> Unit,
+    onV2Discard: () -> Unit,
+    onFlushV2: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val link = state.links.firstOrNull { it.id == id }
@@ -883,7 +893,10 @@ private fun DetailScreen(
     val enrichment = link?.enrichment
     val readingText = if (showOriginal || enrichment?.translatedText.isNullOrBlank()) enrichment?.originalText.orEmpty() else enrichment?.translatedText.orEmpty()
     val paragraphs = remember(readingText) { readingText.split(Regex("\\n+")).map { it.trim() }.filter { it.isNotEmpty() } }
-    LaunchedEffect(id) { onEnsureLink(id) }
+    LaunchedEffect(id) {
+        onEnsureLink(id)
+        onLoadV2(id, false)
+    }
 
     ScreenColumn {
         DetailTopBar(
@@ -945,6 +958,31 @@ private fun DetailScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Text(enrichment.statusLabel(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             BookmarkCuration(id, enrichment, state.taxonomy, id in state.busyIds, onLoadTaxonomy, onSaveCuration)
+                            MultidimensionalCurationSection(
+                                linkId = id,
+                                taxonomy = state.taxonomy,
+                                selection = state.v2Selections[id],
+                                draft = state.v2Drafts[id],
+                                conflictRevision = state.v2Conflicts[id],
+                                busy = id in state.v2Busy,
+                                queuedCount = state.v2Queued[id] ?: 0,
+                                available = state.v2Available,
+                                onLoadTaxonomy = onLoadTaxonomy,
+                                onAction = onV2Action,
+                                onReapply = onV2Reapply,
+                                onDiscard = onV2Discard,
+                                onFlush = onFlushV2,
+                                onExport = {
+                                    onCopy(
+                                        v2ExportMarkdown(
+                                            link = link,
+                                            selection = state.v2Drafts[id] ?: state.v2Selections[id],
+                                            taxonomy = state.taxonomy,
+                                            entityState = enrichment.entityState,
+                                        ),
+                                    )
+                                },
+                            )
                             LinkDetailSecondary(link)
                         }
                     }

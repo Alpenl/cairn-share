@@ -16,8 +16,13 @@ import com.alpenl.cairn.share.network.LinkGetResult
 import com.alpenl.cairn.share.network.LinksApiClient
 import com.alpenl.cairn.share.network.BookmarkTaxonomy
 import com.alpenl.cairn.share.network.BookmarkFilters
+import com.alpenl.cairn.share.network.CurationSubmitResult
 import com.alpenl.cairn.share.network.CurationUpdate
+import com.alpenl.cairn.share.network.MultidimensionalSelection
+import com.alpenl.cairn.share.network.QueuedCurationAction
 import com.alpenl.cairn.share.network.TaxonomyResult
+import com.alpenl.cairn.share.network.V2CurationRepository
+import com.alpenl.cairn.share.network.V2Result
 import com.alpenl.cairn.share.network.retainLoadedContent
 import com.alpenl.cairn.share.network.LinkMutationResult
 import com.alpenl.cairn.share.network.LinkPageResult
@@ -28,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.DayOfWeek
@@ -64,6 +70,15 @@ internal data class CairnLinksUiState(
     val retryingUploads: Boolean = false,
     val updateState: AppUpdateState = AppUpdateState.Hidden,
     val apiDebug: ApiDebugUiState = ApiDebugUiState(),
+    // The effective multidimensional view per link, its local draft (which
+    // always wins over a server refresh), the last conflict revision and the
+    // offline queue size. A draft is never silently discarded.
+    val v2Selections: Map<Int, MultidimensionalSelection> = emptyMap(),
+    val v2Drafts: Map<Int, MultidimensionalSelection> = emptyMap(),
+    val v2Conflicts: Map<Int, Long> = emptyMap(),
+    val v2Busy: Set<Int> = emptySet(),
+    val v2Queued: Map<Int, Int> = emptyMap(),
+    val v2Available: Boolean = true,
     val message: UiMessage? = null,
 )
 
@@ -126,6 +141,8 @@ internal class CairnLinksViewModel(
     private val settingsStore: SharePreferencesStore,
     private val pendingUploadStore: PendingUploadStore,
     private val apiDebugClient: ApiDebugClient,
+    private val v2Repository: V2CurationRepository,
+    private val curationActionStore: CurationActionStore,
     apiBaseUrl: String,
     releasesApiUrl: String,
     currentVersionName: String,
@@ -153,7 +170,166 @@ internal class CairnLinksViewModel(
     init {
         observeSettings()
         observePendingUploads()
+        observeCurationActions()
         checkForUpdates()
+    }
+
+    // --- Multidimensional curation (B07) -------------------------------------
+
+    private fun observeCurationActions() {
+        viewModelScope.launch {
+            curationActionStore.actions.catch { emit(emptyList()) }.collect { actions ->
+                val queued = actions.groupingBy { it.linkId }.eachCount()
+                uiState = uiState.copy(v2Queued = queued)
+            }
+        }
+    }
+
+    private fun curationAccountKey(): String =
+        accountKeyFor(uiState.apiBaseUrl, uiState.preferences.apiToken)
+
+    /**
+     * Loads the effective view. A local draft or a queued action is never
+     * overwritten by a refresh, so a poll cannot discard an unsaved edit.
+     */
+    fun loadV2Selection(id: Int, force: Boolean = false) {
+        val token = uiState.preferences.apiToken
+        if (token.isBlank()) return
+        if (!force && (uiState.v2Drafts.containsKey(id) || (uiState.v2Queued[id] ?: 0) > 0)) return
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { v2Repository.load(id, token) }
+            when (result) {
+                is V2Result.Loaded -> uiState = uiState.copy(
+                    v2Selections = uiState.v2Selections + (id to result.value),
+                    v2Available = true,
+                )
+                V2Result.Unsupported -> uiState = uiState.copy(v2Available = false)
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * Applies one field action. Each new logical action gets its own UUID; a
+     * queued retry keeps the original key. A conflict keeps the draft and
+     * exposes the server revision instead of discarding the edit.
+     */
+    fun applyV2Action(id: Int, field: String, term: String, action: String) {
+        val token = uiState.preferences.apiToken
+        if (token.isBlank() || uiState.v2Busy.contains(id)) return
+        val selection = uiState.v2Selections[id] ?: return
+        val current = uiState.v2Drafts[id] ?: selection
+        val draft = v2Repository.applyLocal(current, selection, field, term, action)
+        uiState = uiState.copy(
+            v2Drafts = uiState.v2Drafts + (id to draft),
+            v2Busy = uiState.v2Busy + id,
+            v2Conflicts = uiState.v2Conflicts - id,
+        )
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                v2Repository.submit(id, field, term, action, selection.revision, token)
+            }
+            when (result) {
+                is CurationSubmitResult.Applied -> {
+                    uiState = uiState.copy(
+                        v2Selections = uiState.v2Selections + (id to selection.copy(revision = result.revision)),
+                        v2Busy = uiState.v2Busy - id,
+                    )
+                    // Drop the draft only once the server state has been
+                    // reloaded, so the UI never flickers back to a stale value.
+                    loadV2Selection(id, force = true)
+                    uiState = uiState.copy(v2Drafts = uiState.v2Drafts - id)
+                    uiState = uiState.copy(message = nextMessage("已保存多维整理。"))
+                }
+                is CurationSubmitResult.Queued -> {
+                    curationActionStore.enqueue(
+                        QueuedCurationAction(
+                            linkId = id, operationKey = result.operationKey, field = field, term = term,
+                            action = action, expectedRevision = selection.revision, accountKey = curationAccountKey(),
+                        ),
+                    )
+                    uiState = uiState.copy(v2Busy = uiState.v2Busy - id)
+                    uiState = uiState.copy(message = nextMessage("网络不可用，已保存到离线队列，稍后会自动重试。"))
+                }
+                is CurationSubmitResult.Conflict -> {
+                    uiState = uiState.copy(
+                        v2Busy = uiState.v2Busy - id,
+                        v2Conflicts = uiState.v2Conflicts + (id to result.revision),
+                    )
+                    uiState = uiState.copy(message = nextMessage("这条整理已被其他客户端更新。草稿已保留，可重新应用或放弃。"))
+                }
+                is CurationSubmitResult.Failed -> {
+                    uiState = uiState.copy(v2Busy = uiState.v2Busy - id)
+                    uiState = uiState.copy(message = nextMessage("保存失败：${failureLabel(result.kind)}"))
+                }
+            }
+        }
+    }
+
+    /** Re-applies the preserved draft after adopting the server revision. */
+    fun reapplyV2Draft(id: Int) {
+        val revision = uiState.v2Conflicts[id] ?: return
+        val selection = uiState.v2Selections[id] ?: return
+        uiState = uiState.copy(
+            v2Selections = uiState.v2Selections + (id to selection.copy(revision = revision)),
+            v2Conflicts = uiState.v2Conflicts - id,
+        )
+        val draft = uiState.v2Drafts[id] ?: return
+        // Re-submit the draft as a whole-selection write is not supported by the
+        // field API, so re-apply each dimension that differs from the server.
+        val fields = listOf("topics", "content_functions", "carriers", "affordances", "form", "use")
+        for (field in fields) {
+            val server = valueOf(selection, field)
+            val local = valueOf(draft, field)
+            if (server == local) continue
+            if (local.isEmpty()) applyV2Action(id, field, "", "set_empty")
+            else if (server.isEmpty()) applyV2Action(id, field, local.first(), "accept")
+            else applyV2Action(id, field, local.first(), "accept")
+        }
+    }
+
+    fun discardV2Draft(id: Int) {
+        uiState = uiState.copy(v2Drafts = uiState.v2Drafts - id, v2Conflicts = uiState.v2Conflicts - id)
+        loadV2Selection(id, force = true)
+    }
+
+    /** Flushes the offline queue for the active account. */
+    fun flushV2Queue() {
+        val token = uiState.preferences.apiToken
+        if (token.isBlank()) return
+        viewModelScope.launch {
+            val all = curationActionStore.actions.catch { emit(emptyList()) }.first()
+            val accountKey = curationAccountKey()
+            val mine = all.filter { it.accountKey == accountKey }
+            if (mine.isEmpty()) return@launch
+            val remaining = withContext(Dispatchers.IO) { v2Repository.flush(mine, token) }
+            val cleared = mine.filterNot { action -> remaining.any { it.operationKey == action.operationKey } }
+            for (action in cleared) curationActionStore.remove(action.operationKey)
+            if (remaining.isEmpty()) {
+                uiState = uiState.copy(message = nextMessage("离线整理已同步。"))
+                uiState = uiState.copy(v2Drafts = emptyMap(), v2Conflicts = emptyMap())
+                uiState.v2Selections.keys.forEach { loadV2Selection(it, force = true) }
+            } else {
+                uiState = uiState.copy(message = nextMessage("仍有 ${remaining.size} 条离线整理未同步。"))
+            }
+        }
+    }
+
+    private fun valueOf(selection: MultidimensionalSelection, field: String): List<String> = when (field) {
+        "topics" -> selection.topics
+        "content_functions" -> selection.contentFunctions
+        "affordances" -> selection.affordances
+        "carriers" -> selection.carriers
+        "form" -> if (selection.form.isEmpty()) emptyList() else listOf(selection.form)
+        "use" -> if (selection.use.isEmpty()) emptyList() else listOf(selection.use)
+        else -> emptyList()
+    }
+
+    private fun failureLabel(kind: FailureKind): String = when (kind) {
+        FailureKind.Unauthorized -> "鉴权失败"
+        FailureKind.Timeout -> "请求超时"
+        FailureKind.Network -> "网络错误"
+        FailureKind.Server -> "服务端错误"
     }
 
     fun refreshLinks() {
@@ -1000,6 +1176,8 @@ internal class CairnLinksViewModelFactory(
     private val settingsStore: SharePreferencesStore,
     private val pendingUploadStore: PendingUploadStore,
     private val apiDebugClient: ApiDebugClient,
+    private val v2Repository: V2CurationRepository,
+    private val curationActionStore: CurationActionStore,
     private val apiBaseUrl: String,
     private val releasesApiUrl: String,
     private val currentVersionName: String,
@@ -1013,6 +1191,8 @@ internal class CairnLinksViewModelFactory(
             settingsStore = settingsStore,
             pendingUploadStore = pendingUploadStore,
             apiDebugClient = apiDebugClient,
+            v2Repository = v2Repository,
+            curationActionStore = curationActionStore,
             apiBaseUrl = apiBaseUrl,
             releasesApiUrl = releasesApiUrl,
             currentVersionName = currentVersionName,

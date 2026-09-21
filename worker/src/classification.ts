@@ -360,12 +360,18 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         target.generation, target.spec_id, boundTaxonomy, boundPolicy, boundModel, now,
         now, target.generation, now, now, target.generation).first<{ id: number; revision: number }>();
     if (!job) return new Response(null, { status: 204, headers });
-    const source = await env.DB.prepare(`SELECT l.url,l.note,l.original_text,
+    const source = await env.DB.prepare(`SELECT l.url,l.note,l.original_text,l.related_links,
       CASE WHEN s.original_text=l.original_text AND s.url=l.url THEN COALESCE(json_extract(s.payload,'$.context_text'),'') ELSE '' END AS context_text
       FROM links l LEFT JOIN enrichment_sources s ON s.link_id=l.id
       JOIN classification_jobs j ON j.link_id=l.id
-      WHERE l.id=? AND j.lease_token=? AND j.revision=?`).bind(job.id, token, job.revision).first();
-    return source ? reply({ ...job, ...source }) : conflict();
+      WHERE l.id=? AND j.lease_token=? AND j.revision=?`).bind(job.id, token, job.revision).first<{ related_links: string | null }>();
+    if (!source) return conflict();
+    let relatedLinks: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(source.related_links ?? "[]");
+      if (Array.isArray(parsed)) relatedLinks = parsed.filter((entry): entry is string => typeof entry === "string").slice(0, 50);
+    } catch { relatedLinks = []; }
+    return reply({ ...job, ...source, related_links: relatedLinks });
   }
   if (!match) return fail("not_found");
   if (match[2] === "retry") {

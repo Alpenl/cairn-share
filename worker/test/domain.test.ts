@@ -378,3 +378,121 @@ it("cascades deletes across the domain tables", async () => {
     expect(row!.n, `${table} should cascade`).toBe(0);
   }
 });
+
+// --- Entity lifecycle, evidence requests and proposal application (B05/B09) --
+
+it("keeps entity lifecycle states distinct and protects a newer success (B09-T04)", async () => {
+  const id = await createLink();
+  const first = await request(`v2/links/${id}/entity-state`, {
+    operation_key: "entity-1", state: "completed_nonempty", entities: ["acme", "widget"], content_revision: 1
+  });
+  expect(first.status).toBe(200);
+  // A later failed run must not clear the completed value.
+  const failed = await request(`v2/links/${id}/entity-state`, {
+    operation_key: "entity-2", state: "failed", entities: [], content_revision: 1
+  });
+  expect(failed.status).toBe(200);
+  expect((await failed.json() as { status: string }).status).toBe("ignored_stale");
+  const view = await (await request(`v2/links/${id}/entities`, undefined, "GET")).json() as {
+    state: string; automatic: string[]; entities: string[];
+  };
+  expect(view.state).toBe("completed_nonempty");
+  expect(view.automatic).toEqual(["acme", "widget"]);
+  // A stale content revision is refused.
+  await env.DB.prepare("UPDATE links SET content_revision = content_revision + 1 WHERE id = ?").bind(id).run();
+  const stale = await request(`v2/links/${id}/entity-state`, {
+    operation_key: "entity-3", state: "completed_empty", entities: [], content_revision: 1
+  });
+  expect(stale.status).toBe(409);
+  expect((await stale.json() as { error: string }).error).toBe("run_stale");
+});
+
+it("lets a human correct entities through the same override log (B05-T10)", async () => {
+  const id = await createLink();
+  await request(`v2/links/${id}/entity-state`, {
+    operation_key: "entity-1", state: "completed_nonempty", entities: ["acme"], content_revision: 1
+  });
+  const accepted = await request(`v2/links/${id}/entities`, {
+    operation_key: "entity-human-1", action: "accept", term: "widget", expected_revision: 0
+  });
+  expect(accepted.status).toBe(200);
+  const rejected = await request(`v2/links/${id}/entities`, {
+    operation_key: "entity-human-2", action: "reject", term: "acme", expected_revision: 1
+  });
+  expect(rejected.status).toBe(200);
+  const view = await (await request(`v2/links/${id}/entities`, undefined, "GET")).json() as { entities: string[]; human: string[] };
+  expect(view.entities).toEqual(["widget"]);
+  expect(view.human).toEqual(["widget"]);
+});
+
+it("de-duplicates evidence requests and records the bounded outcome (B09-T05)", async () => {
+  const id = await createLink();
+  const first = await request(`v2/links/${id}/evidence-requests`, {
+    scope: "external_link", dedupe_key: `evidence-${id}-1`, budget: { max_bytes: 100000 }
+  });
+  expect(first.status).toBe(200);
+  const replay = await request(`v2/links/${id}/evidence-requests`, {
+    scope: "external_link", dedupe_key: `evidence-${id}-1`, budget: { max_bytes: 100000 }
+  });
+  expect((await replay.json() as { replayed: boolean }).replayed).toBe(true);
+  const requestID = (await first.json() as { id: string }).id;
+  const decided = await request(`v2/evidence-requests/${requestID}`, { status: "completed", result: { blocks: 1 } });
+  expect(decided.status).toBe(200);
+  const twice = await request(`v2/evidence-requests/${requestID}`, { status: "completed" });
+  expect(twice.status).toBe(409);
+  const list = await (await request(`v2/links/${id}/evidence-requests`, undefined, "GET")).json() as { requests: Array<{ status: string }> };
+  expect(list.requests[0].status).toBe("completed");
+});
+
+it("applies an approved display-only rename without changing semantics (B05-T11)", async () => {
+  const created = await request("v2/taxonomy/proposals", {
+    kind: "rename_label", dimension: "topics", term_id: "llm", payload: { label: "大语言模型" }
+  });
+  expect(created.status).toBe(200);
+  const proposalID = (await created.json() as { id: string }).id;
+  const premature = await request(`v2/taxonomy/proposals/${proposalID}/apply`, {});
+  expect(premature.status).toBe(409);
+  expect((await premature.json() as { error: string }).error).toBe("not_approved");
+  await request(`v2/taxonomy/proposals/${proposalID}/decision`, { decision: "approved" });
+  const applied = await request(`v2/taxonomy/proposals/${proposalID}/apply`, {});
+  expect(applied.status).toBe(200);
+  expect((await applied.json() as { display_only: boolean }).display_only).toBe(true);
+  const vocabulary = await (await request("v2/taxonomy", undefined, "GET")).json() as {
+    topics: Array<{ id: string; label: string; display_overridden?: boolean }>;
+  };
+  const llm = vocabulary.topics.find((term) => term.id === "llm");
+  expect(llm?.label).toBe("大语言模型");
+  expect(llm?.display_overridden).toBe(true);
+  // A semantic proposal is refused in place.
+  const semantic = await request("v2/taxonomy/proposals", {
+    kind: "add_term", dimension: "topics", term_id: "new_topic", payload: { label: "新主题" }
+  });
+  const semanticID = (await semantic.json() as { id: string }).id;
+  await request(`v2/taxonomy/proposals/${semanticID}/decision`, { decision: "approved" });
+  const refused = await request(`v2/taxonomy/proposals/${semanticID}/apply`, {});
+  expect(refused.status).toBe(409);
+  expect((await refused.json() as { error: string }).error).toBe("requires_new_version");
+});
+
+it("generates a proposal only from repeated human corrections and never applies it (B09-T11)", async () => {
+  const id = await createLink();
+  // Two corrections are not enough evidence.
+  for (const index of [1, 2]) {
+    await request(`v2/links/${id}/entities`, { operation_key: `entity-gen-${index}`, action: "accept", term: "widget" });
+  }
+  const early = await request("v2/taxonomy/proposals/generate", {});
+  expect((await early.json() as { created: unknown[] }).created.length).toBe(0);
+  await request(`v2/links/${id}/entities`, { operation_key: "entity-gen-3", action: "accept", term: "widget" });
+  const generated = await request("v2/taxonomy/proposals/generate", {});
+  const created = (await generated.json() as { created: Array<{ id: string; term: string }>; applied: boolean }).created;
+  expect(created.length).toBe(1);
+  expect(created[0].term).toBe("widget");
+  // Re-running is idempotent while the proposal is pending.
+  const again = await request("v2/taxonomy/proposals/generate", {});
+  expect((await again.json() as { created: unknown[] }).created.length).toBe(0);
+  // Approval still cannot apply a semantic change in place.
+  await request(`v2/taxonomy/proposals/${created[0].id}/decision`, { decision: "approved" });
+  const applied = await request(`v2/taxonomy/proposals/${created[0].id}/apply`, {});
+  expect(applied.status).toBe(409);
+  expect((await applied.json() as { error: string }).error).toBe("requires_new_version");
+});

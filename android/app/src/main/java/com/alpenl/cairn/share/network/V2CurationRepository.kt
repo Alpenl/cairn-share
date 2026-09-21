@@ -1,0 +1,141 @@
+package com.alpenl.cairn.share.network
+
+import java.util.UUID
+
+/**
+ * A transport seam so the curation repository can be exercised without a
+ * socket. The production implementation is [V2CurationClient].
+ */
+internal interface V2Transport {
+    fun loadSelection(id: Int, apiToken: String): V2Result<MultidimensionalSelection>
+    fun applyOverride(id: Int, override: FieldOverride, apiToken: String): V2Result<org.json.JSONObject>
+}
+
+internal class V2ClientTransport(private val client: V2CurationClient) : V2Transport {
+    override fun loadSelection(id: Int, apiToken: String) = client.loadSelection(id, apiToken)
+    override fun applyOverride(id: Int, override: FieldOverride, apiToken: String) = client.applyOverride(id, override, apiToken)
+}
+
+/**
+ * The outcome of one user action.
+ */
+internal sealed interface CurationSubmitResult {
+    /** The server accepted the action and returned the new revision. */
+    data class Applied(val revision: Long, val payload: org.json.JSONObject) : CurationSubmitResult
+    /** The action is queued offline; it keeps its operation key for replay. */
+    data class Queued(val operationKey: String) : CurationSubmitResult
+    /** The server rejected the action; [revision] is the current revision. */
+    data class Conflict(val revision: Long) : CurationSubmitResult
+    data class Failed(val kind: FailureKind) : CurationSubmitResult
+}
+
+/**
+ * The multidimensional curation repository.
+ *
+ * It owns the only write path for field actions: each new logical action gets
+ * its own operation UUID (a retry reuses it), the local draft is updated with
+ * the same semantics the Worker uses, and a network failure queues the action
+ * instead of dropping the user's intent.
+ */
+internal class V2CurationRepository(private val transport: V2Transport) {
+
+    fun load(id: Int, apiToken: String): V2Result<MultidimensionalSelection> = transport.loadSelection(id, apiToken)
+
+    /**
+     * Applies one action to the local draft with the shared semantics:
+     * single-valued fields replace, multi-valued fields accumulate, reject
+     * removes one tag and a per-tag reset restores that tag from the automatic
+     * value.
+     */
+    fun applyLocal(
+        selection: MultidimensionalSelection,
+        automatic: MultidimensionalSelection,
+        field: String,
+        term: String,
+        action: String,
+    ): MultidimensionalSelection = when (field) {
+        "topics" -> selection.copy(topics = resolveMulti(selection.topics, automatic.topics, term, action))
+        "content_functions" -> selection.copy(contentFunctions = resolveMulti(selection.contentFunctions, automatic.contentFunctions, term, action))
+        "affordances" -> selection.copy(affordances = resolveMulti(selection.affordances, automatic.affordances, term, action))
+        "carriers" -> selection.copy(carriers = resolveSingle(selection.carriers, automatic.carriers, term, action))
+        "form" -> selection.copy(form = resolveSingleValue(selection.form, automatic.form, term, action))
+        "use" -> selection.copy(use = resolveSingleValue(selection.use, automatic.use, term, action))
+        else -> selection
+    }
+
+    /**
+     * Submits one action. A new action gets a fresh UUID; a retry passes the
+     * original [operationKey] so the server replays instead of applying twice.
+     */
+    fun submit(
+        id: Int,
+        field: String,
+        term: String,
+        action: String,
+        expectedRevision: Long,
+        apiToken: String,
+        operationKey: String = UUID.randomUUID().toString(),
+    ): CurationSubmitResult {
+        val override = FieldOverride(
+            field = field,
+            term = term,
+            action = action,
+            operationKey = operationKey,
+            expectedRevision = expectedRevision,
+        )
+        return when (val result = transport.applyOverride(id, override, apiToken)) {
+            is V2Result.Loaded -> CurationSubmitResult.Applied(result.value.optLong("revision", expectedRevision), result.value)
+            is V2Result.Conflict -> CurationSubmitResult.Conflict(result.revision)
+            is V2Result.Unsupported -> CurationSubmitResult.Failed(FailureKind.Server)
+            is V2Result.Failed -> when (result.kind) {
+                FailureKind.Network, FailureKind.Timeout -> CurationSubmitResult.Queued(operationKey)
+                else -> CurationSubmitResult.Failed(result.kind)
+            }
+        }
+    }
+
+    /** Replays queued actions in order, stopping at the first conflict/failure. */
+    fun flush(actions: List<QueuedCurationAction>, apiToken: String): List<QueuedCurationAction> {
+        var remaining = actions
+        for (action in actions) {
+            val result = submit(
+                id = action.linkId, field = action.field, term = action.term, action = action.action,
+                expectedRevision = action.expectedRevision ?: 0, apiToken = apiToken,
+                operationKey = action.operationKey,
+            )
+            when (result) {
+                is CurationSubmitResult.Applied, is CurationSubmitResult.Queued -> {
+                    remaining = remaining.filterNot { it.operationKey == action.operationKey }
+                }
+                else -> return remaining
+            }
+        }
+        return remaining
+    }
+
+    private fun resolveMulti(current: List<String>, automatic: List<String>, term: String, action: String): List<String> = when (action) {
+        "accept" -> if (current.contains(term)) current else current + term
+        "reject" -> current.filterNot { it == term }
+        "set_empty" -> emptyList()
+        // A per-tag reset restores exactly that tag from the automatic value;
+        // a whole-field reset restores the full automatic list.
+        "reset" -> if (term.isEmpty()) automatic else (current.filterNot { it == term } + automatic.filter { it == term }).distinct()
+        else -> current
+    }
+
+    private fun resolveSingle(current: List<String>, automatic: List<String>, term: String, action: String): List<String> = when (action) {
+        "accept" -> if (term.isEmpty()) emptyList() else listOf(term)
+        "reject" -> if (current.contains(term)) emptyList() else current
+        "set_empty" -> emptyList()
+        "reset" -> if (term.isEmpty()) automatic.take(1) else automatic.take(1)
+        else -> current
+    }
+
+    private fun resolveSingleValue(current: String, automatic: String, term: String, action: String): String = when (action) {
+        "accept" -> term
+        "reject" -> if (current == term) "" else current
+        "set_empty" -> ""
+        "reset" -> automatic
+        else -> current
+    }
+}

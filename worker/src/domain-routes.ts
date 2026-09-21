@@ -71,11 +71,187 @@ export async function domainRoute(request: Request, env: Env, path: string): Pro
     return applyOverride(request, env, Number(match[1]));
   }
 
+  // --- Entity state and evidence requests (B05-T10/B09) --------------------
+  match = path.match(/^\/api\/v2\/links\/(\d+)\/entities$/);
+  if (match) {
+    if (request.method === "GET") return entitiesView(env, Number(match[1]));
+    if (request.method !== "POST") return fail("method_not_allowed", 405);
+    return applyEntityOverride(request, env, Number(match[1]));
+  }
+
+  match = path.match(/^\/api\/v2\/links\/(\d+)\/entity-state$/);
+  if (match) {
+    if (request.method !== "POST") return fail("method_not_allowed", 405);
+    return submitEntityState(request, env, Number(match[1]));
+  }
+
+  match = path.match(/^\/api\/v2\/links\/(\d+)\/evidence-requests$/);
+  if (match) {
+    if (request.method === "GET") return listEvidenceRequests(env, Number(match[1]));
+    if (request.method !== "POST") return fail("method_not_allowed", 405);
+    return createEvidenceRequest(request, env, Number(match[1]));
+  }
+
+  match = path.match(/^\/api\/v2\/evidence-requests\/([A-Za-z0-9_-]{1,64})$/);
+  if (match) {
+    if (request.method === "GET") return getEvidenceRequest(env, match[1]);
+    if (request.method !== "POST") return fail("method_not_allowed", 405);
+    return decideEvidenceRequest(request, env, match[1]);
+  }
+
   match = path.match(/^\/api\/v2\/links\/(\d+)\/effective$/);
   if (match && request.method === "GET") return effective(env, Number(match[1]));
   if (match) return fail("method_not_allowed", 405);
 
   return fail("not_found", 404);
+}
+
+// entitiesView reports the independent entity lifecycle plus the human-corrected
+// effective entity list. not_run/failed/stale are distinct from a completed
+// empty result, and the human correction is the same override log the field UI
+// writes, so there is one truth (B05-T10).
+async function entitiesView(env: Env, id: number): Promise<Response> {
+  const link = await env.DB.prepare(`SELECT id, personal_revision FROM links WHERE id = ?`).bind(id)
+    .first<{ id: number; personal_revision: number }>();
+  if (!link) return fail("not_found", 404);
+  const state = await env.DB.prepare(
+    `SELECT state, content_revision, entities, updated_at FROM entity_states WHERE link_id = ?`
+  ).bind(id).first<{ state: string; content_revision: number; entities: string; updated_at: string }>();
+  const { view, stale } = await computeEffective(env, id);
+  const overrides = await env.DB.prepare(
+    `SELECT id, term, action, source, revision, created_at FROM curation_overrides WHERE link_id = ? AND field = 'entities' ORDER BY id`
+  ).bind(id).all();
+  return reply({
+    id,
+    state: state?.state ?? "not_run",
+    state_content_revision: state?.content_revision ?? 0,
+    stale: state !== null && stale,
+    updated_at: state?.updated_at ?? null,
+    automatic: state ? parseJSON(state.entities, []) : [],
+    entities: view.entities,
+    human: view.entities.filter((entity) => (overrides.results as Array<{ term: string; action: string }>)
+      .some((override) => override.term === entity && override.action === "accept")),
+    overrides: overrides.results,
+    revision: link.personal_revision
+  });
+}
+
+async function applyEntityOverride(request: Request, env: Env, id: number): Promise<Response> {
+  const body = await bodyOf(request);
+  if (!body) return fail("invalid_json");
+  const operationKey = body.operation_key;
+  const action = body.action as OverrideAction;
+  const term = typeof body.term === "string" ? body.term : "";
+  if (!text(operationKey, 200)) return fail("invalid_operation_key");
+  if (!validOverride("entities", action, term)) return fail("invalid_override");
+  return recordOverride(env, id, "entities", action, term, operationKey, body.expected_revision);
+}
+
+// submitEntityState records one bounded entity extraction result. A stale or
+// failed run never clears a newer success: the write is guarded by the current
+// content revision and the caller's revision, and not_run/failed/empty/stale
+// stay distinct (B09-T04).
+async function submitEntityState(request: Request, env: Env, id: number): Promise<Response> {
+  const body = await bodyOf(request);
+  if (!body) return fail("invalid_json");
+  const operationKey = body.operation_key;
+  const state = String(body.state);
+  if (!text(operationKey, 200)) return fail("invalid_operation_key");
+  if (!["not_run", "failed", "completed_empty", "completed_nonempty", "stale"].includes(state)) {
+    return fail("invalid_entity_state");
+  }
+  const entities = Array.isArray(body.entities)
+    ? body.entities.filter((entry): entry is string => typeof entry === "string" && entry.length > 0 && entry.length <= 120)
+    : [];
+  if (entities.length > 50) return fail("invalid_entity_state");
+  const existing = await env.DB.prepare(`SELECT operation_key FROM entity_states WHERE operation_key = ?`).bind(operationKey)
+    .first();
+  if (existing) return reply({ id, replayed: true });
+  const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
+    .first<{ content_revision: number }>();
+  if (!link) return fail("not_found", 404);
+  if (Number.isSafeInteger(body.content_revision) && Number(body.content_revision) !== link.content_revision) {
+    return fail("run_stale", 409, { content_revision: link.content_revision });
+  }
+  const now = new Date().toISOString();
+  // A failed/not_run result must not overwrite a newer completed value at the
+  // same content revision.
+  if (state === "failed" || state === "not_run") {
+    const current = await env.DB.prepare(`SELECT state FROM entity_states WHERE link_id = ?`).bind(id)
+      .first<{ state: string }>();
+    if (current && current.state === "completed_nonempty") {
+      return reply({ id, status: "ignored_stale", state: current.state });
+    }
+  }
+  await env.DB.prepare(
+    `INSERT INTO entity_states(link_id, state, content_revision, entities, updated_at, operation_key, revision)
+     VALUES (?, ?, ?, ?, ?, ?, 1)
+     ON CONFLICT(link_id) DO UPDATE SET state=excluded.state, content_revision=excluded.content_revision,
+       entities=excluded.entities, updated_at=excluded.updated_at, operation_key=excluded.operation_key,
+       revision=entity_states.revision + 1`
+  ).bind(id, state, link.content_revision, canonicalJSON(entities), now, operationKey).run();
+  return reply({ id, state, revision: link.content_revision });
+}
+
+// --- Evidence escalation requests (B09-T05) ---------------------------------
+
+async function listEvidenceRequests(env: Env, id: number): Promise<Response> {
+  const rows = await env.DB.prepare(
+    `SELECT id, content_revision, scope, status, budget, dedupe_key, created_at, decided_at, result
+     FROM evidence_requests WHERE link_id = ? ORDER BY created_at DESC LIMIT 100`
+  ).bind(id).all();
+  return reply({ requests: rows.results });
+}
+
+async function getEvidenceRequest(env: Env, requestID: string): Promise<Response> {
+  const row = await env.DB.prepare(
+    `SELECT id, link_id, content_revision, scope, status, budget, dedupe_key, created_at, decided_at, result
+     FROM evidence_requests WHERE id = ?`
+  ).bind(requestID).first();
+  return row ? reply(row) : fail("not_found", 404);
+}
+
+// createEvidenceRequest records a bounded, de-duplicated escalation. It never
+// fetches anything itself: the consumer performs the fetch under its own
+// network policy and reports the appended blocks back (B09-T05/T06).
+async function createEvidenceRequest(request: Request, env: Env, id: number): Promise<Response> {
+  const body = await bodyOf(request);
+  if (!body) return fail("invalid_json");
+  if (!text(body.scope, 40) || !["external_link", "image_text", "truncation"].includes(String(body.scope))) {
+    return fail("invalid_evidence_request");
+  }
+  const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
+    .first<{ content_revision: number }>();
+  if (!link) return fail("not_found", 404);
+  const dedupe = text(body.dedupe_key, 200) ? body.dedupe_key : `${id}:${body.scope}:${link.content_revision}`;
+  const existing = await env.DB.prepare(`SELECT id, status FROM evidence_requests WHERE dedupe_key = ?`).bind(dedupe)
+    .first<{ id: string; status: string }>();
+  if (existing) return reply({ id: existing.id, status: existing.status, replayed: true });
+  const requestID = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO evidence_requests(id, link_id, content_revision, scope, status, budget, dedupe_key, created_at)
+     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`
+  ).bind(requestID, id, link.content_revision, body.scope,
+    canonicalJSON(body.budget ?? {}), dedupe, now).run();
+  return reply({ id: requestID, status: "pending", replayed: false });
+}
+
+// decideEvidenceRequest records the consumer's bounded outcome. A failed or
+// blocked fetch is explicit and never overwrites the stored source.
+async function decideEvidenceRequest(request: Request, env: Env, requestID: string): Promise<Response> {
+  const body = await bodyOf(request);
+  if (!body) return fail("invalid_json");
+  const status = String(body.status);
+  if (!["completed", "failed", "blocked", "rejected"].includes(status)) return fail("invalid_evidence_request");
+  const existing = await env.DB.prepare(`SELECT status FROM evidence_requests WHERE id = ?`).bind(requestID)
+    .first<{ status: string }>();
+  if (!existing) return fail("not_found", 404);
+  if (existing.status !== "pending") return fail("already_decided", 409, { status: existing.status });
+  await env.DB.prepare(
+    `UPDATE evidence_requests SET status = ?, decided_at = ?, result = ? WHERE id = ? AND status = 'pending'`
+  ).bind(status, new Date().toISOString(), canonicalJSON(body.result ?? {}), requestID).run();
+  return reply({ id: requestID, status });
 }
 
 // --- Evidence snapshots -----------------------------------------------------
@@ -412,6 +588,16 @@ async function applyOverride(request: Request, env: Env, id: number): Promise<Re
   const term = typeof body.term === "string" ? body.term : "";
   if (!text(operationKey, 200)) return fail("invalid_operation_key");
   if (!field || !validOverride(field, action, term)) return fail("invalid_override");
+  return recordOverride(env, id, field, action, term, operationKey, body.expected_revision);
+}
+
+// recordOverride is the single writer for human field actions. Entity
+// corrections and the four-dimension UI both go through it, so the CAS and the
+// event log cannot diverge between entry points.
+async function recordOverride(
+  env: Env, id: number, field: OverrideField, action: OverrideAction, term: string,
+  operationKey: string, expectedRevision: unknown
+): Promise<Response> {
   const existing = await env.DB.prepare(`SELECT id, field, term, action, revision FROM curation_overrides WHERE operation_key = ?`)
     .bind(operationKey).first();
   if (existing) return reply({ override: existing, replayed: true });
@@ -422,7 +608,7 @@ async function applyOverride(request: Request, env: Env, id: number): Promise<Re
   // revision. The check and the write live in one atomic batch: every statement
   // is guarded by the same revision, so a stale client cannot interleave a
   // read-then-write and two concurrent writers cannot both succeed (F08).
-  const expected = body.expected_revision === undefined ? link.personal_revision : Number(body.expected_revision);
+  const expected = expectedRevision === undefined ? link.personal_revision : Number(expectedRevision);
   if (expected !== link.personal_revision) {
     return fail("revision_conflict", 409, { revision: link.personal_revision });
   }
