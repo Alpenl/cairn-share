@@ -9,11 +9,13 @@ import java.util.UUID
 internal interface V2Transport {
     fun loadSelection(id: Int, apiToken: String): V2Result<MultidimensionalSelection>
     fun applyOverride(id: Int, override: FieldOverride, apiToken: String): V2Result<org.json.JSONObject>
+    fun loadTaxonomy(apiToken: String): V2Result<BookmarkTaxonomy>
 }
 
 internal class V2ClientTransport(private val client: V2CurationClient) : V2Transport {
     override fun loadSelection(id: Int, apiToken: String) = client.loadSelection(id, apiToken)
     override fun applyOverride(id: Int, override: FieldOverride, apiToken: String) = client.applyOverride(id, override, apiToken)
+    override fun loadTaxonomy(apiToken: String) = client.loadTaxonomy(apiToken)
 }
 
 /**
@@ -40,6 +42,9 @@ internal sealed interface CurationSubmitResult {
 internal class V2CurationRepository(private val transport: V2Transport) {
 
     fun load(id: Int, apiToken: String): V2Result<MultidimensionalSelection> = transport.loadSelection(id, apiToken)
+
+    /** Loads the multidimensional vocabulary the section renders. */
+    fun loadTaxonomy(apiToken: String): V2Result<BookmarkTaxonomy> = transport.loadTaxonomy(apiToken)
 
     /**
      * Applies one action to the local draft with the shared semantics:

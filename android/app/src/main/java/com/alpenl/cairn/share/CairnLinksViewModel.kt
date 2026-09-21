@@ -79,6 +79,8 @@ internal data class CairnLinksUiState(
     val v2Busy: Set<Int> = emptySet(),
     val v2Queued: Map<Int, Int> = emptyMap(),
     val v2Available: Boolean = true,
+    val v2Taxonomy: BookmarkTaxonomy? = null,
+    val v2TaxonomyLoading: Boolean = false,
     val message: UiMessage? = null,
 )
 
@@ -205,6 +207,24 @@ internal class CairnLinksViewModel(
                 )
                 V2Result.Unsupported -> uiState = uiState.copy(v2Available = false)
                 else -> Unit
+            }
+        }
+    }
+
+    /**
+     * Loads the multidimensional vocabulary. It is a separate endpoint from the
+     * v1 taxonomy, so a backend without v2 stays visibly read-only.
+     */
+    fun loadV2Taxonomy() {
+        val token = uiState.preferences.apiToken
+        if (token.isBlank() || uiState.v2Taxonomy != null || uiState.v2TaxonomyLoading) return
+        uiState = uiState.copy(v2TaxonomyLoading = true)
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { v2Repository.loadTaxonomy(token) }
+            when (result) {
+                is V2Result.Loaded -> uiState = uiState.copy(v2TaxonomyLoading = false, v2Taxonomy = result.value, v2Available = true)
+                V2Result.Unsupported -> uiState = uiState.copy(v2TaxonomyLoading = false, v2Available = false)
+                else -> uiState = uiState.copy(v2TaxonomyLoading = false)
             }
         }
     }

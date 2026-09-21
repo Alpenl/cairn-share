@@ -73,12 +73,30 @@ class V2CurationInstrumentedTest {
         "affordances":[{"id":"practice","label":"可实践","active":true}]}"""
     )
 
+    private fun openDetailAndLoadTaxonomy() {
+        compose.waitUntil(20_000) {
+            runCatching { compose.onNodeWithTag("link_4").assertExists(); true }.getOrDefault(false)
+        }
+        compose.onNodeWithTag("link_4").performClick()
+        compose.waitUntil(20_000) {
+            runCatching {
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_section"))
+                true
+            }.getOrDefault(false)
+        }
+        // The multidimensional vocabulary loads from its own endpoint.
+        compose.waitUntil(20_000) {
+            runCatching { compose.onNodeWithTag("v2_topics_chip_llm").assertExists(); true }.getOrDefault(false)
+        }
+    }
+
     @Test fun showsEffectiveDimensionsAndSubmitsAFieldAction() {
         val override = AtomicReference<JSONObject>()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.requestUrl!!.encodedPath
                 return when {
+                    path == "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
                     path == "/api/bookmarks/4" -> response(link(4))
                     path == "/api/bookmarks/4/v2-selection" -> response(selection(3))
                     path == "/api/v2-taxonomy" -> response(taxonomy())
@@ -91,10 +109,9 @@ class V2CurationInstrumentedTest {
             }
         }
         ActivityScenario.launch<LauncherActivity>(start()).use {
-            compose.waitUntil(20_000) {
-                runCatching { compose.onNodeWithTag("v2_section").assertExists(); true }.getOrDefault(false)
-            }
+            openDetailAndLoadTaxonomy()
             // The fourth topic is shown; tapping a selected tag rejects it.
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_topics_chip_llm"))
             compose.onNodeWithTag("v2_topics_chip_llm").performClick()
             compose.waitUntil(20_000) { override.get() != null }
             val payload = override.get()!!
@@ -112,6 +129,7 @@ class V2CurationInstrumentedTest {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.requestUrl!!.encodedPath
                 return when {
+                    path == "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
                     path == "/api/bookmarks/4" -> response(link(4))
                     path == "/api/bookmarks/4/v2-selection" -> response(selection(3))
                     path == "/api/v2-taxonomy" -> response(taxonomy())
@@ -126,9 +144,8 @@ class V2CurationInstrumentedTest {
             }
         }
         ActivityScenario.launch<LauncherActivity>(start()).use {
-            compose.waitUntil(20_000) {
-                runCatching { compose.onNodeWithTag("v2_section").assertExists(); true }.getOrDefault(false)
-            }
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_topics_chip_llm"))
             compose.onNodeWithTag("v2_topics_chip_llm").performClick()
             compose.waitUntil(20_000) {
                 runCatching { compose.onNodeWithTag("v2_conflict").assertExists(); true }.getOrDefault(false)

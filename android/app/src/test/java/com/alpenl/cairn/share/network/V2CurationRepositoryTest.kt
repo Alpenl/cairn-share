@@ -23,6 +23,7 @@ class V2CurationRepositoryTest {
             return if (applyResults.isEmpty()) V2Result.Loaded(JSONObject().put("revision", 5))
             else applyResults.removeAt(0)
         }
+        override fun loadTaxonomy(apiToken: String) = V2Result.Unsupported
     }
 
     private fun selection(

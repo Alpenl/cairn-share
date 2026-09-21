@@ -284,6 +284,7 @@ internal fun CairnLinksApp(
                     onLoadTaxonomy = viewModel::loadTaxonomy,
                     onSaveCuration = { update, onSuccess -> viewModel.saveCuration(id, update, onSuccess) },
                     onLoadV2 = viewModel::loadV2Selection,
+                    onLoadV2Taxonomy = viewModel::loadV2Taxonomy,
                     onV2Action = { field, term, action -> viewModel.applyV2Action(id, field, term, action) },
                     onV2Reapply = { viewModel.reapplyV2Draft(id) },
                     onV2Discard = { viewModel.discardV2Draft(id) },
@@ -880,6 +881,7 @@ private fun DetailScreen(
     onLoadTaxonomy: () -> Unit,
     onSaveCuration: (CurationUpdate, () -> Unit) -> Unit,
     onLoadV2: (Int, Boolean) -> Unit,
+    onLoadV2Taxonomy: () -> Unit,
     onV2Action: (String, String, String) -> Unit,
     onV2Reapply: () -> Unit,
     onV2Discard: () -> Unit,
@@ -896,6 +898,7 @@ private fun DetailScreen(
     LaunchedEffect(id) {
         onEnsureLink(id)
         onLoadV2(id, false)
+        onLoadV2Taxonomy()
     }
 
     ScreenColumn {
@@ -960,7 +963,7 @@ private fun DetailScreen(
                             BookmarkCuration(id, enrichment, state.taxonomy, id in state.busyIds, onLoadTaxonomy, onSaveCuration)
                             MultidimensionalCurationSection(
                                 linkId = id,
-                                taxonomy = state.taxonomy,
+                                taxonomy = state.v2Taxonomy ?: state.taxonomy,
                                 selection = state.v2Selections[id],
                                 draft = state.v2Drafts[id],
                                 conflictRevision = state.v2Conflicts[id],
