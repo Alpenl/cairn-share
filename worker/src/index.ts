@@ -1,3 +1,4 @@
+import { cleanupDeletedImages, maintainPrivacy } from "./privacy";
 import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, refreshSource, sourceRoute } from "./classification";
@@ -245,6 +246,9 @@ class TimingCollector {
 }
 
 export default {
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await maintainPrivacy(env);
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     const timing = new TimingCollector();
     const response = await handleRequest(request, env, timing);
@@ -646,10 +650,12 @@ async function deleteLink(env: Env, id: number, timing: TimingCollector): Promis
       .first<{ id: number }>()
   );
 
-  if (row === null) {
+  if (row === null && !await env.DB.prepare("SELECT link_id FROM privacy_deletions WHERE link_id=?").bind(id).first()) {
     return error("not_found", 404);
   }
-  await bumpLinksCacheGeneration(env, timing);
+  // The trigger removes budgets, invalidates cached reads and records the outbox
+  // in the same transaction as deletion. A lost response can safely be retried.
+  if (!await cleanupDeletedImages(env, id)) return json({ error: "deletion_cleanup_pending" }, 503, { "Retry-After": "300" });
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
@@ -1092,7 +1098,16 @@ async function storeEnrichmentImages(
   const images: EnrichmentImage[] = [];
   try {
     for (const imageUrl of imageUrls) {
-      images.push(await fetchAndStoreImage(env, id, imageUrl, timing));
+      const image = await fetchAndStoreImage(env, id, imageUrl, timing);
+      images.push(image);
+      const current = await env.DB.prepare("SELECT id FROM links WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?")
+        .bind(id, leaseToken).first();
+      if (!current) {
+        // A delete during put is cleaned here; if this isolate dies, the durable
+        // tombstone/scheduled scan catches the late object without trusting memory.
+        await cleanupDeletedImages(env, id);
+        return error("lease_conflict", 409);
+      }
     }
   } catch {
     return error("image_fetch_failed", 502);
@@ -1136,7 +1151,7 @@ async function fetchAndStoreImage(
     env.ENRICHMENT_IMAGES.put(key, body, {
       httpMetadata: {
         contentType,
-        cacheControl: "private, max-age=86400"
+        cacheControl: "private, no-store"
       },
       customMetadata: { source_url: imageUrl }
     })
@@ -1177,21 +1192,29 @@ async function readBodyWithinLimit(response: Response, limit: number): Promise<U
 async function getEnrichmentImage(request: Request, env: Env, key: string): Promise<Response> {
   if (!isValidImageKey(key)) return error("not_found", 404);
 
+  const id = Number(key.split("/")[1]);
+  if (!Number.isSafeInteger(id) || !await env.DB.prepare("SELECT id FROM links WHERE id=?").bind(id).first()) return error("not_found", 404);
   const object = await env.ENRICHMENT_IMAGES.get(key);
+  // Recheck after storage I/O, including before conditional 304 responses.
+  if (!await env.DB.prepare("SELECT id FROM links WHERE id=?").bind(id).first()) {
+    await object?.body.cancel();
+    return error("not_found", 404);
+  }
   if (object === null) return error("not_found", 404);
 
   const etag = object.httpEtag;
   if (request.headers.get("if-none-match") === etag) {
+    await object.body.cancel();
     return new Response(null, {
       status: 304,
-      headers: { ETag: etag, "Cache-Control": "private, max-age=86400", ...CORS_HEADERS }
+      headers: { ETag: etag, "Cache-Control": "private, no-store", ...CORS_HEADERS }
     });
   }
 
   const headers = new Headers(CORS_HEADERS);
   object.writeHttpMetadata(headers);
   headers.set("ETag", etag);
-  headers.set("Cache-Control", "private, max-age=86400");
+  headers.set("Cache-Control", "private, no-store");
   headers.set("X-Content-Type-Options", "nosniff");
   return new Response(object.body, { headers });
 }
@@ -1422,6 +1445,9 @@ function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS"): Resp
 function withServerTiming(response: Response, timing: TimingCollector): Response {
   const headers = new Headers(response.headers);
   headers.set("Server-Timing", timing.headerValue());
+  // Internal generation-keyed cache entries expire after 15s. Never expose
+  // those public caching headers for authenticated private content to clients.
+  headers.set("Cache-Control", "private, no-store");
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,

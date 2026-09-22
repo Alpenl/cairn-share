@@ -680,7 +680,7 @@ describe("cairn-share worker", () => {
 
     const firstRead = await dispatch("/api/links?q=cache&limit=20&learned=all");
     expect(firstRead.headers.get("x-cairn-cache")).toBe("MISS");
-    expect(firstRead.headers.get("cache-control")).toContain("max-age=15");
+    expect(firstRead.headers.get("cache-control")).toBe("private, no-store");
     expect(firstRead.headers.get("server-timing")).toContain('cache-state;desc="MISS"');
     expect(firstRead.headers.get("server-timing")).toContain("generation;dur=");
     expect(firstRead.headers.get("server-timing")).toContain("db;dur=");
@@ -688,7 +688,7 @@ describe("cairn-share worker", () => {
 
     const reorderedRead = await dispatch("/api/links?learned=all&limit=20&q=cache");
     expect(reorderedRead.headers.get("x-cairn-cache")).toBe("HIT");
-    expect(reorderedRead.headers.get("cache-control")).toContain("max-age=15");
+    expect(reorderedRead.headers.get("cache-control")).toBe("private, no-store");
     expect(reorderedRead.headers.get("server-timing")).toContain('cache-state;desc="HIT"');
     expect((await json(reorderedRead)).items.map((item: LinkRecord) => item.id)).toEqual([first.id]);
 
@@ -705,13 +705,13 @@ describe("cairn-share worker", () => {
 
     const firstRead = await dispatch(`/api/links/${created.id}`);
     expect(firstRead.headers.get("x-cairn-cache")).toBe("MISS");
-    expect(firstRead.headers.get("cache-control")).toContain("max-age=15");
+    expect(firstRead.headers.get("cache-control")).toBe("private, no-store");
     expect(firstRead.headers.get("server-timing")).toContain('cache-state;desc="MISS"');
     await expect(firstRead.json()).resolves.toMatchObject({ id: created.id, note: "old" });
 
     const cachedRead = await dispatch(`/api/links/${created.id}`);
     expect(cachedRead.headers.get("x-cairn-cache")).toBe("HIT");
-    expect(cachedRead.headers.get("cache-control")).toContain("max-age=15");
+    expect(cachedRead.headers.get("cache-control")).toBe("private, no-store");
     expect(cachedRead.headers.get("server-timing")).toContain('cache-state;desc="HIT"');
     await expect(cachedRead.json()).resolves.toMatchObject({ id: created.id, note: "old" });
 
@@ -805,7 +805,9 @@ describe("cairn-share worker", () => {
     expect(await deleted.text()).toBe("");
 
     await expectError(dispatch(`/api/links/${created.id}`), 404, "not_found");
-    await expectError(dispatch(`/api/links/${created.id}`, { method: "DELETE" }), 404, "not_found");
+    // A receipt confirms an exact retry; a never-existing ID remains not_found.
+    expect((await dispatch(`/api/links/${created.id}`, { method: "DELETE" })).status).toBe(204);
+    await expectError(dispatch("/api/links/999999", { method: "DELETE" }), 404, "not_found");
   });
 
   it("validates learned state writes", async () => {

@@ -1,0 +1,24 @@
+# Bookmark deletion and private storage
+
+The App-token `DELETE /api/links/:id` deletes the bookmark and its D1-owned source, evidence, run, decision, curation, entity, selection and operation rows. Migration `0026_privacy_deletion.sql` also deletes link-scoped budget records, advances the internal read-cache generation and writes a minimal numeric deletion receipt in the same D1 transaction. Global budget totals and shared question/taxonomy definitions are retained. The migration repairs existing orphan link-scoped budgets and rejects future orphan inserts/updates.
+
+A deletion receipt contains only `link_id`, `deleted_at` and `next_cleanup_at`. It intentionally has no cascading parent: clearing it together with the bookmark would lose the storage-cleanup obligation. Receipts remain to confirm retries and detect a late R2 write after a Worker interruption; they contain no source text, URLs, object bodies, curation, run answers or provider errors.
+
+After the transaction, the Worker removes **all** objects and metadata under the exact `enrichment/<id>/` prefix, including historical images no longer listed in `links.images`. Each request performs at most four list/delete pages of up to 100 objects. A successful pass returns 204. Storage failure or a longer prefix returns 503 `deletion_cleanup_pending` with `Retry-After: 300`; D1 content is already gone, and retrying the same DELETE continues cleanup. A known completed receipt returns 204 again; an unknown ID returns JSON 404. Enricher credentials do not grant App deletion permission.
+
+Image reads check that the link exists both before and after R2 I/O, including conditional 304 handling. An upload finishing after deletion rechecks its lease and invokes cleanup. If an isolate dies during the R2 put, recovery uses persisted receipts and the scheduled orphan scan. D1 and R2 are separate services: deletion is not represented as a distributed atomic transaction, and an interrupted late write can require scheduled recovery. A storage outage prevents physical purge until storage recovers, while application reads remain denied.
+
+The configured five-minute Cron handler processes up to 20 due receipts and scans one 100-object page under `enrichment/` for legacy orphan prefixes. The scan persists its cursor and wraps at EOF; newly discovered receipts are picked up on a following tick. Failed/incomplete purges are due again after five minutes; completed receipts are rechecked after 24 hours to catch interrupted late puts. The queue is ordered by due time and ID. These are scheduling intervals, not a purge SLA: backlog, missed Cron invocations and outages can extend completion. Live link IDs and unrelated R2 prefixes are excluded, including if a historical orphan receipt predates creation of that numeric ID.
+
+Authenticated responses now use `Cache-Control: private, no-store`; internal generation-keyed Cache API entries retain the existing 15-second expiry. Deletion invalidates their generation atomically; old entries age out rather than requiring a global Cloudflare purge. Previously downloaded files, older browser caches and client-maintained offline databases cannot be remotely erased by this API. Client cache/deletion behavior and broader age-based retention of live history remain separate acceptance items.
+
+## Rollout and recovery (not executed here)
+
+1. Back up D1 and record the installed migration version; apply new migration 0026 before deploying this Worker. Do not edit older published migrations.
+2. Deploy the compatible Worker with its Cron trigger and existing D1/R2 bindings. Check scheduled invocation success and the due count: `SELECT COUNT(*) FROM privacy_deletions WHERE next_cleanup_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now')`. Investigate a growing backlog; do not drop receipts to make the count disappear.
+3. A failed user deletion may be safely retried with the same ID. No new model call or source retrieval is needed. A live link must never be removed merely because its age or image key resembles an orphan.
+4. On application rollback keep migration 0026 and a compatible maintenance worker running. Older DELETE SQL still creates receipts via the database trigger, but an older image-serving executable lacks the new existence check; do not claim equivalent privacy guarantees for that rollback. No destructive down migration.
+
+No production migration, Cron deployment or remote data cleanup is performed by local verification. Tests use synthetic data and local D1/R2.
+
+References: [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/) documents strong consistency and list/delete limits; [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) documents the scheduled handler and configuration. Checked 2026-09-23.
