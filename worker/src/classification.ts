@@ -87,11 +87,13 @@ async function readOperation(env: Env, key: string, linkID: number): Promise<{ l
 // report of that atomic outcome, never a substitute for it.
 type CommitOutcome<T extends { id: number }> = {
   statements: D1PreparedStatement[];
+  // Finalization clears the lease, so it must run after all other writes that
+  // share the processing-state guard (including the operation receipt).
+  finalize: D1PreparedStatement;
   // guardIndex is the statement whose zero-row result means the guarded write
   // did not land; the whole batch then had no effect.
   guardIndex: number;
-  // operationGuard proves inside the transaction that the guarded write landed.
-  operationGuard?: { sql: string; bindings: Array<string | number | null> };
+  operationGuard: WriteGuard;
   response: T;
   body: unknown;
 };
@@ -103,32 +105,37 @@ async function idempotent<T extends { id: number }>(
   linkID: number,
   commit: () => Promise<CommitOutcome<T> | { failure: ClassificationErrorCode }>
 ): Promise<Response> {
-  if (key !== null) {
+  const replayExisting = async (): Promise<Response | null> => {
+    if (key === null) return null;
     const existing = await readOperation(env, key, linkID);
     if (existing) {
       if (existing.link_id !== linkID) return fail("operation_conflict", { reason: "operation_key belongs to another bookmark" });
       if (existing.payload_hash !== payloadHash) return fail("operation_conflict");
       return reply(JSON.parse(existing.response), 200);
     }
-  }
+    return null;
+  };
+  const existing = await replayExisting();
+  if (existing) return existing;
   const outcome = await commit();
-  if ("failure" in outcome) return fail(outcome.failure);
+  // A concurrent identical commit can finish between the first operation read
+  // and preflight. Confirm that exact operation before reporting its stale lease.
+  if ("failure" in outcome) return await replayExisting() ?? fail(outcome.failure);
   const operation = key === null ? null : env.DB.prepare(
     `INSERT INTO classification_operations(operation_key, link_id, payload_hash, status, response, created_at)
-     SELECT ?, ?, ?, 'applied', ?, ?${outcome.operationGuard ? ` WHERE ${outcome.operationGuard.sql}` : ""}
+     SELECT ?, ?, ?, 'applied', ?, ? WHERE ${outcome.operationGuard.sql}
      RETURNING operation_key`
   ).bind(key, linkID, payloadHash, JSON.stringify(outcome.body), new Date().toISOString(),
-    ...(outcome.operationGuard?.bindings ?? []));
-  const statements = operation === null ? outcome.statements : [...outcome.statements, operation];
+    ...outcome.operationGuard.bindings);
+  const statements = [...outcome.statements, ...(operation === null ? [] : [operation]), outcome.finalize];
   try {
     const results = await env.DB.batch(statements);
-    console.log("R2DEBUG", JSON.stringify(results.map((r) => ({ len: r.results.length, changes: (r.meta as { changes?: number })?.changes }))));
     if (!results[outcome.guardIndex]?.results.length) {
       // The guard did not hold, so every dependent insert was skipped by the
       // same predicate; report the lost lease and leave no success record.
-      return fail("lease_expired");
+      return await replayExisting() ?? fail("lease_expired");
     }
-    if (operation !== null && !results[statements.length - 1]?.results.length) {
+    if (operation !== null && !results[statements.length - 2]?.results.length) {
       // The guarded write landed but the operation record did not, which means
       // the predicate was false for it; treat it as a lost lease.
       return fail("lease_expired");
@@ -496,7 +503,6 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         env.DB.prepare(`UPDATE links SET classification=? WHERE id=? AND ${guard.sql} RETURNING id`)
           .bind(JSON.stringify(classification), id, ...guard.bindings)
       ];
-      let operationGuard: { sql: string; bindings: Array<string | number | null> } | undefined;
       if (isV2 && automatic) {
         const createdAt = new Date().toISOString();
         const runKey = `${key ?? `complete-${id}-${body.revision}`}:run`;
@@ -519,24 +525,12 @@ export async function classificationRoute(request: Request, env: Env, path: stri
           policyVersion: String(result.policy_version), policy: result.policy ?? {}, automatic,
           operationKey: `${key ?? `complete-${id}-${body.revision}`}:decision`, createdAt, payloadHash
         }, guard));
-        operationGuard = { sql: `EXISTS (SELECT 1 FROM classification_runs WHERE operation_key=?)`, bindings: [runKey] };
-      } else {
-        // A legacy completion has no run; the operation record is only written
-        // when the guarded job update actually landed.
-        operationGuard = {
-          sql: `EXISTS (SELECT 1 FROM classification_jobs WHERE link_id=? AND status='completed' AND revision=?)`,
-          bindings: [id, body.revision]
-        };
       }
-      statements.push(env.DB.prepare(`UPDATE classification_jobs SET status='completed',result=?,error=NULL,
-        lease_token=NULL,lease_until=NULL,updated_at=? WHERE link_id=? AND status='processing'
-        AND lease_token=? AND revision=? AND input_revision=? AND lease_until>? AND policy_version=? AND taxonomy_version=?
-        AND target_generation=? AND spec_id=? RETURNING link_id`)
-        .bind(JSON.stringify({ ...result, classification }), now, id, body.lease_token, body.revision,
-          job.input_revision, now, result.policy_version, job.taxonomy_version, target.generation, target.spec_id));
-      return { statements, guardIndex: 0, operationGuard, response: { id }, body: { id, status: "completed" } };
+      const finalize = env.DB.prepare(`UPDATE classification_jobs SET status='completed',result=?,error=NULL,
+        lease_token=NULL,lease_until=NULL,updated_at=? WHERE link_id=? AND ${guard.sql} RETURNING link_id`)
+        .bind(JSON.stringify({ ...result, classification }), now, id, ...guard.bindings);
+      return { statements, finalize, guardIndex: 0, operationGuard: guard, response: { id }, body: { id, status: "completed" } };
     });
-    // The derived projection converges immediately after the atomic commit;
     // The derived projection converges immediately after the atomic commit;
     // it is a cache, never a source of truth.
     if (response.status === 200) await rebuildProjection(env, id);
