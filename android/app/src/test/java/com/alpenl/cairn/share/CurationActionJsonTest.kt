@@ -40,6 +40,11 @@ class CurationActionJsonTest {
         val second = accountKeyFor("https://share.example", "token-bbbb")
         assertEquals(first, accountKeyFor("https://share.example", "token-aaaa"))
         assertTrue(first != second)
+        assertTrue(accountKeyFor("https://share.example", "first-12345678") != accountKeyFor("https://share.example", "second-12345678"))
+        assertTrue(accountKeyFor("https://share.example", "first-12345678") != accountKeyFor("https://other.example", "first-12345678"))
+        assertTrue(!accountKeyFor("https://share.example", "first-12345678").contains("12345678"))
+        // Old records cannot distinguish these accounts; recovery must be explicit.
+        assertEquals(legacyAccountKeyFor("https://share.example", "first-12345678"), legacyAccountKeyFor("https://share.example", "second-12345678"))
     }
 
     @Test

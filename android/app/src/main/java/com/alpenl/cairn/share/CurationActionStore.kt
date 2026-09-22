@@ -99,6 +99,29 @@ internal class CurationActionStore(private val context: Context) : CurationQueue
         }
     }
 
+    /** The user must explicitly confirm ownership; a suffix is not identity. */
+    suspend fun adoptLegacy(legacyKey: String, accountKey: String, linkId: Int, observedRevision: Long): Boolean {
+        require(accountKey.startsWith("v2:"))
+        var adopted = false
+        context.curationActionDataStore.edit { preferences ->
+            val current = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
+            // Merging two independently prepared chains would invent ordering.
+            if (current.any { it.linkId == linkId && it.accountKey == accountKey }) return@edit
+            val next = current.map { action ->
+                if (action.linkId != linkId || action.accountKey != legacyKey) action else {
+                    adopted = true
+                    action.copy(accountKey = accountKey,
+                        // Missing old CAS is an explicit conflict to resolve,
+                        // never a guessed expected revision for automatic send.
+                        conflictRevision = if (action.expectedRevision == null && action.predecessorKey == null)
+                            observedRevision else action.conflictRevision)
+                }
+            }
+            preferences[ACTIONS_KEY] = CurationActionJson.encode(next)
+        }
+        return adopted
+    }
+
     suspend fun clear() {
         context.curationActionDataStore.edit { preferences -> preferences.remove(ACTIONS_KEY) }
     }
@@ -128,8 +151,15 @@ internal object CurationActionJson {
     }
 }
 
-/** The active account/server identity an action belongs to. */
-fun accountKeyFor(baseUrl: String, apiToken: String): String =
+/** Full credential/server fingerprint; no raw token is stored in new actions. */
+fun accountKeyFor(baseUrl: String, apiToken: String): String {
+    val identity = baseUrl.trimEnd('/') + "\u0000" + apiToken.trim()
+    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
+    return "v2:" + digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+}
+
+/** Only for locating old actions to show an explicit ownership recovery UI. */
+internal fun legacyAccountKeyFor(baseUrl: String, apiToken: String): String =
     baseUrl.trimEnd('/') + "|" + apiToken.trim().takeLast(8)
 
 internal fun JSONObject.optLongOrNull(key: String): Long? =

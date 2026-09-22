@@ -19,6 +19,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.alpenl.cairn.share.network.QueuedCurationAction
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -171,6 +172,83 @@ class V2CurationInstrumentedTest {
             compose.waitUntil(20_000) {
                 runCatching { compose.onNodeWithTag("v2_conflict").assertDoesNotExist(); true }.getOrDefault(false)
             }
+        }
+    }
+
+    @Test fun legacyActionsNeedTheVisibleOwnershipConfirmation() {
+        val received = AtomicReference<JSONObject>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                "/api/bookmarks/4" -> response(link(4))
+                "/api/bookmarks/4/v2-selection" -> response(selection(3))
+                "/api/v2-taxonomy" -> response(taxonomy())
+                "/api/bookmarks/4/v2-override" -> {
+                    val body = JSONObject(request.body.readUtf8())
+                    received.set(body)
+                    assertEquals("legacy-reviewed", body.getString("operation_key"))
+                    assertEquals(3L, body.getLong("expected_revision"))
+                    response(JSONObject("""{"id":4,"field":"topics","term":"llm","action":"reject","operation_key":"legacy-reviewed","revision":4,"replayed":false}"""))
+                }
+                else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+            }
+        }
+        val intent = start()
+        runBlocking {
+            CurationActionStore(context).enqueue(QueuedCurationAction(4, "legacy-reviewed", "topics", "llm", "reject", 3,
+                legacyAccountKeyFor(server.url("/").toString(), token), queueVersion = 0))
+        }
+        ActivityScenario.launch<LauncherActivity>(intent).use {
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_legacy_review"))
+            compose.onNodeWithTag("v2_legacy_review").performClick()
+            compose.onNodeWithText("主题：移除 llm").assertExists()
+            assertNull(received.get())
+            compose.onNodeWithText("暂不恢复").performClick()
+            assertEquals(1, runBlocking { CurationActionStore(context).snapshot().size })
+            compose.onNodeWithTag("v2_legacy_review").performClick()
+            // An open confirmation belongs to the account shown when opened.
+            // Even an old suffix collision must dismiss it on account change.
+            runBlocking { SharePreferencesStore(context).setApiToken("different-$token") }
+            compose.waitUntil(20_000) {
+                runCatching { compose.onNodeWithTag("v2_legacy_confirm").assertDoesNotExist(); true }.getOrDefault(false)
+            }
+            assertNull(received.get())
+            runBlocking { SharePreferencesStore(context).setApiToken(token) }
+            compose.waitUntil(20_000) {
+                runCatching { compose.onNodeWithTag("v2_legacy_review").assertExists(); true }.getOrDefault(false)
+            }
+            compose.onNodeWithTag("v2_legacy_review").performClick()
+            compose.onNodeWithTag("v2_legacy_confirm").performClick()
+            compose.waitUntil(20_000) { received.get() != null }
+            compose.waitUntil(20_000) { runBlocking { CurationActionStore(context).snapshot().isEmpty() } }
+        }
+    }
+
+    @Test fun oldBackendResetShowsPendingInsteadOfTheHumanValues() {
+        val received = AtomicReference<JSONObject>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                "/api/bookmarks/4" -> response(link(4))
+                "/api/bookmarks/4/v2-selection" -> response(selection(3)) // Old contract: no automatic baseline.
+                "/api/v2-taxonomy" -> response(taxonomy())
+                "/api/bookmarks/4/v2-override" -> {
+                    received.set(JSONObject(request.body.readUtf8()))
+                    MockResponse().setResponseCode(503)
+                }
+                else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use {
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_topics_reset"))
+            compose.onNodeWithTag("v2_topics_reset").performClick()
+            compose.waitUntil(20_000) { received.get() != null }
+            compose.onNodeWithTag("v2_topics_reset_pending").assertExists()
+            compose.onNodeWithTag("v2_topics_chip_llm").assertDoesNotExist()
+            assertEquals("reset", received.get()!!.getString("action"))
+            assertEquals(1, runBlocking { CurationActionStore(context).snapshot().size })
         }
     }
 }

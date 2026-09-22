@@ -188,13 +188,17 @@ async function getSelection(env: Env, id: number): Promise<Response> {
   const link = await env.DB.prepare(`SELECT personal_revision, why, curation_status FROM links WHERE id = ?`).bind(id)
     .first<{ personal_revision: number; why: string | null; curation_status: string | null }>();
   if (!link) return fail("not_found", 404);
-  const { view, projected, stale } = await computeEffective(env, id);
+  const { view, automatic, projected, stale } = await computeEffective(env, id);
   const selection: V2Selection = {
     topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
     affordances: view.affordances, form: view.form, use: view.use
   };
   return reply({
     id, revision: link.personal_revision, selection,
+    // This is the same baseline used to derive view, before human overrides.
+    // Return only the six selection dimensions; entity state is independent.
+    automatic: { topics: automatic.topics, content_functions: automatic.content_functions,
+      carriers: automatic.carriers, affordances: automatic.affordances, form: automatic.form, use: automatic.use },
     taxonomy_version: taxonomyV2().version, definition_version: taxonomyV2().definition_version,
     provenance: { source: projected ? "decision" : "legacy", overrides: view.reviewed, revision: view.revision, stale },
     v1_only: !projected,

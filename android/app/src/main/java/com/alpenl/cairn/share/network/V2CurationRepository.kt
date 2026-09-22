@@ -54,18 +54,29 @@ internal class V2CurationRepository(private val transport: V2Transport) {
      */
     fun applyLocal(
         selection: MultidimensionalSelection,
-        automatic: MultidimensionalSelection,
+        automatic: MultidimensionalSelection?,
         field: String,
         term: String,
         action: String,
-    ): MultidimensionalSelection = when (field) {
-        "topics" -> selection.copy(topics = resolveMulti(selection.topics, automatic.topics, term, action))
-        "content_functions" -> selection.copy(contentFunctions = resolveMulti(selection.contentFunctions, automatic.contentFunctions, term, action))
-        "affordances" -> selection.copy(affordances = resolveMulti(selection.affordances, automatic.affordances, term, action))
-        "carriers" -> selection.copy(carriers = resolveSingle(selection.carriers, automatic.carriers, term, action))
-        "form" -> selection.copy(form = resolveSingleValue(selection.form, automatic.form, term, action))
-        "use" -> selection.copy(use = resolveSingleValue(selection.use, automatic.use, term, action))
-        else -> selection
+    ): MultidimensionalSelection {
+        if (action == "reset" && automatic == null) {
+            return selection.copy(unknownResetFields = selection.unknownResetFields + field)
+        }
+        // Non-reset actions never consult this fallback; unknown automatic
+        // state remains unknown rather than being copied from human values.
+        val baseline = automatic ?: MultidimensionalSelection()
+        val result = when (field) {
+            "topics" -> selection.copy(topics = resolveMulti(selection.topics, baseline.topics, term, action))
+            "content_functions" -> selection.copy(contentFunctions = resolveMulti(selection.contentFunctions, baseline.contentFunctions, term, action))
+            "affordances" -> selection.copy(affordances = resolveMulti(selection.affordances, baseline.affordances, term, action))
+            "carriers" -> selection.copy(carriers = resolveSingle(selection.carriers, baseline.carriers, term, action))
+            "form" -> selection.copy(form = resolveSingleValue(selection.form, baseline.form, term, action))
+            "use" -> selection.copy(use = resolveSingleValue(selection.use, baseline.use, term, action))
+            else -> selection
+        }
+        val replacesUnknown = action == "set_empty" || (action == "reset" && term.isEmpty()) ||
+            (field in setOf("carriers", "form", "use") && action == "accept")
+        return if (replacesUnknown) result.copy(unknownResetFields = result.unknownResetFields - field) else result
     }
 
     /**

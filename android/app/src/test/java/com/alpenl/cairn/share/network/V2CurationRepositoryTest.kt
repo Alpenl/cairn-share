@@ -43,6 +43,22 @@ class V2CurationRepositoryTest {
         }
     }
 
+    @Test
+    fun `a missing automatic baseline never previews human values as a confirmed reset`() {
+        val repo = V2CurationRepository(FakeTransport())
+        val human = selection(topics = listOf("eng"), carriers = listOf("single"))
+        val pending = repo.applyLocal(human, null, "topics", "", "reset")
+        assertEquals(setOf("topics"), pending.unknownResetFields)
+        val uncertainAccept = repo.applyLocal(pending, null, "topics", "llm", "accept")
+        assertTrue("topics" in uncertainAccept.unknownResetFields)
+        val explicitEmpty = repo.applyLocal(pending, null, "topics", "", "set_empty")
+        assertTrue(explicitEmpty.unknownResetFields.isEmpty())
+        assertTrue(explicitEmpty.topics.isEmpty())
+        val known = repo.applyLocal(human, selection(topics = listOf("llm")), "topics", "", "reset")
+        assertEquals(listOf("llm"), known.topics)
+        assertTrue(known.unknownResetFields.isEmpty())
+    }
+
     private fun selection(
         topics: List<String> = emptyList(),
         contentFunctions: List<String> = emptyList(),

@@ -1,5 +1,13 @@
 package com.alpenl.cairn.share
 
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStoreFile
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import org.json.JSONArray
 import androidx.lifecycle.ViewModelStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -17,20 +25,21 @@ import org.junit.runner.RunWith
 import java.net.HttpURLConnection
 import java.net.URL
 
-/** Run in two separate app processes by tests/android-worker/run.sh. */
+/** Run in separate app processes by tests/android-worker/run.sh. */
 @RunWith(AndroidJUnit4::class)
 class CurationWorkerRecoveryTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
     private val base get() = InstrumentationRegistry.getArguments().getString("cairnWorkerUrl").orEmpty()
     private val store get() = CurationActionStore(context)
-    private val account get() = accountKeyFor(base, "app")
+    private val token = "test-a-12345678"
+    private val account get() = accountKeyFor(base, token)
     private val models = ViewModelStore()
 
     private fun http(path: String, body: JSONObject? = null): JSONObject {
         val connection = URL(base + path).openConnection() as HttpURLConnection
         connection.connectTimeout = 5_000
         connection.readTimeout = 5_000
-        connection.setRequestProperty("Authorization", "Bearer app")
+        connection.setRequestProperty("Authorization", "Bearer $token")
         try {
             if (body != null) {
                 connection.requestMethod = "POST"
@@ -60,10 +69,10 @@ class CurationWorkerRecoveryTest {
         while (!predicate()) delay(30)
     }
 
-    @Test fun persistBeforeSendAndLoseFirstResponse() = runBlocking {
+    @Test fun persistBeforeSendAndLoseFirstResponse() = runBlocking<Unit> {
         assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
         store.clear()
-        SharePreferencesStore(context).setApiToken("app")
+        SharePreferencesStore(context).setApiToken(token)
         control("online")
         val created = http("/__test/direct/api/links", JSONObject().put("url", "https://example.com/android-recovery"))
         val id = created.getInt("id")
@@ -99,7 +108,7 @@ class CurationWorkerRecoveryTest {
         withContext(Dispatchers.Main) { models.clear() }
     }
 
-    @Test fun recoverThenHandleTwoRealConflictsAndMidChainFailure() = runBlocking {
+    @Test fun recoverThenHandleTwoRealConflictsAndMidChainFailure() = runBlocking<Unit> {
         assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
         val original = store.snapshot().filter { it.accountKey == account }
         assertEquals(5, original.size)
@@ -151,10 +160,10 @@ class CurationWorkerRecoveryTest {
         withContext(Dispatchers.Main) { models.clear() }
     }
 
-    @Test fun discardAndAccountSwitchPreserveUnrelatedActions() = runBlocking {
+    @Test fun discardAndAccountSwitchPreserveUnrelatedActions() = runBlocking<Unit> {
         assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
         store.clear()
-        SharePreferencesStore(context).setApiToken("app")
+        SharePreferencesStore(context).setApiToken(token)
         control("online")
         val ids = listOf("discard", "retain").map {
             http("/__test/direct/api/links", JSONObject().put("url", "https://example.com/android-$it")).getInt("id")
@@ -183,10 +192,136 @@ class CurationWorkerRecoveryTest {
         delay(200)
         assertEquals(2, store.snapshot().size)
         assertEquals(0L, remote(ids[1]).getLong("revision"))
-        SharePreferencesStore(context).setApiToken("app")
+        SharePreferencesStore(context).setApiToken(token)
         waitFor { store.snapshot().isEmpty() }
         assertEquals(0L, remote(ids[0]).getLong("revision"))
         assertEquals(2L, remote(ids[1]).getLong("revision"))
+        withContext(Dispatchers.Main) { models.clear() }
+    }
+
+    @Test fun preserveAmbiguousLegacyAndSeparateSameSuffixAccounts() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        SharePreferencesStore(context).setApiToken(token)
+        control("writes_offline")
+        val id = http("/__test/direct/api/links", JSONObject().put("url", "https://example.com/legacy-owned")).getInt("id")
+        val other = http("/__test/direct/api/links", JSONObject().put("url", "https://example.com/legacy-unknown-revision")).getInt("id")
+        val legacy = legacyAccountKeyFor(base, token)
+        val actions = listOf(
+            QueuedCurationAction(id, "legacy-first", "topics", "llm", "accept", 0, legacy, queueVersion = 0),
+            QueuedCurationAction(id, "legacy-second", "topics", "llm", "reject", 0, legacy, queueVersion = 0),
+            QueuedCurationAction(other, "legacy-no-revision", "carriers", "single", "accept", null, legacy, queueVersion = 0),
+            QueuedCurationAction(other, "bound-before-upgrade", "topics", "eng", "accept", 0, account),
+            QueuedCurationAction(9999, "other-server-legacy", "topics", "eng", "accept", 0, legacyAccountKeyFor("https://other.example", token), queueVersion = 0),
+        )
+        // Emulate old on-disk preferences, before the production singleton is opened.
+        val job = SupervisorJob()
+        val oldStore = PreferenceDataStoreFactory.create(scope = CoroutineScope(job + Dispatchers.IO)) {
+            context.preferencesDataStoreFile("cairn_curation_actions")
+        }
+        oldStore.edit { prefs ->
+            val array = JSONArray()
+            actions.forEach { action -> array.put(action.encode().apply { if (action.queueVersion == 0) remove("queue_version") }) }
+            prefs[stringPreferencesKey("curation_actions_json")] = array.toString()
+        }
+        job.cancelAndJoin()
+        // A historical success with a lost response must still confirm its original key.
+        http("/__test/direct/api/bookmarks/$id/v2-override", JSONObject(FieldOverride("topics", "llm", "accept", "legacy-first", 0).encode()))
+        val model = start()
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2LegacyActions[id]?.size == 2 && model.uiState.message?.text?.contains("网络不可用") == true } }
+        withContext(Dispatchers.Main) { model.recoverLegacyV2Actions(other) }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.message?.text?.contains("先同步") == true } }
+        assertEquals(actions, store.snapshot()) // No implicit merge of two independent chains.
+        val before = http("/__test/control").getJSONArray("requests").length()
+        val collidingToken = "test-b-12345678"
+        assertEquals(legacyAccountKeyFor(base, token), legacyAccountKeyFor(base, collidingToken))
+        assertNotEquals(account, accountKeyFor(base, collidingToken))
+        SharePreferencesStore(context).setApiToken(collidingToken)
+        waitFor { withContext(Dispatchers.Main) { model.uiState.preferences.apiToken == collidingToken && model.uiState.v2Queued.isEmpty() } }
+        control("online")
+        withContext(Dispatchers.Main) { model.flushV2Queue(); model.recoverLegacyV2Actions(id) }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.message?.text?.contains("无法确认当前收藏") == true } }
+        assertEquals(before, http("/__test/control").getJSONArray("requests").length())
+        assertEquals(actions, store.snapshot())
+        assertEquals(0L, remote(other).getLong("revision"))
+        withContext(Dispatchers.Main) { models.clear() }
+        SharePreferencesStore(context).setApiToken(token)
+        control("writes_offline")
+    }
+
+    @Test fun explicitlyRecoverLegacyAfterRestart() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        val old = store.snapshot()
+        val id = old.first { it.operationKey == "legacy-first" }.linkId
+        val other = old.first { it.operationKey == "legacy-no-revision" }.linkId
+        control("online")
+        val model = start()
+        waitFor { store.snapshot().none { it.operationKey == "bound-before-upgrade" } }
+        assertEquals(4, store.snapshot().size)
+        assertEquals(1L, remote(id).getLong("revision"))
+        assertEquals(1L, remote(other).getLong("revision"))
+        withContext(Dispatchers.Main) { model.recoverLegacyV2Actions(id) }
+        waitFor { store.snapshot().any { it.operationKey == "legacy-second" && it.conflictRevision == 1L } }
+        assertTrue(store.snapshot().none { it.operationKey == "legacy-first" })
+        assertEquals(1L, remote(id).getLong("revision")) // Replay did not apply the first action twice.
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Conflicts[id] == 1L } }
+        withContext(Dispatchers.Main) { model.reapplyV2Draft(id) }
+        waitFor { store.snapshot().none { it.operationKey == "legacy-second" } }
+        assertEquals(2L, remote(id).getLong("revision"))
+        withContext(Dispatchers.Main) { model.recoverLegacyV2Actions(other) }
+        waitFor { store.snapshot().any { it.operationKey == "legacy-no-revision" && it.conflictRevision == 1L } }
+        assertNull(store.snapshot().first { it.operationKey == "legacy-no-revision" }.expectedRevision)
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Conflicts[other] == 1L } }
+        withContext(Dispatchers.Main) { model.reapplyV2Draft(other) }
+        waitFor { store.snapshot().size == 1 }
+        assertEquals("other-server-legacy", store.snapshot().single().operationKey)
+        assertEquals(2L, remote(other).getLong("revision"))
+        assertEquals("single", remote(other).getJSONObject("selection").getJSONArray("carriers").getString(0))
+        withContext(Dispatchers.Main) { models.clear() }
+    }
+
+    @Test fun persistResetWithIndependentAutomaticBaseline() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        store.clear()
+        SharePreferencesStore(context).setApiToken(token)
+        control("online")
+        val id = InstrumentationRegistry.getArguments().getString("cairnBaselineID")!!.toInt()
+        http("/__test/direct/api/bookmarks/$id/v2-override", JSONObject(FieldOverride("topics", "", "set_empty", "baseline-empty", 0).encode()))
+        http("/__test/direct/api/bookmarks/$id/v2-override", JSONObject(FieldOverride("topics", "eng", "accept", "baseline-human", 1).encode()))
+        val model = start()
+        waitFor { withContext(Dispatchers.Main) { model.uiState.preferencesLoaded } }
+        withContext(Dispatchers.Main) { model.loadV2Selection(id) }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Selections.containsKey(id) } }
+        withContext(Dispatchers.Main) {
+            assertEquals(listOf("eng"), model.uiState.v2Selections[id]!!.topics)
+            assertEquals(listOf("llm"), model.uiState.v2Selections[id]!!.automatic!!.topics)
+        }
+        control("writes_offline")
+        withContext(Dispatchers.Main) { model.applyV2Action(id, "topics", "", "reset") }
+        waitFor { store.snapshot().size == 1 && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() } }
+        withContext(Dispatchers.Main) {
+            assertEquals(listOf("llm"), model.uiState.v2Drafts[id]!!.topics)
+            assertTrue(model.uiState.v2Drafts[id]!!.unknownResetFields.isEmpty())
+        }
+        assertEquals("eng", remote(id).getJSONObject("selection").getJSONArray("topics").getString(0))
+        withContext(Dispatchers.Main) { models.clear() }
+    }
+
+    @Test fun restoreAutomaticDraftAfterProcessDeath() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        val id = store.snapshot().single().linkId
+        control("writes_offline")
+        val model = start()
+        waitFor { withContext(Dispatchers.Main) { model.uiState.preferencesLoaded } }
+        withContext(Dispatchers.Main) { model.loadV2Selection(id) }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Drafts[id]?.topics == listOf("llm") && model.uiState.v2Busy.isEmpty() } }
+        assertEquals(2L, remote(id).getLong("revision"))
+        control("online")
+        withContext(Dispatchers.Main) { model.flushV2Queue() }
+        waitFor { store.snapshot().isEmpty() }
+        val result = remote(id)
+        assertEquals(3L, result.getLong("revision"))
+        assertEquals("llm", result.getJSONObject("selection").getJSONArray("topics").getString(0))
+        assertEquals("llm", result.getJSONObject("automatic").getJSONArray("topics").getString(0))
         withContext(Dispatchers.Main) { models.clear() }
     }
 }

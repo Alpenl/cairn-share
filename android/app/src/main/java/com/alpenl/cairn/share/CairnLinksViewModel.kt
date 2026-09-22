@@ -80,6 +80,7 @@ internal data class CairnLinksUiState(
     val v2Conflicts: Map<Int, Long> = emptyMap(),
     val v2Busy: Set<Int> = emptySet(),
     val v2Queued: Map<Int, Int> = emptyMap(),
+    val v2LegacyActions: Map<Int, List<QueuedCurationAction>> = emptyMap(),
     val v2Available: Boolean = true,
     val v2Taxonomy: BookmarkTaxonomy? = null,
     val v2TaxonomyLoading: Boolean = false,
@@ -189,7 +190,9 @@ internal class CairnLinksViewModel(
                 val mine = actions.filter { it.accountKey == curationAccountKey() }
                 val queued = mine.groupingBy { it.linkId }.eachCount()
                 val conflicts = mine.mapNotNull { action -> action.conflictRevision?.let { action.linkId to it } }.toMap()
-                uiState = uiState.copy(v2Queued = queued, v2Conflicts = conflicts)
+                val legacyKey = legacyAccountKeyFor(uiState.apiBaseUrl, uiState.preferences.apiToken)
+                val legacy = actions.filter { it.accountKey == legacyKey }.groupBy { it.linkId }
+                uiState = uiState.copy(v2Queued = queued, v2Conflicts = conflicts, v2LegacyActions = legacy)
             }
         }
     }
@@ -213,8 +216,9 @@ internal class CairnLinksViewModel(
                 is V2Result.Loaded -> {
                     if (result.value.revision < (uiState.v2Selections[id]?.revision ?: 0)) return@launch
                     val pending = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
+                    if (account != curationAccountKey()) return@launch
                     val draft = pending.fold(result.value) { current, action ->
-                        v2Repository.applyLocal(current, result.value, action.field, action.term, action.action)
+                        v2Repository.applyLocal(current, result.value.automatic, action.field, action.term, action.action)
                     }
                     uiState = uiState.copy(
                         v2Selections = uiState.v2Selections + (id to result.value),
@@ -235,9 +239,11 @@ internal class CairnLinksViewModel(
     fun loadV2Taxonomy() {
         val token = uiState.preferences.apiToken
         if (token.isBlank() || uiState.v2Taxonomy != null || uiState.v2TaxonomyLoading) return
+        val account = curationAccountKey()
         uiState = uiState.copy(v2TaxonomyLoading = true)
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { v2Repository.loadTaxonomy(token) }
+            if (account != curationAccountKey()) return@launch
             when (result) {
                 is V2Result.Loaded -> uiState = uiState.copy(v2TaxonomyLoading = false, v2Taxonomy = result.value, v2Available = true)
                 V2Result.Unsupported -> uiState = uiState.copy(v2TaxonomyLoading = false, v2Available = false)
@@ -251,7 +257,7 @@ internal class CairnLinksViewModel(
         if (uiState.preferences.apiToken.isBlank()) return
         val selection = uiState.v2Selections[id] ?: return
         val account = curationAccountKey()
-        val draft = v2Repository.applyLocal(uiState.v2Drafts[id] ?: selection, selection, field, term, action)
+        val draft = v2Repository.applyLocal(uiState.v2Drafts[id] ?: selection, selection.automatic, field, term, action)
         val queued = QueuedCurationAction(id, UUID.randomUUID().toString(), field, term, action, selection.revision, account)
         uiState = uiState.copy(v2Drafts = uiState.v2Drafts + (id to draft), v2Busy = uiState.v2Busy + id)
         viewModelScope.launch {
@@ -259,7 +265,7 @@ internal class CairnLinksViewModel(
                 curationActionStore.enqueue(queued)
                 if (account == curationAccountKey()) pumpV2Actions()
             } catch (error: java.io.IOException) {
-                uiState = uiState.copy(v2Busy = uiState.v2Busy - id,
+                if (account == curationAccountKey()) uiState = uiState.copy(v2Busy = uiState.v2Busy - id,
                     message = nextMessage("无法保存离线动作，草稿已保留，请重试。"))
             }
         }
@@ -282,8 +288,9 @@ internal class CairnLinksViewModel(
                             when (result) {
                                 is CurationSubmitResult.Applied -> {
                                     val remaining = curationActionStore.snapshot().any { it.accountKey == account && it.linkId == pending.linkId }
+                                    if (account != curationAccountKey()) return@flush
                                     if (selection != null) {
-                                        val accepted = v2Repository.applyLocal(selection, selection, pending.field, pending.term, pending.action)
+                                        val accepted = v2Repository.applyLocal(selection, selection.automatic, pending.field, pending.term, pending.action)
                                         uiState = uiState.copy(v2Selections = uiState.v2Selections + (pending.linkId to accepted.copy(revision = result.revision)))
                                     }
                                     if (!remaining) {
@@ -328,8 +335,9 @@ internal class CairnLinksViewModel(
                 if (result is V2Result.Loaded) {
                     curationActionStore.rebase(account, id, result.value.revision)
                     val actions = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
+                    if (account != curationAccountKey()) return@withLock
                     val draft = actions.fold(result.value) { current, action ->
-                        v2Repository.applyLocal(current, result.value, action.field, action.term, action.action)
+                        v2Repository.applyLocal(current, result.value.automatic, action.field, action.term, action.action)
                     }
                     uiState = uiState.copy(v2Selections = uiState.v2Selections + (id to result.value),
                         v2Drafts = uiState.v2Drafts + (id to draft), v2Conflicts = uiState.v2Conflicts - id)
@@ -352,6 +360,36 @@ internal class CairnLinksViewModel(
                     loadV2Selection(id, force = true)
                 }
             }
+        }
+    }
+
+    /** Invoked only by the explicit ownership confirmation in the detail UI. */
+    fun recoverLegacyV2Actions(id: Int, confirmedAccount: String = curationAccountKey()) {
+        val token = uiState.preferences.apiToken
+        if (token.isBlank()) return
+        val account = curationAccountKey()
+        if (confirmedAccount != account) return
+        val legacyKey = legacyAccountKeyFor(uiState.apiBaseUrl, token)
+        viewModelScope.launch {
+            var recovered = false
+            curationActionStore.syncMutex.withLock {
+                val result = withContext(Dispatchers.IO) { v2Repository.load(id, token) }
+                if (account != curationAccountKey()) return@withLock
+                if (result is V2Result.Loaded) {
+                    val adopted = curationActionStore.adoptLegacy(legacyKey, account, id, result.value.revision)
+                    recovered = adopted
+                    if (account != curationAccountKey()) return@withLock
+                    if (adopted) {
+                        loadV2Selection(id, force = true)
+                        uiState = uiState.copy(message = nextMessage("旧版动作已恢复；版本冲突会保留供你确认。"))
+                    } else {
+                        uiState = uiState.copy(message = nextMessage("请先同步或处理这条收藏现有的离线修改，再恢复旧版动作。"))
+                    }
+                } else {
+                    uiState = uiState.copy(message = nextMessage("无法确认当前收藏，旧版动作仍保留在本地。"))
+                }
+            }
+            if (recovered && account == curationAccountKey()) pumpV2Actions()
         }
     }
 
@@ -951,9 +989,13 @@ internal class CairnLinksViewModel(
                     )
                     if (firstLoad || previousToken != preferences.apiToken.trim()) {
                         uiState = uiState.copy(v2Selections = emptyMap(), v2Drafts = emptyMap(),
-                            v2Conflicts = emptyMap(), v2Busy = emptySet(), v2Queued = emptyMap())
-                        val mine = curationActionStore.snapshot().filter { it.accountKey == curationAccountKey() }
+                            v2Conflicts = emptyMap(), v2Busy = emptySet(), v2Queued = emptyMap(), v2LegacyActions = emptyMap(),
+                            v2Taxonomy = null, v2TaxonomyLoading = false, v2Available = true)
+                        val all = curationActionStore.snapshot()
+                        val mine = all.filter { it.accountKey == curationAccountKey() }
+                        val legacyKey = legacyAccountKeyFor(uiState.apiBaseUrl, preferences.apiToken)
                         uiState = uiState.copy(v2Queued = mine.groupingBy { it.linkId }.eachCount(),
+                            v2LegacyActions = all.filter { it.accountKey == legacyKey }.groupBy { it.linkId },
                             v2Conflicts = mine.mapNotNull { a -> a.conflictRevision?.let { a.linkId to it } }.toMap())
                         refreshLinks()
                         pumpV2Actions()

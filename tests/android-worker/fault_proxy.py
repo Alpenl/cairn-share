@@ -52,7 +52,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with lock:
                 if self.command == "POST":
                     change = json.loads(body)
-                    assert change["mode"] in ("online", "offline", "lose_first", "conflict", "fail_key")
+                    assert change["mode"] in ("online", "offline", "writes_offline", "lose_first", "conflict", "fail_key")
                     state.update(mode=change["mode"], key=change.get("key", ""))
                 data = json.dumps(state).encode()
             return self.respond(200, data)
@@ -71,7 +71,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if mode == "conflict" and key == action["operation_key"]:
                     state["mode"] = "online"
                     state["web_writes"] += 1
-        if not direct and mode == "offline":
+        if not direct and (mode == "offline" or (mode == "writes_offline" and mutation)):
             return self.drop()
         if mutation and mode == "fail_key" and key == action["operation_key"]:
             return self.drop()

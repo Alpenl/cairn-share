@@ -26,6 +26,8 @@ internal data class MultidimensionalSelection(
     val v1ProjectionTopics: List<String> = emptyList(),
     val revision: Long = 0,
     val available: Boolean = false,
+    val automatic: MultidimensionalSelection? = null,
+    val unknownResetFields: Set<String> = emptySet(),
 )
 
 internal sealed interface V2Result<out T> {
@@ -166,8 +168,21 @@ internal class V2CurationClient(
                 v1ProjectionTopics = projection.strings("topics"),
                 revision = payload.optLong("revision", 0),
                 available = true,
+                automatic = decodeAutomatic(payload.optJSONObject("automatic")),
             )
         )
+    }
+
+    private fun decodeAutomatic(value: JSONObject?): MultidimensionalSelection? {
+        if (value == null) return null
+        for (field in listOf("topics", "content_functions", "carriers", "affordances")) {
+            val values = value.optJSONArray(field) ?: return null
+            if ((0 until values.length()).any { values.opt(it) !is String }) return null
+        }
+        if (value.opt("form") !is String || value.opt("use") !is String) return null
+        return MultidimensionalSelection(topics = value.strings("topics"),
+            contentFunctions = value.strings("content_functions"), carriers = value.strings("carriers"),
+            affordances = value.strings("affordances"), form = value.getString("form"), use = value.getString("use"), available = true)
     }
 }
 

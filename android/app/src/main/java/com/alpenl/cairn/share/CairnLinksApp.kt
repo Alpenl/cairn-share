@@ -289,6 +289,7 @@ internal fun CairnLinksApp(
                     onV2Reapply = { viewModel.reapplyV2Draft(id) },
                     onV2Discard = { viewModel.discardV2Draft(id) },
                     onFlushV2 = viewModel::flushV2Queue,
+                    onRecoverLegacyV2 = { viewModel.recoverLegacyV2Actions(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken)) },
                     onDelete = { viewModel.deleteLink(id) { navController.popBackStack() } },
                 )
             }
@@ -886,6 +887,7 @@ private fun DetailScreen(
     onV2Reapply: () -> Unit,
     onV2Discard: () -> Unit,
     onFlushV2: () -> Unit,
+    onRecoverLegacyV2: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val link = state.links.firstOrNull { it.id == id }
@@ -925,6 +927,11 @@ private fun DetailScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         LinkDetailContent(link, id in state.busyIds, onOpenExternal, onCopy, onToggleLearned)
                     }
+                }
+                val legacyActions = state.v2LegacyActions[id].orEmpty()
+                if (legacyActions.isNotEmpty()) item(key = "legacy_curation") {
+                    LegacyCurationRecoveryNotice(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken),
+                        legacyActions, onRecoverLegacyV2)
                 }
                 if (loadState == DetailLoadState.Loading) item(key = "loading") { LoadingState("正在加载归档内容...") }
                 if (loadState == DetailLoadState.Failed) item(key = "retry") {
@@ -970,7 +977,7 @@ private fun DetailScreen(
                                 busy = id in state.v2Busy,
                                 queuedCount = state.v2Queued[id] ?: 0,
                                 available = state.v2Available,
-                                onLoadTaxonomy = onLoadTaxonomy,
+                                onLoadTaxonomy = onLoadV2Taxonomy,
                                 onAction = onV2Action,
                                 onReapply = onV2Reapply,
                                 onDiscard = onV2Discard,

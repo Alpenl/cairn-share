@@ -829,3 +829,25 @@ it("allows only authenticated App curation reads and actions on the Android path
   expect(view.revision).toBe(1);
   expect(view.selection.topics).toEqual(["llm"]);
 });
+
+
+it("returns the independent automatic baseline with the effective App selection", async () => {
+  const id = await createLink();
+  await env.DB.prepare("UPDATE links SET classification=? WHERE id=?")
+    .bind(JSON.stringify({ topics: ["llm"], form: "method", use: "try", uncertainty: false }), id).run();
+  const post = (field: string, term: string, action: string, revision: number) => request(`bookmarks/${id}/v2-override`,
+    { field, term, action, operation_key: `baseline-${revision}`, expected_revision: revision }, "POST", "app");
+  expect((await post("topics", "", "set_empty", 0)).status).toBe(200);
+  expect((await post("topics", "eng", "accept", 1)).status).toBe(200);
+  const read = async () => (await request(`bookmarks/${id}/v2-selection`, undefined, "GET", "app")).json() as Promise<{
+    revision: number; selection: { topics: string[] }; automatic: { topics: string[]; form: string }
+  }>;
+  const before = await read();
+  expect(before.selection.topics).toEqual(["eng"]);
+  expect(before.automatic).toEqual({ topics: ["llm"], content_functions: [], carriers: [], affordances: [], form: "method", use: "try" });
+  expect((await post("topics", "", "reset", 2)).status).toBe(200);
+  const after = await read();
+  expect(after.selection.topics).toEqual(["llm"]);
+  expect(after.automatic).toEqual(before.automatic);
+  expect(after.revision).toBe(3);
+});
