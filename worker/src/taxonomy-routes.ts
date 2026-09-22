@@ -338,24 +338,3 @@ async function decideProposal(request: Request, env: Env, id: string): Promise<R
   // stored decisions implicitly.
   return reply({ id, status: body.decision, vocabulary_changed: false });
 }
-
-// --- Search helpers ---------------------------------------------------------
-
-// selectionFilterSQL returns a parameterised WHERE fragment for a dimension
-// filter. Same-dimension values are OR-ed; different dimensions are AND-ed.
-export function selectionFilterSQL(filters: Partial<Record<"topics" | "content_functions" | "carriers" | "affordances", string[]>>): { clause: string; bindings: string[] } {
-  const clauses: string[] = [];
-  const bindings: string[] = [];
-  for (const dimension of ["topics", "content_functions", "carriers", "affordances"] as const) {
-    const values = filters[dimension];
-    if (!values || values.length === 0) continue;
-    const ors: string[] = [];
-    for (const value of values) {
-      if (!findTerm(dimension, value)) continue;
-      ors.push(`EXISTS (SELECT 1 FROM json_each(s.${dimension}) WHERE value = ?)`);
-      bindings.push(value);
-    }
-    if (ors.length > 0) clauses.push("(" + ors.join(" OR ") + ")");
-  }
-  return { clause: clauses.length > 0 ? " AND " + clauses.join(" AND ") : "", bindings };
-}

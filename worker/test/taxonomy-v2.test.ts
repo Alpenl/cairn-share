@@ -2,7 +2,7 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it } from "vitest";
 import worker from "../src/index";
 import { applyV1Write, projectV1, proposalImpact, taxonomyV2, validateTaxonomy, validateV2Selection } from "../src/taxonomy-v2";
-import { expandSearchText, selectionFilterSQL } from "../src/taxonomy-routes";
+import { expandSearchText } from "../src/taxonomy-routes";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 
@@ -140,15 +140,7 @@ it("search text covers objective and personal fields", () => {
   }
 });
 
-it("selection filters parameterise same-dimension OR and cross-dimension AND", () => {
-  const { clause, bindings } = selectionFilterSQL({ topics: ["llm", "eng"], content_functions: ["method"] });
-  expect(clause).toContain(" OR ");
-  expect(clause).toContain(" AND ");
-  expect(bindings).toEqual(["llm", "eng", "method"]);
-  // An unknown term is dropped rather than injected into SQL.
-  const { bindings: safe } = selectionFilterSQL({ topics: ["invented"] });
-  expect(safe).toEqual([]);
-});
+
 
 it("requires the enricher token for the v2 taxonomy API", async () => {
   expect((await request("v2/taxonomy", undefined, "GET", "app")).status).toBe(401);

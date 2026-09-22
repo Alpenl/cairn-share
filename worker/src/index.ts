@@ -1,3 +1,4 @@
+import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, refreshSource, sourceRoute } from "./classification";
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
@@ -167,7 +168,7 @@ const MAX_ENRICHMENT_ERROR_LENGTH = 2_000;
 const ENRICHMENT_RETRY_DELAYS_MILLISECONDS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
 const READ_CACHE_TTL_SECONDS = 15;
 const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}, s-maxage=${READ_CACHE_TTL_SECONDS}`;
-const CACHE_VERSION = "3";
+const CACHE_VERSION = "4";
 const CACHE_ORIGIN = "https://cairn-share-cache.internal";
 const LINKS_CACHE_GENERATION_KEY = "links_generation";
 const X_LINK_SQL = `(
@@ -660,15 +661,10 @@ function bookmarkFilters(url: URL, query?: string): { clauses: string[]; binding
     clauses.push("curation_status = ?");
     bindings.push(curationStatus);
   }
-  for (const [key, dimension, field] of [["topic", "topics", "topics"], ["form", "forms", "form"], ["use", "uses", "use"]] as const) {
-    const value = url.searchParams.get(key);
-    if (!value) continue;
-    if (!validTerm(dimension, value, false)) return error("invalid_query");
-    clauses.push(key === "topic"
-      ? "EXISTS (SELECT 1 FROM json_each(COALESCE(curation, classification, '{}'), '$.topics') WHERE value = ?)"
-      : `json_extract(COALESCE(curation, classification, '{}'), '$.${field}') = ?`);
-    bindings.push(value);
-  }
+  const selection = selectionFilters(url.searchParams);
+  if (!selection) return error("invalid_query");
+  clauses.push(...selection.clauses);
+  bindings.push(...selection.bindings);
   const wechatSQL = "(lower(url) LIKE 'https://mp.weixin.qq.com/%' OR lower(url) LIKE 'http://mp.weixin.qq.com/%')";
   const source = url.searchParams.get("source");
   if (source) {
@@ -719,6 +715,10 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   if (query === null) return error("invalid_query");
   const filters = bookmarkFilters(url, query);
   if (filters instanceof Response) return filters;
+  // Counts are status facets for the filtered collection, independent of the
+  // selected status tab and page cursor. Capture before adding those clauses.
+  const countWhere = filters.clauses.length ? `WHERE ${filters.clauses.join(" AND ")}` : "";
+  const countBindings = [...filters.bindings];
   const { clauses, bindings } = filters;
   if (beforeId !== undefined) {
     clauses.push("id < ?");
@@ -750,16 +750,14 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'exhausted' THEN 1 ELSE 0 END), 0) AS exhausted,
             COALESCE(SUM(CASE WHEN NOT ${X_LINK_SQL} THEN 1 ELSE 0 END), 0) AS unsupported
-       FROM links`
-  );
+       FROM links ${countWhere}`
+  ).bind(...countBindings);
 
-  const [listResult, countRow] = await timing.measure("db", () =>
-    Promise.all([
-      listStatement.all<EnrichmentListRow>(),
-      countStatement.first<EnrichmentCountRow>()
-    ])
-  );
-  const rows = listResult.results ?? [];
+  // D1 batches are transactional. Do not attach counts read after a
+  // concurrent mutation to a page that predates it.
+  const [listResult, countResult] = await timing.measure("db", () => env.DB.batch([listStatement, countStatement]));
+  const rows = (listResult.results ?? []) as unknown as EnrichmentListRow[];
+  const countRow = (countResult.results?.[0] ?? null) as unknown as EnrichmentCountRow | null;
   const items = rows.slice(0, limit);
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
   return json({
@@ -1474,7 +1472,7 @@ function listCacheUrl(
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
   if (parsed.query !== undefined) url.searchParams.set("q", parsed.query);
-  for (const key of ["include", "include_cache_identity", "curation_status", "topic", "form", "use", "source", "uncertain", "since"]) {
+  for (const key of ["include", "include_cache_identity", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
     const value = requestUrl.searchParams.get(key);
     if (value) url.searchParams.set(key, value);
   }
