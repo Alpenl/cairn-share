@@ -137,7 +137,8 @@ internal class V2CurationRepository(private val transport: V2Transport) {
     ): CurationFlushResult {
         val outcomes = mutableListOf<Pair<QueuedCurationAction, CurationSubmitResult>>()
         while (active()) {
-            val action = queue.snapshot().firstOrNull { it.accountKey == accountKey } ?: break
+            val blocked = queue.blockedLinkIds(accountKey)
+            val action = queue.snapshot().firstOrNull { it.accountKey == accountKey && it.linkId !in blocked } ?: break
             val result = when {
                 action.conflictRevision != null -> CurationSubmitResult.Conflict(action.conflictRevision)
                 !action.ready -> CurationSubmitResult.Failed(FailureKind.Server)
@@ -187,6 +188,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
 
 
 internal interface CurationQueue {
+    suspend fun blockedLinkIds(accountKey: String): Set<Int> = emptySet()
     suspend fun snapshot(): List<QueuedCurationAction>
     suspend fun acknowledge(action: QueuedCurationAction, revision: Long)
     suspend fun conflict(action: QueuedCurationAction, revision: Long)

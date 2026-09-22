@@ -22,3 +22,12 @@ Authenticated responses now use `Cache-Control: private, no-store`; internal gen
 No production migration, Cron deployment or remote data cleanup is performed by local verification. Tests use synthetic data and local D1/R2.
 
 References: [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/) documents strong consistency and list/delete limits; [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) documents the scheduled handler and configuration. Checked 2026-09-23.
+
+
+## Android deletion recovery
+
+Android records the explicit deletion intent in its existing DataStore before sending DELETE. The journal contains only the full account/server fingerprint, numeric link ID and confirmation bit. A confirmed 204, or the specific 503 `deletion_cleanup_pending`, atomically removes that account's queued curation actions and records confirmation. Generic 503, malformed responses, authorization errors and transport errors do not count as confirmation; the intent and previous actions remain for a retry. The pending intent blocks curation replay and new curation enqueues for that account/link. Startup or account activation retries pending deletions once; it does not run an unbounded network retry loop. A storage write failure is shown and does not claim completed local cleanup.
+
+The shared queue mutex serializes deletion against in-flight curation acknowledgements. Confirmed IDs are removed from root, library, search, detail-load, edit-draft and v2 selection/draft/conflict/busy/queue views. Persisted confirmation filters late and subsequently stale list/detail/selection responses, including after process recreation and A→B→A account changes. An old-account callback cannot navigate the new account, while its durable confirmation still clears the correct account's owned data. Other accounts' actions are retained; ambiguous legacy suffix-only actions cannot safely be attributed and are retained outside the deleted item's visible state until explicit ownership handling.
+
+The UI distinguishes “收藏已移除，附件正在后台清理” from full deletion confirmation. Server Cron owns attachment cleanup after that response; Android does not manufacture a physical-purge confirmation. These guards apply to this app's managed views and action store; exported files, system screenshots or previously cached data owned by other applications are outside its erase capability.

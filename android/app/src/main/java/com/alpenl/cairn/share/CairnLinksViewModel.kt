@@ -202,11 +202,14 @@ internal class CairnLinksViewModel(
     // The serial curation action queue. A pending action is only removed after
     // the server confirms it (R2-04/R2-05).
     private var v2Pumping = false
+    private var deletedLinks = emptySet<Int>()
+    private var pendingDeletions = emptySet<Int>()
 
     init {
         observeSettings()
         observePendingUploads()
         observeCurationActions()
+        observeDeletionRecords()
         checkForUpdates()
     }
 
@@ -215,12 +218,26 @@ internal class CairnLinksViewModel(
     private fun observeCurationActions() {
         viewModelScope.launch {
             curationActionStore.actions.catch { emit(emptyList()) }.collect { actions ->
-                val mine = actions.filter { it.accountKey == curationAccountKey() }
+                val mine = actions.filter { it.accountKey == curationAccountKey() && it.linkId !in deletedLinks }
                 val queued = mine.groupingBy { it.linkId }.eachCount()
                 val conflicts = mine.mapNotNull { action -> action.conflictRevision?.let { action.linkId to it } }.toMap()
                 val legacyKey = legacyAccountKeyFor(uiState.apiBaseUrl, uiState.preferences.apiToken)
-                val legacy = actions.filter { it.accountKey == legacyKey }.groupBy { it.linkId }
+                val legacy = actions.filter { it.accountKey == legacyKey && it.linkId !in deletedLinks }.groupBy { it.linkId }
                 uiState = uiState.copy(v2Queued = queued, v2Conflicts = conflicts, v2LegacyActions = legacy)
+            }
+        }
+    }
+
+    private fun observeDeletionRecords() {
+        viewModelScope.launch {
+            curationActionStore.deletions.catch {
+                uiState = uiState.copy(message = nextMessage("无法读取本地删除记录，请检查存储后重试。"))
+            }.collect { records ->
+                val mine = records.filter { it.accountKey == curationAccountKey() }
+                pendingDeletions = mine.filterNot { it.confirmed }.map { it.linkId }.toSet()
+                val newlyDeleted = mine.filter { it.confirmed && it.linkId !in deletedLinks }
+                for (record in newlyDeleted) forgetDeletedLink(record.linkId)
+                if (newlyDeleted.isNotEmpty()) refreshSearchAfterMutation()
             }
         }
     }
@@ -243,6 +260,8 @@ internal class CairnLinksViewModel(
             if (uiState.manualAdd.visible) accountAddDrafts[key] = uiState.manualAdd.copy(submitting = false)
         }
         activeAccountToken = token
+        deletedLinks = emptySet()
+        pendingDeletions = emptySet()
         searchGeneration += 1
         libraryGeneration += 1
         refreshJob?.cancel()
@@ -267,6 +286,7 @@ internal class CairnLinksViewModel(
      * overwritten by a refresh, so a poll cannot discard an unsaved edit.
      */
     fun loadV2Selection(id: Int, force: Boolean = false) {
+        if (id in deletedLinks) return
         val token = uiState.preferences.apiToken
         if (token.isBlank()) return
         if (!force && uiState.v2Selections.containsKey(id) && (uiState.v2Drafts.containsKey(id) || (uiState.v2Queued[id] ?: 0) > 0)) return
@@ -276,12 +296,12 @@ internal class CairnLinksViewModel(
         selectionRequests[id] = request
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { v2Repository.load(id, token) }
-            if (account != curationAccountKey() || !isCurrentAccount(generation) || selectionRequests[id] != request) return@launch
+            if (id in deletedLinks || account != curationAccountKey() || !isCurrentAccount(generation) || selectionRequests[id] != request) return@launch
             when (result) {
                 is V2Result.Loaded -> {
                     if (result.value.revision < (uiState.v2Selections[id]?.revision ?: 0)) return@launch
                     val pending = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
-                    if (account != curationAccountKey() || !isCurrentAccount(generation) || selectionRequests[id] != request) return@launch
+                    if (id in deletedLinks || account != curationAccountKey() || !isCurrentAccount(generation) || selectionRequests[id] != request) return@launch
                     val draft = pending.fold(result.value) { current, action ->
                         v2Repository.applyLocal(current, result.value.automatic, action.field, action.term, action.action)
                     }
@@ -322,6 +342,7 @@ internal class CairnLinksViewModel(
 
     /** Persist the original intent before the first HTTP attempt. */
     fun applyV2Action(id: Int, field: String, term: String, action: String) {
+        if (id in deletedLinks || id in pendingDeletions) return
         if (uiState.preferences.apiToken.isBlank()) return
         val selection = uiState.v2Selections[id] ?: return
         val account = curationAccountKey()
@@ -396,6 +417,7 @@ internal class CairnLinksViewModel(
 
     /** Explicit user resolution reloads the server before replaying the intents. */
     fun reapplyV2Draft(id: Int) {
+        if (id in deletedLinks || id in pendingDeletions) return
         if (uiState.v2Conflicts[id] == null) return
         val account = curationAccountKey()
         val generation = uiState.accountGeneration
@@ -438,6 +460,7 @@ internal class CairnLinksViewModel(
 
     /** Invoked only by the explicit ownership confirmation in the detail UI. */
     fun recoverLegacyV2Actions(id: Int, confirmedAccount: String = curationAccountKey()) {
+        if (id in deletedLinks || id in pendingDeletions) return
         val token = uiState.preferences.apiToken
         if (token.isBlank()) return
         val account = curationAccountKey()
@@ -527,9 +550,9 @@ internal class CairnLinksViewModel(
                         val current = uiState.links.associateBy { it.id }
                         for ((id, link) in current) if (published[id] != link) edited[id] = link
                         deleted += published.keys - current.keys
-                        for (link in result.page.items) collected[link.id] = link.retainLoadedContent(current[link.id])
+                        for (link in result.page.items.filterNot { it.id in deletedLinks }) collected[link.id] = link.retainLoadedContent(current[link.id])
                         collected.putAll(edited)
-                        for (id in deleted) collected.remove(id)
+                        for (id in deleted + deletedLinks) collected.remove(id)
                         val next = result.page.nextBeforeId
                         if (next != null && (result.page.items.isEmpty() || (beforeId != null && next >= beforeId!!))) {
                             uiState = uiState.copy(loading = false, statusText = "分页响应无效，请重试。")
@@ -665,7 +688,7 @@ internal class CairnLinksViewModel(
                     return
                 }
                 val known = (uiState.libraryResults + uiState.links).associateBy { it.id }
-                val incoming = result.page.items.map { it.retainLoadedContent(known[it.id]) }
+                val incoming = result.page.items.filterNot { it.id in deletedLinks }.map { it.retainLoadedContent(known[it.id]) }
                 val rows = (if (append) uiState.libraryResults + incoming else incoming).distinctBy { it.id }.sortedByDescending { it.id }
                 uiState = uiState.copy(libraryResults = rows, libraryLoading = false,
                     libraryNextBeforeId = result.page.nextBeforeId,
@@ -689,6 +712,7 @@ internal class CairnLinksViewModel(
     }
 
     fun ensureLink(id: Int) {
+        if (id in deletedLinks) return
         val generation = uiState.accountGeneration
         if (uiState.links.any { it.id == id && it.enrichment?.contentLoaded == true } || uiState.detailLoads[id] == DetailLoadState.Loading) return
         val apiToken = currentApiToken()
@@ -703,7 +727,7 @@ internal class CairnLinksViewModel(
         uiState = uiState.copy(detailLoads = uiState.detailLoads + (id to DetailLoadState.Loading))
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { repository.get(id, apiToken) }
-            if (!isCurrentAccount(generation)) return@launch
+            if (!isCurrentAccount(generation) || id in deletedLinks) return@launch
             if (uiState.links.firstOrNull { it.id == id } != initial) {
                 // A refresh or confirmed edit advanced the visible link while
                 // this read was in flight. Read again if its body is still absent.
@@ -776,7 +800,7 @@ internal class CairnLinksViewModel(
                     busyIds = uiState.busyIds - id,
                     message = nextMessage(failureText(result.kind, "整理保存失败，请重试。")),
                 )
-                LinkMutationResult.Deleted -> Unit
+                LinkMutationResult.Deleted, LinkMutationResult.DeletionPending -> Unit
             }
         }
     }
@@ -900,7 +924,7 @@ internal class CairnLinksViewModel(
                     refreshSearchAfterMutation()
                     onSuccess()
                 }
-                LinkMutationResult.Deleted -> Unit
+                LinkMutationResult.Deleted, LinkMutationResult.DeletionPending -> Unit
                 is LinkMutationResult.Failed -> {
                     uiState = uiState.copy(
                         editDraft = uiState.editDraft?.copy(
@@ -949,7 +973,7 @@ internal class CairnLinksViewModel(
                     )
                     refreshSearchAfterMutation()
                 }
-                LinkMutationResult.Deleted -> Unit
+                LinkMutationResult.Deleted, LinkMutationResult.DeletionPending -> Unit
                 is LinkMutationResult.Failed -> {
                     uiState = uiState.copy(
                         busyIds = uiState.busyIds - linkId,
@@ -960,37 +984,58 @@ internal class CairnLinksViewModel(
         }
     }
 
+    private fun forgetDeletedLink(id: Int) {
+        deletedLinks = deletedLinks + id
+        pendingDeletions = pendingDeletions - id
+        selectionRequests[id] = (selectionRequests[id] ?: 0) + 1
+        uiState = uiState.copy(
+            links = uiState.links.filterNot { it.id == id },
+            libraryResults = uiState.libraryResults.filterNot { it.id == id },
+            searchResults = uiState.searchResults.filterNot { it.id == id },
+            detailLoads = uiState.detailLoads - id, busyIds = uiState.busyIds - id,
+            editDraft = uiState.editDraft?.takeUnless { it.id == id },
+            v2Selections = uiState.v2Selections - id, v2Drafts = uiState.v2Drafts - id,
+            v2Conflicts = uiState.v2Conflicts - id, v2Busy = uiState.v2Busy - id,
+            v2Queued = uiState.v2Queued - id, v2LegacyActions = uiState.v2LegacyActions - id,
+        )
+    }
+
     fun deleteLink(linkId: Int, onSuccess: () -> Unit) {
         val generation = uiState.accountGeneration
+        val account = curationAccountKey()
         if (linkId in uiState.busyIds) return
         val apiToken = currentApiToken()
         if (apiToken.isBlank()) {
             uiState = uiState.copy(message = nextMessage("请先在设置中配置访问 Token。"))
             return
         }
+        pendingDeletions = pendingDeletions + linkId
         uiState = uiState.copy(busyIds = uiState.busyIds + linkId)
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { repository.delete(linkId, apiToken) }
-            if (!isCurrentAccount(generation)) return@launch
-            when (result) {
-                LinkMutationResult.Deleted -> {
-                    uiState = uiState.copy(
-                        links = uiState.links.filterNot { it.id == linkId },
-                        searchResults = uiState.searchResults.filterNot { it.id == linkId },
-                        busyIds = uiState.busyIds - linkId,
-                        editDraft = uiState.editDraft?.takeUnless { it.id == linkId },
-                        message = nextMessage("已删除链接。"),
-                    )
-                    refreshSearchAfterMutation()
-                    onSuccess()
+            try {
+                // Persist intent before networking. The shared queue lock prevents
+                // a delayed acknowledgement from racing removal of its action.
+                curationActionStore.beginDeletion(account, linkId)
+                curationActionStore.syncMutex.withLock {
+                    val result = withContext(Dispatchers.IO) { repository.delete(linkId, apiToken) }
+                    if (result == LinkMutationResult.Deleted || result == LinkMutationResult.DeletionPending) {
+                        curationActionStore.confirmDeletion(account, linkId)
+                        if (accountEditDrafts[account]?.id == linkId) accountEditDrafts.remove(account)
+                        if (!isCurrentAccount(generation) || account != curationAccountKey()) return@withLock
+                        forgetDeletedLink(linkId)
+                        uiState = uiState.copy(message = nextMessage(if (result == LinkMutationResult.DeletionPending)
+                            "收藏已移除，附件正在后台清理。" else "已删除链接。"))
+                        refreshSearchAfterMutation()
+                        onSuccess()
+                    } else if (isCurrentAccount(generation) && account == curationAccountKey()) {
+                        uiState = uiState.copy(busyIds = uiState.busyIds - linkId,
+                            message = nextMessage("删除尚未确认，已保留删除请求；可重试，重启后也会继续。"))
+                    }
                 }
-                is LinkMutationResult.Updated -> Unit
-                is LinkMutationResult.Failed -> {
-                    uiState = uiState.copy(
-                        busyIds = uiState.busyIds - linkId,
-                        message = nextMessage(failureText(result.kind, "删除失败。请检查网络后重试。")),
-                    )
-                }
+            } catch (error: java.io.IOException) {
+                if (isCurrentAccount(generation) && account == curationAccountKey()) uiState = uiState.copy(
+                    busyIds = uiState.busyIds - linkId,
+                    message = nextMessage("删除记录保存失败，请重试；尚未确认本地清理完成。"))
             }
         }
     }
@@ -1021,7 +1066,7 @@ internal class CairnLinksViewModel(
                             searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it })
                         refreshSearchAfterMutation()
                     }
-                    LinkMutationResult.Deleted -> Unit
+                    LinkMutationResult.Deleted, LinkMutationResult.DeletionPending -> Unit
                     is LinkMutationResult.Failed -> failed += 1
                 }
                 uiState = uiState.copy(busyIds = uiState.busyIds - link.id)
@@ -1235,14 +1280,19 @@ internal class CairnLinksViewModel(
                     )
                     if (firstLoad || previousToken != preferences.apiToken.trim()) {
                         val generation = uiState.accountGeneration
+                        val deletionRecords = curationActionStore.deletions.first().filter { it.accountKey == curationAccountKey() }
+                        if (!isCurrentAccount(generation)) return@collect
+                        pendingDeletions = deletionRecords.filterNot { it.confirmed }.map { it.linkId }.toSet()
+                        for (record in deletionRecords.filter { it.confirmed }) forgetDeletedLink(record.linkId)
                         val all = curationActionStore.snapshot()
                         if (!isCurrentAccount(generation)) return@collect
-                        val mine = all.filter { it.accountKey == curationAccountKey() }
+                        val mine = all.filter { it.accountKey == curationAccountKey() && it.linkId !in deletedLinks }
                         val legacyKey = legacyAccountKeyFor(uiState.apiBaseUrl, preferences.apiToken)
                         uiState = uiState.copy(v2Queued = mine.groupingBy { it.linkId }.eachCount(),
-                            v2LegacyActions = all.filter { it.accountKey == legacyKey }.groupBy { it.linkId },
+                            v2LegacyActions = all.filter { it.accountKey == legacyKey && it.linkId !in deletedLinks }.groupBy { it.linkId },
                             v2Conflicts = mine.mapNotNull { a -> a.conflictRevision?.let { a.linkId to it } }.toMap())
                         refreshLinks()
+                        for (id in pendingDeletions.toList()) deleteLink(id) {}
                         pumpV2Actions()
                     }
                     maybeStartAutomaticUploadRetry()
@@ -1391,11 +1441,11 @@ internal class CairnLinksViewModel(
                     return
                 }
                 val nextItems = if (append) {
-                    (uiState.searchResults + result.page.items)
+                    (uiState.searchResults + result.page.items.filterNot { it.id in deletedLinks })
                         .distinctBy { it.id }
                         .sortedByDescending { it.id }
                 } else {
-                    result.page.items.sortedByDescending { it.id }
+                    result.page.items.filterNot { it.id in deletedLinks }.sortedByDescending { it.id }
                 }
                 uiState = uiState.copy(
                     searchResults = nextItems,

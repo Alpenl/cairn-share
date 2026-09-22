@@ -13,6 +13,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.alpenl.cairn.share.network.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -482,4 +483,40 @@ class CurationWorkerRecoveryTest {
         assertEquals("llm", result.getJSONObject("automatic").getJSONArray("topics").getString(0))
         withContext(Dispatchers.Main) { models.clear() }
     }
+
+    @Test fun persistDeletionAfterRealCommitResponseLoss() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness",base.isNotEmpty())
+        store.clear();SharePreferencesStore(context).setApiToken(token);control("online")
+        val id=http("/__test/direct/api/links",JSONObject().put("url","https://example.com/delete-recovery")).getInt("id")
+        val model=start();waitFor{withContext(Dispatchers.Main){model.uiState.links.any{it.id==id}}}
+        control("writes_offline")
+        withContext(Dispatchers.Main){model.loadV2Selection(id)}
+        waitFor{withContext(Dispatchers.Main){model.uiState.v2Selections.containsKey(id)}}
+        withContext(Dispatchers.Main){model.applyV2Action(id,"topics","llm","accept")}
+        waitFor{store.snapshot().size==1 && withContext(Dispatchers.Main){model.uiState.v2Busy.isEmpty()}}
+        store.enqueue(QueuedCurationAction(id,"delete-foreign-keep","topics","eng","accept",0,"other-account"))
+        control("lose_delete")
+        withContext(Dispatchers.Main){model.deleteLink(id){fail("lost confirmation cannot count as confirmed")}}
+        waitFor{store.deletions.first().any{it.linkId==id} && withContext(Dispatchers.Main){id !in model.uiState.busyIds}}
+        assertFalse(store.deletions.first().single().confirmed)
+        val inspection=URL("$base/__test/direct/api/links/$id").openConnection() as HttpURLConnection
+        try {inspection.setRequestProperty("Authorization","Bearer $token");assertEquals(404,inspection.responseCode)} finally {inspection.disconnect()}
+        assertEquals(2,store.snapshot().size)
+        withContext(Dispatchers.Main){models.clear()}
+    }
+
+    @Test fun recoverDeletionAfterProcessDeathWithoutReplayingCuration() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness",base.isNotEmpty())
+        val id=store.deletions.first().single().linkId
+        assertFalse(store.deletions.first().single().confirmed)
+        val requests=http("/__test/control").getJSONArray("requests").length()
+        control("online")
+        val model=start()
+        waitFor{store.deletions.first().single().confirmed}
+        waitFor{withContext(Dispatchers.Main){id !in model.uiState.busyIds && model.uiState.links.none{it.id==id}}}
+        assertEquals(listOf("delete-foreign-keep"),store.snapshot().map{it.operationKey})
+        assertEquals("no deleted curation request replayed",requests,http("/__test/control").getJSONArray("requests").length())
+        withContext(Dispatchers.Main){assertFalse(model.uiState.v2Selections.containsKey(id));assertFalse(model.uiState.v2Drafts.containsKey(id));models.clear()}
+    }
+
 }

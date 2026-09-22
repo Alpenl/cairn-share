@@ -10,7 +10,7 @@ import urllib.parse
 import uuid
 
 upstream = urllib.parse.urlsplit(sys.argv[1])
-state = {"mode": "online", "key": "", "requests": [], "selection_reads": [], "web_writes": 0}
+state = {"mode": "online", "key": "", "requests": [], "selection_reads": [], "deletes": [], "web_writes": 0}
 lock = threading.Lock()
 
 
@@ -34,6 +34,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.handle_request()
 
+    def do_DELETE(self):
+        self.handle_request()
+
     def drop(self):
         self.close_connection = True
         self.connection.shutdown(socket.SHUT_RDWR)
@@ -52,7 +55,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with lock:
                 if self.command == "POST":
                     change = json.loads(body)
-                    assert change["mode"] in ("online", "offline", "writes_offline", "lose_first", "conflict", "fail_key")
+                    assert change["mode"] in ("online", "offline", "writes_offline", "lose_first", "conflict", "fail_key", "lose_delete")
                     state.update(mode=change["mode"], key=change.get("key", ""))
                 data = json.dumps(state).encode()
             return self.respond(200, data)
@@ -61,9 +64,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self.path.removeprefix("/__test/direct") if direct else self.path
         headers = {"Authorization": self.headers.get("Authorization", ""), "Content-Type": "application/json"}
         mutation = not direct and self.command == "POST" and path.endswith("/v2-override")
+        deletion = not direct and self.command == "DELETE" and path.startswith("/api/links/")
         action = json.loads(body) if mutation else {}
         with lock:
             mode, key = state["mode"], state["key"]
+            if deletion:
+                state["deletes"].append(path)
+                if mode == "lose_delete": state["mode"] = "offline"
             if mutation:
                 state["requests"].append(action)
                 if mode in ("lose_first", "fail_key") and (mode == "lose_first" or key == action["operation_key"]):
@@ -87,6 +94,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # UI messages can be replaced by concurrent list refresh failures.
             with lock:
                 state["selection_reads"].append({"path": urllib.parse.urlsplit(path).path, "status": status})
+        if deletion and mode == "lose_delete":
+            assert status == 204, (status, result)
+            return self.drop()
         if mutation and mode == "lose_first":
             assert status == 200, (status, result)
             return self.drop()

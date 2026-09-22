@@ -33,6 +33,7 @@ internal class CurationActionStore(private val context: Context) : CurationQueue
 
     suspend fun enqueue(action: QueuedCurationAction) {
         context.curationActionDataStore.edit { preferences ->
+            if (decodeDeletions(preferences[DELETIONS_KEY] ?: "[]").any { it.accountKey == action.accountKey && it.linkId == action.linkId }) return@edit
             val current = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
             // The same logical action is never queued twice; a retry keeps its
             // original operation key.
@@ -42,6 +43,33 @@ internal class CurationActionStore(private val context: Context) : CurationQueue
                     predecessorKey = predecessor.operationKey, predecessorRevision = null, expectedRevision = null,
                 )
                 preferences[ACTIONS_KEY] = CurationActionJson.encode(current + queued)
+            }
+        }
+    }
+
+    val deletions: Flow<List<DeletionRecord>> = context.curationActionDataStore.data.map {
+        decodeDeletions(it[DELETIONS_KEY] ?: "[]")
+    }
+
+    override suspend fun blockedLinkIds(accountKey: String): Set<Int> =
+        deletions.first().filter { it.accountKey == accountKey }.map { it.linkId }.toSet()
+
+    suspend fun beginDeletion(accountKey: String, linkId: Int) = recordDeletion(accountKey, linkId, false)
+    suspend fun confirmDeletion(accountKey: String, linkId: Int) = recordDeletion(accountKey, linkId, true)
+
+    private suspend fun recordDeletion(accountKey: String, linkId: Int, confirmed: Boolean) {
+        require(accountKey.startsWith("v2:") && linkId > 0)
+        context.curationActionDataStore.edit { preferences ->
+            val current = decodeDeletions(preferences[DELETIONS_KEY] ?: "[]")
+            val existing = current.firstOrNull { it.accountKey == accountKey && it.linkId == linkId }
+            val record = DeletionRecord(accountKey, linkId, confirmed || existing?.confirmed == true)
+            val next = current.filterNot { it.accountKey == accountKey && it.linkId == linkId } + record
+            preferences[DELETIONS_KEY] = JSONArray().also { array -> next.forEach {
+                array.put(JSONObject().put("account", it.accountKey).put("id", it.linkId).put("confirmed", it.confirmed))
+            } }.toString()
+            if (record.confirmed) {
+                val actions = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
+                preferences[ACTIONS_KEY] = CurationActionJson.encode(actions.filterNot { it.accountKey == accountKey && it.linkId == linkId })
             }
         }
     }
@@ -123,12 +151,13 @@ internal class CurationActionStore(private val context: Context) : CurationQueue
     }
 
     suspend fun clear() {
-        context.curationActionDataStore.edit { preferences -> preferences.remove(ACTIONS_KEY) }
+        context.curationActionDataStore.edit { preferences -> preferences.remove(ACTIONS_KEY); preferences.remove(DELETIONS_KEY) }
     }
 
     private companion object {
         val SYNC_MUTEX = Mutex()
         val ACTIONS_KEY = stringPreferencesKey("curation_actions_json")
+        val DELETIONS_KEY = stringPreferencesKey("deleted_links_json")
     }
 }
 
@@ -164,3 +193,18 @@ internal fun legacyAccountKeyFor(baseUrl: String, apiToken: String): String =
 
 internal fun JSONObject.optLongOrNull(key: String): Long? =
     if (has(key) && !isNull(key)) optLong(key) else null
+
+/** Only numeric IDs, credential fingerprints and acknowledgement state persist. */
+internal data class DeletionRecord(val accountKey: String, val linkId: Int, val confirmed: Boolean)
+
+private fun decodeDeletions(value: String): List<DeletionRecord> = try {
+    val rows = JSONArray(value)
+    List(rows.length()) { index ->
+        val row = rows.getJSONObject(index)
+        val record = DeletionRecord(row.getString("account"), row.getInt("id"), row.getBoolean("confirmed"))
+        require(record.accountKey.startsWith("v2:") && record.linkId > 0)
+        record
+    }
+} catch (error: Exception) {
+    throw java.io.IOException("Invalid deletion journal", error)
+}

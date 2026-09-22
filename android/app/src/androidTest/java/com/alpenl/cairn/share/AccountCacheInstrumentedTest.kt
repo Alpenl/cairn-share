@@ -777,4 +777,137 @@ class AccountCacheInstrumentedTest {
         withContext(Dispatchers.Main) { assertFalse(model.uiState.v2Available) }
         assertEquals(original, actions.snapshot())
     }
+
+    @Test fun deletionPurgesOwnedActionsAndRejectsLateSelectionAndDetail() = runBlocking<Unit> {
+        val selectionEntered = CountDownLatch(1)
+        val detailEntered = CountDownLatch(1)
+        val deleted = AtomicInteger()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> page("other rows") // ID 99 exists only in the detail route.
+                "/api/taxonomy" -> taxonomy("v1")
+                "/api/links/99" -> if (request.method == "DELETE") {
+                    deleted.incrementAndGet(); MockResponse().setResponseCode(204)
+                } else {
+                    detailEntered.countDown()
+                    if (!release.await(20, TimeUnit.SECONDS)) MockResponse().setResponseCode(503)
+                    else json(link(99, "deleted private body", true))
+                }
+                "/api/bookmarks/99/v2-selection" -> {
+                    selectionEntered.countDown()
+                    if (!release.await(20, TimeUnit.SECONDS)) MockResponse().setResponseCode(503)
+                    else selection("llm")
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val own = accountKeyFor(base, tokenA)
+        val other = accountKeyFor(base, tokenB)
+        actions.enqueue(QueuedCurationAction(99,"delete-own","topics","llm","accept",0,own))
+        actions.enqueue(QueuedCurationAction(99,"keep-other","topics","eng","accept",0,other))
+        val model = start()
+        awaitState(model) { it.links.size == 4 && !it.loading }
+        withContext(Dispatchers.Main) { model.ensureLink(99); model.loadV2Selection(99) }
+        assertTrue(detailEntered.await(10, TimeUnit.SECONDS)); assertTrue(selectionEntered.await(10, TimeUnit.SECONDS))
+        val confirmed = CountDownLatch(1)
+        withContext(Dispatchers.Main) { model.deleteLink(99) { confirmed.countDown() } }
+        assertTrue(confirmed.await(10, TimeUnit.SECONDS)); assertEquals(1,deleted.get())
+        release.countDown(); delay(750)
+        withContext(Dispatchers.Main) {
+            assertFalse("late detail must not revive a deleted link",model.uiState.links.any { it.id==99 })
+            assertFalse("late selection must not revive private state",model.uiState.v2Selections.containsKey(99))
+            assertFalse(model.uiState.v2Drafts.containsKey(99)); assertFalse(model.uiState.v2Queued.containsKey(99))
+            assertFalse(model.uiState.detailLoads.containsKey(99))
+        }
+        assertEquals(listOf("keep-other"), actions.snapshot().map { it.operationKey })
+        // A recreated store must retain the deletion boundary for late enqueuers.
+        CurationActionStore(context).enqueue(QueuedCurationAction(99,"late-own","topics","llm","accept",0,own))
+        assertEquals(listOf("keep-other"), actions.snapshot().map { it.operationKey })
+    }
+
+
+    @Test fun deletionClientDistinguishesBackgroundCleanupFromUnconfirmedFailure() = runBlocking<Unit> {
+        val client = LinksApiClient(base)
+        server.enqueue(MockResponse().setResponseCode(503).setBody("{\"error\":\"deletion_cleanup_pending\"}"))
+        assertEquals(LinkMutationResult.DeletionPending, withContext(Dispatchers.IO) { client.delete(1, tokenA) })
+        for (body in listOf("{\"error\":\"overloaded\"}", "invalid json", "{}")) {
+            server.enqueue(MockResponse().setResponseCode(503).setBody(body))
+            assertEquals(LinkMutationResult.Failed(FailureKind.Server), withContext(Dispatchers.IO) { client.delete(1, tokenA) })
+        }
+        server.enqueue(MockResponse().setResponseCode(401))
+        assertEquals(LinkMutationResult.Failed(FailureKind.Unauthorized), withContext(Dispatchers.IO) { client.delete(1, tokenA) })
+    }
+
+    @Test fun pendingDeletionSurvivesViewModelRecreationAndFiltersStalePages() = runBlocking<Unit> {
+        val deletes = AtomicInteger()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when(request.requestUrl!!.encodedPath) {
+                "/api/links" -> page("stale page still containing deleted ID")
+                "/api/taxonomy" -> taxonomy("v1")
+                "/api/links/1" -> if(request.method == "DELETE") {
+                    if (deletes.incrementAndGet()==1) MockResponse().setResponseCode(503).setBody("{\"error\":\"temporary_outage\"}")
+                    else MockResponse().setResponseCode(503).setBody("{\"error\":\"deletion_cleanup_pending\"}")
+                } else json(link(1,"body",true))
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val own=accountKeyFor(base,tokenA)
+        actions.enqueue(QueuedCurationAction(1,"pending-delete-owned","topics","llm","accept",0,own))
+        val model=start()
+        awaitState(model){!it.loading && it.links.size==4}
+        withContext(Dispatchers.Main){model.deleteLink(1){fail("unconfirmed failure is not success")}}
+        awaitState(model){1 !in it.busyIds && deletes.get()==1}
+        assertFalse(actions.deletions.first().single().confirmed)
+        assertEquals(1,actions.snapshot().size)
+        withContext(Dispatchers.Main){models.clear()}
+        val restored=start()
+        awaitState(restored){deletes.get()==2 && it.message?.text=="收藏已移除，附件正在后台清理。"}
+        assertTrue(actions.deletions.first().single().confirmed)
+        assertTrue(actions.snapshot().isEmpty())
+        withContext(Dispatchers.Main){restored.refreshLinks()}
+        awaitState(restored){!it.loading}
+        withContext(Dispatchers.Main){assertFalse(restored.uiState.links.any{it.id==1});models.clear()}
+        val again=start()
+        awaitState(again){!it.loading && it.links.size==3}
+        assertEquals("confirmed deletion does not loop",2,deletes.get())
+    }
+
+    @Test fun deletionFinishingAfterAccountSwitchOnlyPurgesItsOriginalAccount() = checkDeletionAccountSwitch(false)
+    @Test fun deletionConfirmationAfterAccountRoundTripPurgesTheActiveAccount() = checkDeletionAccountSwitch(true)
+
+    private fun checkDeletionAccountSwitch(returnToA: Boolean) = runBlocking<Unit> {
+        val entered=CountDownLatch(1)
+        val finished=CountDownLatch(1)
+        server.dispatcher=object:Dispatcher(){
+            override fun dispatch(request:RecordedRequest):MockResponse=when(request.requestUrl!!.encodedPath){
+                "/api/links" -> page(if(request.getHeader("Authorization")=="Bearer $tokenA") "A" else "B")
+                "/api/taxonomy" -> taxonomy("v1")
+                "/api/links/1" -> {
+                    entered.countDown()
+                    if(!release.await(20,TimeUnit.SECONDS)) MockResponse().setResponseCode(503)
+                    else {finished.countDown();MockResponse().setResponseCode(204)}
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val own=accountKeyFor(base,tokenA);val other=accountKeyFor(base,tokenB)
+        actions.enqueue(QueuedCurationAction(1,"a-owned","topics","llm","accept",0,own))
+        actions.enqueue(QueuedCurationAction(1,"b-keep","topics","eng","accept",0,other))
+        val model=start();awaitState(model){it.links.size==4 && !it.loading}
+        withContext(Dispatchers.Main){model.deleteLink(1){fail("old-account callback must not navigate current account")}}
+        assertTrue(entered.await(10,TimeUnit.SECONDS))
+        withContext(Dispatchers.Main){model.setApiToken(tokenB)}
+        awaitStoredToken(tokenB);awaitState(model){it.links.all{row->row.note=="B"} && it.links.size==4}
+        if (returnToA) {
+            withContext(Dispatchers.Main){model.setApiToken(tokenA)}
+            awaitStoredToken(tokenA)
+            awaitState(model){it.links.size==4 && it.links.all{row->row.note=="A"}}
+        }
+        release.countDown();assertTrue(finished.await(5,TimeUnit.SECONDS))
+        withTimeout(5000){while(actions.deletions.first().none{it.confirmed}) delay(25)}
+        assertEquals(listOf("b-keep"),actions.snapshot().map{it.operationKey})
+        if (returnToA) awaitState(model){it.links.none{row->row.id==1}}
+        else withContext(Dispatchers.Main){assertTrue(model.uiState.links.any{it.id==1 && it.note=="B"})}
+    }
+
 }

@@ -52,6 +52,7 @@ internal sealed interface LinkCreateResult {
 internal sealed interface LinkMutationResult {
     data class Updated(val link: SavedLink) : LinkMutationResult
     data object Deleted : LinkMutationResult
+    data object DeletionPending : LinkMutationResult
     data class Failed(val kind: FailureKind) : LinkMutationResult
 }
 
@@ -192,9 +193,11 @@ internal class LinksApiClient(
             connection.requestMethod = "DELETE"
             configure(connection, apiToken)
             val status = connection.responseCode
-            responseBody(connection)
+            val body = responseBody(connection)
             when (status) {
                 HttpURLConnection.HTTP_NO_CONTENT -> LinkMutationResult.Deleted
+                HttpURLConnection.HTTP_UNAVAILABLE -> if (runCatching { JSONObject(body).optString("error") }.getOrNull() == "deletion_cleanup_pending")
+                    LinkMutationResult.DeletionPending else LinkMutationResult.Failed(FailureKind.Server)
                 HttpURLConnection.HTTP_UNAUTHORIZED -> LinkMutationResult.Failed(FailureKind.Unauthorized)
                 else -> LinkMutationResult.Failed(FailureKind.Server)
             }
