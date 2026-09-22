@@ -238,7 +238,10 @@ function applyOverride(state: FieldState, override: Override): void {
         state.action.delete(override.term);
         state.order = state.order.filter((term) => term !== override.term);
         state.history = state.history.filter((entry) => entry.term !== override.term);
-        if (state.clearedAutomatic) state.readmit.add(override.term);
+        if (state.clearedAutomatic) {
+          state.empty = false;
+          state.readmit.add(override.term);
+        }
       }
       break;
   }

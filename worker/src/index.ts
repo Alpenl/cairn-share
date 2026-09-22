@@ -697,7 +697,7 @@ function bookmarkFilters(url: URL, query?: string): { clauses: string[]; binding
         // Retain legacy full-text metadata until an independent entity run or
         // correction exists. Thereafter only current, corrected entities match.
         `(CASE WHEN NOT EXISTS (SELECT 1 FROM entity_states WHERE link_id=links.id)
-          AND NOT EXISTS (SELECT 1 FROM curation_overrides WHERE link_id=links.id AND field='entities')
+          AND NOT EXISTS (SELECT 1 FROM curation_overrides WHERE link_id=links.id AND field IN ('entity','entities'))
           THEN json_extract(classification, '$.entities')
           ELSE (SELECT group_concat(term, ' ') FROM effective_entity_terms WHERE link_id=links.id) END)`];
       clauses.push(`(${fields.map((field) => `COALESCE(${field}, '') LIKE ? ESCAPE '\\'`).join(" OR ")})`);

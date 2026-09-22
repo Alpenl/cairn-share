@@ -333,6 +333,55 @@ class CurationWorkerRecoveryTest {
         withContext(Dispatchers.Main) { models.clear() }
     }
 
+    @Test fun persistTermResetAfterExplicitEmpty() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        store.clear()
+        SharePreferencesStore(context).setApiToken(token)
+        control("online")
+        val id = InstrumentationRegistry.getArguments().getString("cairnTermResetID")!!.toInt()
+        http("/__test/direct/api/bookmarks/$id/v2-override", JSONObject(FieldOverride("topics", "", "set_empty", "term-empty", 0).encode()))
+        val model = start()
+        waitFor { withContext(Dispatchers.Main) { model.uiState.preferencesLoaded } }
+        withContext(Dispatchers.Main) { model.loadV2Selection(id) }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Selections.containsKey(id) } }
+        withContext(Dispatchers.Main) {
+            assertTrue(model.uiState.v2Selections[id]!!.topics.isEmpty())
+            assertEquals(listOf("llm", "eval"), model.uiState.v2Selections[id]!!.automatic!!.topics)
+        }
+        control("writes_offline")
+        withContext(Dispatchers.Main) { model.applyV2Action(id, "topics", "llm", "reset") }
+        waitFor { store.snapshot().size == 1 && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() } }
+        withContext(Dispatchers.Main) { assertEquals(listOf("llm"), model.uiState.v2Drafts[id]!!.topics) }
+        assertEquals(0, remote(id).getJSONObject("selection").getJSONArray("topics").length())
+        withContext(Dispatchers.Main) { models.clear() }
+    }
+
+    @Test fun restoreTermResetAfterProcessDeath() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        val id = store.snapshot().single().linkId
+        control("writes_offline")
+        val model = start()
+        waitFor { withContext(Dispatchers.Main) { model.uiState.preferencesLoaded } }
+        withContext(Dispatchers.Main) { model.loadV2Selection(id) }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Drafts[id]?.topics == listOf("llm") && model.uiState.v2Busy.isEmpty() } }
+        assertEquals(1L, remote(id).getLong("revision"))
+        control("online")
+        withContext(Dispatchers.Main) { model.flushV2Queue() }
+        waitFor { store.snapshot().isEmpty() && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() } }
+        val result = http("/__test/direct/api/bookmarks/$id/v2-selection?include_automatic=1&include_state=1")
+        assertEquals(2L, result.getLong("revision"))
+        assertEquals("[\"llm\"]", result.getJSONObject("selection").getJSONArray("topics").toString())
+        assertEquals("[\"llm\",\"eval\"]", result.getJSONObject("automatic").getJSONArray("topics").toString())
+        val topics = result.getJSONObject("state").getJSONObject("fields").getJSONObject("topics")
+        assertTrue(topics.isNull("empty"))
+        assertFalse(topics.getJSONArray("values").getJSONObject(0).getBoolean("confirmed"))
+        assertEquals("human", topics.getJSONObject("cleared_automatic").getString("origin"))
+        withContext(Dispatchers.Main) {
+            assertEquals(listOf("llm"), model.uiState.v2Selections[id]!!.topics)
+            models.clear()
+        }
+    }
+
     @Test fun restoreAutomaticDraftAfterProcessDeath() = runBlocking<Unit> {
         assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
         val id = store.snapshot().single().linkId

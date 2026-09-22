@@ -82,8 +82,13 @@ it("B07: keeps stored policy outcomes distinct from empty, unknown and human ori
   expect(response.selection.topics).toEqual([]);
   expect(response.state.fields.topics.empty).toEqual({ origin: "human", confirmed: true, revision: 3 });
   expect(response.state.fields.topics.status).toBe("completed_nonempty"); // automatic state is independent of human empty
-  await act("reset", "", 3);
-  expect((await read()).state.fields.topics.values[0].origin).toBe("automatic");
+  await act("reset", "llm", 3);
+  response = await read();
+  expect(response.state.fields.topics.values).toEqual([{ term: "llm", origin: "automatic", confirmed: false, revision: null }]);
+  expect(response.state.fields.topics.empty).toBeNull();
+  expect(response.state.fields.topics.cleared_automatic).toEqual({ origin: "human", confirmed: true, revision: 3 });
+  expect((await submitDecision(id, runID, { ...automatic, topics: ["llm", "eng"] }, "after-tag-reset")).status).toBe(200);
+  expect((await read()).selection.topics).toEqual(["llm"]); // the other cleared tag stays suppressed
   await env.DB.prepare("UPDATE links SET content_revision=content_revision+1 WHERE id=?").bind(id).run();
   expect((await read()).state.fields.topics.status).toBe("stale");
   const old = await (await request(`bookmarks/${id}/v2-selection`, undefined, "GET", "app")).json() as Record<string, unknown>;
@@ -418,7 +423,7 @@ it.each([false, true])("R3-03: captured legacy complete selection (empty=%s) rep
 
 it("R3-03: real historical migration preserves original and ambiguous bytes separately", async () => {
   await reset();
-  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.filter((migration) => !migration.name.startsWith("0018")));
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.filter((migration) => migration.name < "0018"));
   const manual = JSON.stringify({ topics: ["eng"], form: "", use: "" });
   for (const id of [1, 2]) {
     await env.DB.prepare("INSERT INTO links(id,url,note,created_at,curation,classification) VALUES(?,?,'','2026-09-22',?,?)")

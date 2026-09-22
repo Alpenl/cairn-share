@@ -99,6 +99,16 @@ class V2CurationRepositoryTest {
     }
 
     @Test
+    fun `reset one tag after explicit empty restores only that tag as a pending draft`() {
+        val repo = V2CurationRepository(FakeTransport())
+        val automatic = selection(topics = listOf("llm", "eng"))
+        val empty = repo.applyLocal(automatic, automatic, "topics", "", "set_empty")
+        val restored = repo.applyLocal(empty, automatic, "topics", "llm", "reset")
+        assertEquals(listOf("llm"), restored.topics)
+        assertEquals(setOf("topics"), restored.pendingFields)
+    }
+
+    @Test
     fun `set empty and whole field reset differ`() {
         val repository = V2CurationRepository(FakeTransport())
         val automatic = selection(topics = listOf("llm", "eng"))
