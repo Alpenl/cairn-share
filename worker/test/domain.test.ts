@@ -523,17 +523,26 @@ it("cascades deletes across the domain tables", async () => {
   }
 });
 
+async function entityIdentity(id: number) {
+  expect((await request(`v2/links/${id}/evidence`, { snapshot: snapshot() })).status).toBe(200);
+  const stored = await (await request(`v2/links/${id}/evidence`, undefined, "GET")).json() as {
+    id: number; content_revision: number; content_hash: string;
+  };
+  return { evidence_snapshot_id: stored.id, content_revision: stored.content_revision, content_hash: stored.content_hash };
+}
+
 // --- Entity lifecycle, evidence requests and proposal application (B05/B09) --
 
 it("keeps entity lifecycle states distinct and protects a newer success (B09-T04)", async () => {
   const id = await createLink();
+  const identity = await entityIdentity(id);
   const first = await request(`v2/links/${id}/entity-state`, {
-    operation_key: "entity-1", state: "completed_nonempty", entities: ["acme", "widget"], content_revision: 1
+    ...identity, operation_key: "entity-1", state: "completed_nonempty", entities: ["acme", "widget"]
   });
   expect(first.status).toBe(200);
   // A later failed run must not clear the completed value.
   const failed = await request(`v2/links/${id}/entity-state`, {
-    operation_key: "entity-2", state: "failed", entities: [], content_revision: 1
+    ...identity, operation_key: "entity-2", state: "failed", entities: []
   });
   expect(failed.status).toBe(200);
   expect((await failed.json() as { status: string }).status).toBe("ignored_stale");
@@ -545,7 +554,7 @@ it("keeps entity lifecycle states distinct and protects a newer success (B09-T04
   // A stale content revision is refused.
   await env.DB.prepare("UPDATE links SET content_revision = content_revision + 1 WHERE id = ?").bind(id).run();
   const stale = await request(`v2/links/${id}/entity-state`, {
-    operation_key: "entity-3", state: "completed_empty", entities: [], content_revision: 1
+    ...identity, operation_key: "entity-3", state: "completed_empty", entities: []
   });
   expect(stale.status).toBe(409);
   expect((await stale.json() as { error: string }).error).toBe("run_stale");
@@ -553,8 +562,9 @@ it("keeps entity lifecycle states distinct and protects a newer success (B09-T04
 
 it("lets a human correct entities through the same override log (B05-T10)", async () => {
   const id = await createLink();
+  const identity = await entityIdentity(id);
   await request(`v2/links/${id}/entity-state`, {
-    operation_key: "entity-1", state: "completed_nonempty", entities: ["acme"], content_revision: 1
+    ...identity, operation_key: "entity-1", state: "completed_nonempty", entities: ["acme"]
   });
   const accepted = await request(`v2/links/${id}/entities`, {
     operation_key: "entity-human-1", action: "accept", term: "widget", expected_revision: 0
@@ -755,8 +765,9 @@ it("R2-12: the same operation key with a different payload or link conflicts", a
 
 it("R2-08: the entity success baseline appears in the effective view", async () => {
   const id = await createLink();
+  const identity = await entityIdentity(id);
   await request(`v2/links/${id}/entity-state`, {
-    operation_key: `r2-08-${id}`, state: "completed_nonempty", entities: ["acme"], content_revision: 1
+    ...identity, operation_key: `r2-08-${id}`, state: "completed_nonempty", entities: ["acme"]
   });
   const view = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as {
     effective: { entities: string[] }; projected: boolean;

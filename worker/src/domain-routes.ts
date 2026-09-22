@@ -119,26 +119,34 @@ async function entitiesView(env: Env, id: number): Promise<Response> {
     .first<{ id: number; personal_revision: number }>();
   if (!link) return fail("not_found", 404);
   const state = await env.DB.prepare(
-    `SELECT state, content_revision, entities, updated_at FROM entity_states WHERE link_id = ?`
-  ).bind(id).first<{ state: string; content_revision: number; entities: string; updated_at: string }>();
+    `SELECT state, content_revision, content_hash, evidence_snapshot_id, entities, updated_at FROM entity_states WHERE link_id = ?`
+  ).bind(id).first<{ state: string; content_revision: number; content_hash: string; evidence_snapshot_id: number; entities: string; updated_at: string }>();
   const { view } = await computeEffective(env, id);
   const linkRevision = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
     .first<{ content_revision: number }>();
   const overrides = await env.DB.prepare(
     `SELECT id, term, action, source, revision, created_at FROM curation_overrides WHERE link_id = ? AND field = 'entities' ORDER BY id`
   ).bind(id).all();
+  const accepted = new Set<string>();
+  for (const entry of overrides.results as Array<{ term: string; action: string }>) {
+    if (entry.action === "set_empty" || (entry.action === "reset" && entry.term === "")) accepted.clear();
+    else if (entry.action === "accept") accepted.add(entry.term);
+    else accepted.delete(entry.term);
+  }
   return reply({
     id,
     state: state?.state ?? "not_run",
     state_content_revision: state?.content_revision ?? 0,
+    evidence_snapshot_id: state?.evidence_snapshot_id ?? 0,
+    content_hash: state?.content_hash ?? "",
     // Entity staleness is judged against the entity input revision, never
     // against an unrelated classification decision (R2-08).
-    stale: state !== null && (linkRevision?.content_revision ?? 0) !== state.content_revision,
+    stale: state !== null && (state.evidence_snapshot_id === 0 || (linkRevision?.content_revision ?? 0) !== state.content_revision),
     updated_at: state?.updated_at ?? null,
-    automatic: state ? parseJSON(state.entities, []) : [],
+    automatic: await entityAutomatic(env, id),
+    archived_entities: state ? parseJSON(state.entities, []) : [],
     entities: view.entities,
-    human: view.entities.filter((entity) => (overrides.results as Array<{ term: string; action: string }>)
-      .some((override) => override.term === entity && override.action === "accept")),
+    human: view.entities.filter((entity) => accepted.has(entity)),
     overrides: overrides.results,
     revision: link.personal_revision
   });
@@ -155,53 +163,61 @@ async function applyEntityOverride(request: Request, env: Env, id: number): Prom
   return recordOverride(env, id, "entities", action, term, operationKey, body.expected_revision);
 }
 
-// submitEntityState records one bounded entity extraction result. A stale or
-// failed run never clears a newer success: the write is guarded by the current
-// content revision and the caller's revision, and not_run/failed/empty/stale
-// stay distinct (B09-T04).
+// Every entity result identifies the immutable snapshot actually analyzed.
+// The receipt and state transition share one D1 transaction; checking a link
+// before the write is insufficient when material changes concurrently.
 async function submitEntityState(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
   const operationKey = body.operation_key;
   const state = String(body.state);
   if (!text(operationKey, 200)) return fail("invalid_operation_key");
-  if (!["not_run", "failed", "completed_empty", "completed_nonempty", "stale"].includes(state)) {
-    return fail("invalid_entity_state");
-  }
-  const entities = Array.isArray(body.entities)
-    ? body.entities.filter((entry): entry is string => typeof entry === "string" && entry.length > 0 && entry.length <= 120)
-    : [];
-  if (entities.length > 50) return fail("invalid_entity_state");
-  const existing = await env.DB.prepare(`SELECT link_id, content_hash FROM entity_states WHERE operation_key = ?`)
-    .bind(operationKey).first<{ link_id: number; content_hash: string }>();
-  if (existing) {
-    if (existing.link_id !== id) return fail("operation_conflict", 409);
-    return reply({ id, replayed: true });
-  }
-  const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
-    .first<{ content_revision: number }>();
+  if (!["not_run", "failed", "completed_empty", "completed_nonempty", "stale"].includes(state)) return fail("invalid_entity_state");
+  const entities = body.entities;
+  if (!Array.isArray(entities) || entities.length > 50 || entities.some(entry => !text(entry, 120)) ||
+      new Set(entities).size !== entities.length ||
+      (state === "completed_nonempty" ? entities.length === 0 : entities.length !== 0)) return fail("invalid_entity_state");
+  if (!Number.isSafeInteger(body.content_revision) || Number(body.content_revision) < 1 ||
+      !Number.isSafeInteger(body.evidence_snapshot_id) || Number(body.evidence_snapshot_id) < 1 ||
+      typeof body.content_hash !== "string" || !/^[a-f0-9]{64}$/.test(body.content_hash)) return fail("invalid_evidence_identity");
+  const requestHash = await sha256Hex(canonicalJSON({ link_id: id, ...body }));
+  type Receipt = { link_id: number; request_hash: string; content_revision: number; outcome: string };
+  const receipt = () => env.DB.prepare(`SELECT link_id,request_hash,content_revision,outcome FROM entity_operations WHERE operation_key=?`)
+    .bind(operationKey).first<Receipt>();
+  const acknowledge = (stored: Receipt, replayed: boolean) => stored.link_id !== id || stored.request_hash !== requestHash
+    ? fail("operation_conflict", 409)
+    : reply({ id, status: stored.outcome, revision: stored.content_revision, replayed });
+  const existing = await receipt();
+  if (existing) return acknowledge(existing, true);
+  const link = await env.DB.prepare(`SELECT id FROM links WHERE id=?`).bind(id).first();
   if (!link) return fail("not_found", 404);
-  if (Number.isSafeInteger(body.content_revision) && Number(body.content_revision) !== link.content_revision) {
-    return fail("run_stale", 409, { content_revision: link.content_revision });
-  }
   const now = new Date().toISOString();
-  // A failed/not_run result must not overwrite a newer completed value at the
-  // same content revision.
-  if (state === "failed" || state === "not_run") {
-    const current = await env.DB.prepare(`SELECT state FROM entity_states WHERE link_id = ?`).bind(id)
-      .first<{ state: string }>();
-    if (current && current.state === "completed_nonempty") {
-      return reply({ id, status: "ignored_stale", state: current.state });
-    }
-  }
-  await env.DB.prepare(
-    `INSERT INTO entity_states(link_id, state, content_revision, entities, updated_at, operation_key, revision)
-     VALUES (?, ?, ?, ?, ?, ?, 1)
-     ON CONFLICT(link_id) DO UPDATE SET state=excluded.state, content_revision=excluded.content_revision,
-       entities=excluded.entities, updated_at=excluded.updated_at, operation_key=excluded.operation_key,
-       revision=entity_states.revision + 1`
-  ).bind(id, state, link.content_revision, canonicalJSON(entities), now, operationKey).run();
-  return reply({ id, state, revision: link.content_revision });
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO entity_operations(operation_key,link_id,request_hash,evidence_snapshot_id,content_revision,content_hash,payload,outcome,created_at)
+      SELECT ?,l.id,?,s.id,s.content_revision,s.content_hash,?,
+        CASE WHEN ? IN ('failed','not_run') AND EXISTS (
+          SELECT 1 FROM entity_states e WHERE e.link_id=l.id AND e.content_revision=s.content_revision
+            AND e.content_hash=s.content_hash AND e.evidence_snapshot_id=s.id
+            AND e.state IN ('completed_empty','completed_nonempty')
+        ) THEN 'ignored_stale' ELSE 'stored' END,?
+      FROM links l JOIN evidence_snapshots s ON s.link_id=l.id AND s.content_revision=l.content_revision
+      WHERE l.id=? AND s.id=? AND s.content_revision=? AND s.content_hash=?
+      ON CONFLICT(operation_key) DO NOTHING`)
+      .bind(operationKey, requestHash, canonicalJSON(body), state, now, id, body.evidence_snapshot_id, body.content_revision, body.content_hash),
+    env.DB.prepare(`INSERT INTO entity_states(link_id,state,content_revision,content_hash,evidence_snapshot_id,entities,updated_at,operation_key,revision)
+      SELECT link_id,?,content_revision,content_hash,evidence_snapshot_id,?,?,operation_key,1 FROM entity_operations
+      WHERE operation_key=? AND request_hash=? AND applied=0 AND outcome='stored'
+      ON CONFLICT(link_id) DO UPDATE SET state=excluded.state,content_revision=excluded.content_revision,
+        content_hash=excluded.content_hash,evidence_snapshot_id=excluded.evidence_snapshot_id,
+        entities=excluded.entities,updated_at=excluded.updated_at,operation_key=excluded.operation_key,revision=entity_states.revision+1`)
+      .bind(state, canonicalJSON(entities), now, operationKey, requestHash),
+    env.DB.prepare(`UPDATE entity_operations SET applied=1 WHERE operation_key=? AND request_hash=? AND applied=0`)
+      .bind(operationKey, requestHash)
+  ]);
+  const committed = await receipt();
+  if (!committed) return fail("run_stale", 409);
+  if (committed.request_hash === requestHash && committed.link_id === id) await rebuildProjection(env, id);
+  return acknowledge(committed, false);
 }
 
 // --- Evidence escalation requests (B09-T05) ---------------------------------
@@ -876,7 +892,10 @@ export async function automaticOf(env: Env, id: number): Promise<AutomaticView> 
 // of the classification decision, so an entity result is visible in the
 // effective view even before/without a decision (R2-08).
 async function entityAutomatic(env: Env, id: number): Promise<string[]> {
-  const row = await env.DB.prepare(`SELECT state, entities FROM entity_states WHERE link_id = ?`).bind(id)
+  const row = await env.DB.prepare(`SELECT e.state,e.entities FROM entity_states e JOIN links l ON l.id=e.link_id
+    JOIN evidence_snapshots s ON s.id=e.evidence_snapshot_id AND s.link_id=e.link_id
+    WHERE e.link_id=? AND e.content_revision=l.content_revision AND s.content_revision=e.content_revision
+      AND s.content_hash=e.content_hash`).bind(id)
     .first<{ state: string; entities: string }>();
   if (!row || (row.state !== "completed_nonempty" && row.state !== "completed_empty")) return [];
   const parsed = parseJSON(row.entities, []) as unknown;

@@ -644,7 +644,13 @@ function bookmarkFilters(url: URL, query?: string): { clauses: string[]; binding
     for (const term of terms) {
       const like = `%${escapeLike(term)}%`;
       const fields = ["url", "note", "ai_title", "summary", "translated_text", "original_text", "why",
-        "json_extract(classification, '$.why_suggestion')", "json_extract(classification, '$.entities')"];
+        "json_extract(classification, '$.why_suggestion')",
+        // Retain legacy full-text metadata until an independent entity run or
+        // correction exists. Thereafter only current, corrected entities match.
+        `(CASE WHEN NOT EXISTS (SELECT 1 FROM entity_states WHERE link_id=links.id)
+          AND NOT EXISTS (SELECT 1 FROM curation_overrides WHERE link_id=links.id AND field='entities')
+          THEN json_extract(classification, '$.entities')
+          ELSE (SELECT group_concat(term, ' ') FROM effective_entity_terms WHERE link_id=links.id) END)`];
       clauses.push(`(${fields.map((field) => `COALESCE(${field}, '') LIKE ? ESCAPE '\\'`).join(" OR ")})`);
       bindings.push(...fields.map(() => like));
     }
