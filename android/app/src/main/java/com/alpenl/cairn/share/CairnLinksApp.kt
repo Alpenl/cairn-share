@@ -989,7 +989,6 @@ private fun DetailScreen(
                                             link = link,
                                             selection = state.v2Drafts[id] ?: state.v2Selections[id],
                                             taxonomy = state.taxonomy,
-                                            entityState = enrichment.entityState,
                                         ),
                                     )
                                 },

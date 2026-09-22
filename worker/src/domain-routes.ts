@@ -1,3 +1,4 @@
+import { readSelectionSnapshot } from "./selection-state";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
@@ -5,7 +6,7 @@ import { taxonomyV2 } from "./taxonomy-v2";
 import { storedClassification, taxonomy } from "./curation";
 import {
   canonicalJSON, contentHash, effectiveView, EMPTY_AUTOMATIC, normalizeField, objectivePayload,
-  semanticSpecHash, snapshotCompleteness, validOverride, validQuestionSpec, validSnapshot,
+  semanticSpecHash, snapshotCompleteness, validOverride, validQuestionSpec, validSnapshot, validAssessment,
   type AutomaticView, type EvidenceSnapshot, type EffectiveView, type Override, type OverrideAction,
   type OverrideField, type QuestionSpec
 } from "./domain";
@@ -722,6 +723,7 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
 }
 
 function normalizeAutomatic(value: Record<string, unknown>): AutomaticView | null {
+  if (value.assessment !== undefined && !validAssessment(value.assessment)) return null;
   const list = (entry: unknown): string[] | null =>
     Array.isArray(entry) && entry.every((item) => typeof item === "string") ? entry as string[] : null;
   const topics = list(value.topics ?? []);
@@ -732,6 +734,7 @@ function normalizeAutomatic(value: Record<string, unknown>): AutomaticView | nul
   if (!topics || !contentFunctions || !carriers || !affordances || !entities) return null;
   if (topics.length > 64 || contentFunctions.length > 8 || carriers.length > 1 || affordances.length > 8) return null;
   return {
+    ...(value.assessment === undefined ? {} : { assessment: value.assessment }),
     topics, content_functions: contentFunctions, carriers, affordances, entities,
     form: typeof value.form === "string" ? value.form : "",
     use: typeof value.use === "string" ? value.use : ""
@@ -939,17 +942,6 @@ export async function persistSelectionOverrides(
 
 // --- Effective view ---------------------------------------------------------
 
-async function loadOverrides(env: Env, id: number): Promise<Override[]> {
-  const rows = await env.DB.prepare(
-    `SELECT field, term, action, source, confirmed, revision FROM curation_overrides WHERE link_id = ? ORDER BY revision, id`
-  ).bind(id).all<{ field: string; term: string; action: string; source: string; confirmed: number; revision: number }>();
-  return rows.results.map((row) => ({
-    field: (normalizeField(row.field) ?? "topics") as OverrideField, term: row.term,
-    action: row.action as Override["action"], source: row.source as Override["source"],
-    confirmed: row.confirmed === 1, revision: row.revision
-  }));
-}
-
 // classificationAutomatic is the AI suggestion baseline: links.classification is
 // the generated result and never contains human edits. The previous code read
 // link_selections_v2 here, which is a projection of the *effective* (already
@@ -994,60 +986,12 @@ async function entityAutomatic(env: Env, id: number): Promise<string[]> {
   return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
-// legacyCurationOverrides reads captured legacy input, never the mutable v1
-// display projection, as an explicit legacy_unknown layer. The value remains a
-// human decision instead of being silently overwritten by the first v2 AI
-// result, and it is never promoted to reliable gold (R2-03).
-async function legacyCurationOverrides(env: Env, id: number): Promise<Override[]> {
-  const source = await env.DB.prepare(`SELECT payload,revision,provenance FROM legacy_curation_history WHERE link_id=? ORDER BY id DESC LIMIT 1`)
-    .bind(id).first<{ payload: string | null; revision: number; provenance: string }>();
-  if (!source || source.provenance !== "legacy_unknown") return [];
-  const legacy = parseJSON(source.payload ?? "null", null) as Record<string, unknown> | null;
-  const overrides: Override[] = [];
-  const append = (field: OverrideField, action: OverrideAction, term = "") => {
-    overrides.push({ field, term, action, source: "legacy_unknown", confirmed: false, revision: source.revision });
-  };
-  // Historical curation is a complete selection in the three expressible v1
-  // dimensions. Empty is intentional; missing v2 dimensions stay automatic.
-  for (const field of ["topics", "form", "use"] as const) {
-    if (legacy === null) { append(field, "reset"); continue; }
-    if (!(field in legacy)) continue;
-    append(field, "set_empty");
-    const values = field === "topics" ? legacy.topics : [legacy[field]];
-    if (Array.isArray(values)) for (const term of values) {
-      if (typeof term === "string" && term !== "") append(field, "accept", term);
-    }
-  }
-  return overrides;
-}
-
-// computeEffective derives the single effective view from the latest decision
-// (or the legacy stored selection) plus the override log. It never trusts a
-// stored projection or a caller-supplied effective object.
+// All fields and revisions are read from one SQLite snapshot.
 export async function computeEffective(env: Env, id: number): Promise<{ view: EffectiveView; automatic: AutomaticView; decisionId: number; projected: boolean; stale: boolean; contentRevision: number }> {
-  const decision = await env.DB.prepare(
-    `SELECT id, content_revision, automatic FROM classification_decisions WHERE link_id = ? ORDER BY id DESC LIMIT 1`
-  ).bind(id).first<{ id: number; content_revision: number; automatic: string }>();
-  const overrides = await loadOverrides(env, id);
-  const legacy = await legacyCurationOverrides(env, id);
-  const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
-    .first<{ content_revision: number }>();
-  const entities = await entityAutomatic(env, id);
-  // Migration-era legacy values have revision 0. A later old-application write
-  // has its own captured revision and participates in normal action ordering.
-  const layered = [...legacy, ...overrides];
-  if (decision) {
-    const automatic = parseJSON(decision.automatic, EMPTY_AUTOMATIC) as AutomaticView;
-    automatic.entities = entities;
-    return {
-      view: effectiveView(automatic, layered), automatic, decisionId: decision.id, projected: true,
-      stale: link !== null && decision.content_revision !== link.content_revision,
-      contentRevision: link?.content_revision ?? decision.content_revision
-    };
-  }
-  const automatic = await classificationAutomatic(env, id);
-  automatic.entities = entities;
-  return { view: effectiveView(automatic, layered), automatic, decisionId: 0, projected: false, stale: false, contentRevision: link?.content_revision ?? 0 };
+  const snapshot = await readSelectionSnapshot(env, id);
+  if (snapshot) return snapshot;
+  const automatic = { ...EMPTY_AUTOMATIC };
+  return { view: effectiveView(automatic, []), automatic, decisionId: 0, projected: false, stale: false, contentRevision: 0 };
 }
 
 // persistEffective writes the query projections (current_projections and

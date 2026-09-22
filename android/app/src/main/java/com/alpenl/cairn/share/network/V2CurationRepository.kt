@@ -60,7 +60,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         action: String,
     ): MultidimensionalSelection {
         if (action == "reset" && automatic == null) {
-            return selection.copy(unknownResetFields = selection.unknownResetFields + field)
+            return selection.copy(unknownResetFields = selection.unknownResetFields + field, pendingFields = selection.pendingFields + field)
         }
         // Non-reset actions never consult this fallback; unknown automatic
         // state remains unknown rather than being copied from human values.
@@ -76,7 +76,8 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         }
         val replacesUnknown = action == "set_empty" || (action == "reset" && term.isEmpty()) ||
             (field in setOf("carriers", "form", "use") && action == "accept")
-        return if (replacesUnknown) result.copy(unknownResetFields = result.unknownResetFields - field) else result
+        return result.copy(unknownResetFields = if (replacesUnknown) result.unknownResetFields - field else result.unknownResetFields,
+            pendingFields = result.pendingFields + field)
     }
 
     /**

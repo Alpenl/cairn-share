@@ -3,7 +3,10 @@ import { beforeEach, expect, it } from "vitest";
 import worker from "../src/index";
 import { canonicalJSON, contentHash, effectiveView, objectivePayload, type AutomaticView, type EvidenceSnapshot, type Override } from "../src/domain";
 import vectors from "./fixtures/override-vectors.json";
+import stateFixture from "./fixtures/selection-state-v1.json";
 import { rebuildProjection } from "../src/domain-routes";
+import { readSelectionSnapshot } from "../src/selection-state";
+import type { Env } from "../src/index";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 
@@ -35,6 +38,104 @@ function snapshot(overrides: Partial<EvidenceSnapshot> = {}): EvidenceSnapshot {
 const emptyAutomatic: AutomaticView = {
   topics: [], content_functions: [], carriers: [], affordances: [], form: "", use: "", entities: []
 };
+
+it("B07: keeps stored policy outcomes distinct from empty, unknown and human origin", async () => {
+  const id = await createLink();
+  const read = async () => {
+    const response = await request(`bookmarks/${id}/v2-selection?include_automatic=1&include_state=1`, undefined, "GET", "app");
+    expect(response.status).toBe(200);
+    return response.json() as Promise<Record<string, any>>;
+  };
+  expect((await read()).state.fields.topics.status).toBe("not_run");
+  await env.DB.prepare("INSERT INTO classification_jobs(link_id,status,content_revision) VALUES (?,'failed',1)").bind(id).run();
+  expect((await read()).state.fields.topics.status).toBe("failed");
+  const runID = await submitRun(id, "display-run");
+  expect((await submitDecision(id, runID, { ...emptyAutomatic, topics: ["llm"] }, "old-decision")).status).toBe(200);
+  expect((await read()).state.fields.topics.status).toBe("unknown");
+  const automatic: AutomaticView = { ...emptyAutomatic, topics: ["llm"], assessment: { version: 1, incomplete: ["affordances"], decisions: [
+    { dimension: "topics", term_id: "llm", verdict: "accepted", probability: 0.9, reason: "above bound" },
+    { dimension: "topics", term_id: "eval", verdict: "abstained", probability: 0.5, reason: "between bounds" },
+    { dimension: "topics", term_id: "design", verdict: "rejected", probability: 0, reason: "below bound" },
+    { dimension: "form", candidate: "method", verdict: "abstained", probability: 0.5, reason: "below bound" },
+    { dimension: "use", candidate: "none", verdict: "accepted", probability: 0.9, reason: "explicit none" },
+  ] } };
+  expect((await submitDecision(id, runID, automatic, "display-decision")).status).toBe(200);
+  let response = await read();
+  expect(response.state.fields).toEqual(stateFixture.state.fields);
+  await env.DB.prepare("UPDATE classification_runs SET evidence_coverage='truncated' WHERE id=?").bind(runID).run();
+  expect((await read()).state.decision_evidence_partial).toBe(true);
+  expect(response.state.fields.topics).toMatchObject({ status: "completed_nonempty", values: [{ term: "llm", origin: "automatic", confirmed: false }] });
+  expect(response.state.fields.topics.candidates[2].probability).toBe(0);
+  expect(response.state.fields.form).toMatchObject({ status: "abstained", candidates: [{ candidate: "method" }] });
+  expect(response.state.fields.use.status).toBe("completed_empty");
+  expect(response.state.fields.affordances).toMatchObject({ status: "not_run", incomplete: true });
+  expect(response.state.entities.status).toBe("not_run");
+  const act = async (action: string, term: string, revision: number) => {
+    expect((await request(`bookmarks/${id}/v2-override`, { operation_key: `display-${revision}`, field: "topics", action, term, expected_revision: revision }, "POST", "app")).status).toBe(200);
+  };
+  await act("accept", "llm", 0);
+  expect((await read()).state.fields.topics.values).toEqual([{ term: "llm", origin: "human", confirmed: true, revision: 1 }]);
+  await act("reset", "llm", 1);
+  expect((await read()).state.fields.topics.values[0].origin).toBe("automatic");
+  await act("set_empty", "", 2);
+  response = await read();
+  expect(response.selection.topics).toEqual([]);
+  expect(response.state.fields.topics.empty).toEqual({ origin: "human", confirmed: true, revision: 3 });
+  expect(response.state.fields.topics.status).toBe("completed_nonempty"); // automatic state is independent of human empty
+  await act("reset", "", 3);
+  expect((await read()).state.fields.topics.values[0].origin).toBe("automatic");
+  await env.DB.prepare("UPDATE links SET content_revision=content_revision+1 WHERE id=?").bind(id).run();
+  expect((await read()).state.fields.topics.status).toBe("stale");
+  const old = await (await request(`bookmarks/${id}/v2-selection`, undefined, "GET", "app")).json() as Record<string, unknown>;
+  expect(old).not.toHaveProperty("state");
+  expect(old).not.toHaveProperty("automatic");
+  // Metadata is in the immutable operation identity, not silently discarded.
+  expect((await submitDecision(id, runID, { ...automatic, assessment: { ...automatic.assessment!, incomplete: [] } }, "display-decision")).status).toBe(409);
+});
+
+it("B07: a mutation after the snapshot read cannot stamp a new revision onto old values", async () => {
+  const id = await createLink();
+  let reads = 0;
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, { get(target, key) {
+    if (key === "bind") return (...args: unknown[]) => wrap(target.bind(...args));
+    if (key === "first") return async () => {
+      reads++;
+      const value = await target.first();
+      expect((await request(`bookmarks/${id}/v2-override`, { operation_key: "during-read", field: "topics", term: "llm", action: "accept", expected_revision: 0 }, "POST", "app")).status).toBe(200);
+      return value;
+    };
+    return Reflect.get(target, key);
+  } });
+  const db = new Proxy(env.DB, { get(target, key) {
+    return key === "prepare" ? (sql: string) => wrap(target.prepare(sql)) : Reflect.get(target, key);
+  } });
+  const snapshot = await readSelectionSnapshot({ DB: db } as Env, id);
+  expect(reads).toBe(1);
+  expect(snapshot?.link.personal_revision).toBe(0);
+  expect(snapshot?.view.topics).toEqual([]);
+  const fresh = await readSelectionSnapshot({ DB: env.DB } as Env, id);
+  expect(fresh?.link.personal_revision).toBe(1);
+  expect(fresh?.view.topics).toEqual(["llm"]);
+});
+
+it("B07: entity status and baseline use their own snapshot even without classification", async () => {
+  const id = await createLink();
+  const evidence = await (await request(`v2/links/${id}/evidence`, { snapshot: snapshot() })).json() as { id: number; content_revision: number; content_hash: string };
+  await env.DB.prepare(`INSERT INTO entity_states(link_id,state,content_revision,content_hash,evidence_snapshot_id,entities,updated_at)
+    VALUES (?,'completed_nonempty',?,?,?,'["Jev"]','now')`).bind(id, evidence.content_revision, evidence.content_hash, await env.DB.prepare("SELECT id FROM evidence_snapshots WHERE link_id=? AND content_revision=?").bind(id, evidence.content_revision).first("id")).run();
+  const read = () => readSelectionSnapshot({ DB: env.DB } as Env, id);
+  let result = await read();
+  expect(result?.state.fields.topics.status).toBe("not_run");
+  expect(result?.state.entities).toMatchObject({ status: "completed_nonempty", values: [{ term: "Jev", origin: "automatic", confirmed: false }] });
+  await env.DB.prepare("UPDATE entity_states SET state='failed' WHERE link_id=?").bind(id).run();
+  expect((await read())?.state.entities).toMatchObject({ status: "failed", automatic: [], values: [] });
+  await env.DB.prepare("UPDATE entity_states SET state='completed_empty',entities='[]' WHERE link_id=?").bind(id).run();
+  expect((await read())?.state.entities.status).toBe("completed_empty");
+  await env.DB.prepare("UPDATE links SET content_revision=content_revision+1 WHERE id=?").bind(id).run();
+  result = await read();
+  expect(result?.state.entities.status).toBe("stale");
+  expect(result?.view.entities).toEqual([]);
+});
 
 // --- Cross-language canonicalisation vectors -------------------------------
 
@@ -291,6 +392,9 @@ it.each([false, true])("R3-03: captured legacy complete selection (empty=%s) rep
   // captures this source without treating later compatibility projections as input.
   const manual = { topics: empty ? [] : ["eng"], form: "", use: "" };
   await env.DB.prepare("UPDATE links SET curation=? WHERE id=?").bind(JSON.stringify(manual), id).run();
+  const legacyState = await readSelectionSnapshot({ DB: env.DB } as Env, id);
+  const provenance = empty ? legacyState?.state.fields.topics.empty : legacyState?.state.fields.topics.values[0];
+  expect(provenance).toMatchObject({ origin: "legacy_unknown", confirmed: false });
   const run = await submitRun(id, "legacy-source");
   expect((await submitDecision(id, run, { ...emptyAutomatic, topics: ["llm"], form: "method", use: "try", content_functions: ["data"] }, "legacy-decision")).status).toBe(200);
   const body = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: AutomaticView };
@@ -468,7 +572,8 @@ it("completes a v2 classification into runs, decision and the unified selection 
       spec_id: "classify-v1", spec_hash: await storedSpecHash(),
       answers: { topic_llm: { type: "noul", noul: 0.93 }, form: { type: "choice", choice: "method", probabilities: { method: 0.9, case: 0.1 } } },
       usage: { input_tokens: 42, output_tokens: 7 }, coverage: "complete", evidence_coverage: "complete",
-      automatic: { topics: ["llm"], content_functions: ["method"], carriers: [], affordances: [], form: "method", use: "", entities: [] },
+      automatic: { topics: ["llm"], content_functions: ["method"], carriers: [], affordances: [], form: "method", use: "", entities: [],
+        assessment: { version: 1, incomplete: [], decisions: [{ dimension: "topics", term_id: "llm", verdict: "accepted", probability: 0.93, reason: "above bound" }] } },
       classification: { topics: ["llm"], form: "method", use: "try", uncertainty: false,
         taxonomy_version: taxonomy.version, why_suggestion: "", entities: [], discarded_tags: [] }
     }
@@ -481,6 +586,7 @@ it("completes a v2 classification into runs, decision and the unified selection 
   expect((runs.runs[0].usage as Record<string, unknown>).input_tokens).toBe(42);
   const decision = await (await request(`v2/links/${id}/decisions`, undefined, "GET")).json() as { automatic: AutomaticView; policy: Record<string, unknown> };
   expect(decision.automatic.topics).toEqual(["llm"]);
+  expect(decision.automatic.assessment).toEqual(completionBody.result.automatic.assessment);
   expect(decision.policy.version).toBe("jev-policy-v2");
   const effective = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: ReturnType<typeof effectiveView>; projected: boolean };
   expect(effective.projected).toBe(true);

@@ -1,7 +1,7 @@
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { record, taxonomy, validateClassification } from "./curation";
-import type { AutomaticView } from "./domain";
+import { validAssessment, type AutomaticView } from "./domain";
 import { decisionInsertStatement, rebuildProjection, runInsertStatement, type WriteGuard } from "./domain-routes";
 
 const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
@@ -173,7 +173,9 @@ function automaticView(value: unknown): AutomaticView | null {
   const affordances = list(value.affordances, 8);
   const entities = list(value.entities, 10);
   if (!topics || !contentFunctions || !carriers || !affordances || !entities) return null;
+  if (value.assessment !== undefined && !validAssessment(value.assessment)) return null;
   return {
+    ...(value.assessment === undefined ? {} : { assessment: value.assessment }),
     topics, content_functions: contentFunctions, carriers, affordances, entities,
     form: typeof value.form === "string" && value.form.length <= 40 ? value.form : "",
     use: typeof value.use === "string" && value.use.length <= 40 ? value.use : ""

@@ -124,6 +124,61 @@ class V2CurationInstrumentedTest {
         }
     }
 
+    @Test fun displaysStoredOutcomesAndIndependentEntitiesWithoutAnInferenceRequest() {
+        val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val fixture = JSONObject(InstrumentationRegistry.getInstrumentation().context.assets
+            .open("selection-state-v1.json").bufferedReader().use { it.readText() }).put("id", 4)
+        fixture.getJSONObject("state").put("evidence", JSONObject("""{"id":1,"truncated":1,"completeness":"partial"}"""))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.requestUrl!!.encodedPath
+                paths.add("${request.method} $path")
+                return when (path) {
+                    "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                    "/api/bookmarks/4" -> response(link(4))
+                    "/api/bookmarks/4/v2-selection" -> {
+                        assertEquals("1", request.requestUrl!!.queryParameter("include_state"))
+                        response(fixture)
+                    }
+                    "/api/v2-taxonomy" -> response(taxonomy().put("topics", JSONArray().apply {
+                        for ((id, label) in listOf("llm" to "LLM", "eng" to "工程", "product" to "产品", "design" to "设计",
+                            "writing" to "写作", "invest" to "投资", "health" to "健康", "psych" to "心理", "manage" to "管理",
+                            "media" to "媒体", "law" to "法律", "edu" to "教育", "history" to "历史", "science" to "科学",
+                            "city" to "城市", "life" to "生活", "eval" to "评估")) put(JSONObject().put("id", id).put("label", label).put("active", true))
+                    }))
+                    else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+                }
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use { scenario ->
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_topics_chip_eval"))
+            compose.onNodeWithTag("v2_topics_chip_eval").assertIsDisplayed()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_topics_status"))
+            compose.onNodeWithTag("v2_topics_status").assertTextEquals("自动判断：已生成建议")
+            compose.onNodeWithText("LLM · 自动建议").assertExists()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_topics_candidates"))
+            compose.onNodeWithTag("v2_topics_candidates").performClick()
+            compose.onNodeWithText("评估 · 暂不判断 · 50%").assertExists()
+            compose.onNodeWithText("设计 · 拒绝 · 0%").assertExists()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_form_status"))
+            compose.onNodeWithTag("v2_form_status").assertTextEquals("自动判断：证据不足，暂不判断")
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_use_status"))
+            compose.onNodeWithTag("v2_use_status").assertTextEquals("自动判断：已完成，无适用项")
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entities_status"))
+            compose.onNodeWithTag("v2_entities_status").assertTextEquals("实体：尚未运行")
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_evidence_partial"))
+            compose.onNodeWithTag("v2_evidence_partial").assertExists()
+            scenario.recreate()
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entities_status"))
+                compose.onNodeWithTag("v2_entities_status").assertTextEquals("实体：尚未运行")
+                true
+            }.getOrDefault(false) }
+            assertTrue(paths.none { it.startsWith("POST ") || it.contains("/classifications/") })
+        }
+    }
+
     @Test fun aConflictKeepsTheDraftAndOffersReapply() {
         val attempts = java.util.concurrent.atomic.AtomicInteger()
         val bodies = java.util.Collections.synchronizedList(mutableListOf<JSONObject>())

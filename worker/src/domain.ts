@@ -189,13 +189,20 @@ interface FieldState {
   /** set_empty suppresses automatic values until a per-tag reset re-admits one. */
   clearedAutomatic: boolean;
   readmit: Set<string>;
+  origins: Map<string, Override>;
+  emptyOverride?: Override;
 }
 
 function newFieldState(): FieldState {
-  return { action: new Map(), order: [], history: [], empty: false, clearedAutomatic: false, readmit: new Set() };
+  return { action: new Map(), order: [], history: [], empty: false, clearedAutomatic: false, readmit: new Set(), origins: new Map() };
 }
 
 function applyOverride(state: FieldState, override: Override): void {
+  if (override.action === "accept" || override.action === "reject") state.origins.set(override.term, override);
+  if (override.action === "set_empty" || (override.action === "reset" && override.term === "")) {
+    state.origins.clear();
+    state.emptyOverride = override.action === "set_empty" ? override : undefined;
+  } else if (override.action === "reset") state.origins.delete(override.term);
   switch (override.action) {
     case "accept":
       state.history.push({ term: override.term, action: override.action });
@@ -281,6 +288,66 @@ export interface AutomaticView {
   form: string;
   use: string;
   entities: string[];
+  assessment?: Assessment;
+}
+
+export interface FieldDecision {
+  dimension: string;
+  term_id?: string;
+  value?: string;
+  candidate?: string;
+  verdict: "accepted" | "rejected" | "abstained";
+  reason: string;
+  probability: number;
+}
+
+export interface Assessment {
+  version: 1;
+  decisions: FieldDecision[];
+  incomplete: string[];
+}
+
+// Keep policy outcomes verbatim. Neither the Worker nor a reader re-runs a
+// guessed threshold over probabilities to manufacture historical decisions.
+export function validAssessment(value: unknown): value is Assessment {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const boundedText = (entry: unknown, max: number) => typeof entry === "string" && entry.length <= max;
+  return row.version === 1 && Array.isArray(row.incomplete) && row.incomplete.length <= 64 &&
+    row.incomplete.every((entry) => boundedText(entry, 80)) && Array.isArray(row.decisions) && row.decisions.length <= 256 &&
+    row.decisions.every((entry: unknown) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const decision = entry as Record<string, unknown>;
+      return boundedText(decision.dimension, 80) && boundedText(decision.reason, 1000) &&
+        (decision.term_id === undefined || boundedText(decision.term_id, 80)) &&
+        (decision.value === undefined || boundedText(decision.value, 80)) &&
+        (decision.candidate === undefined || boundedText(decision.candidate, 80)) &&
+        ["accepted", "rejected", "abstained"].includes(String(decision.verdict)) &&
+        typeof decision.probability === "number" && Number.isFinite(decision.probability) &&
+        decision.probability >= 0 && decision.probability <= 1;
+    });
+}
+
+export function effectiveOrigins(view: EffectiveView, overrides: Override[], automaticOrigin: "automatic" | "legacy_unknown") {
+  const states: Record<string, FieldState> = {};
+  for (const field of OVERRIDE_FIELDS) states[field] = newFieldState();
+  for (const override of [...overrides].sort((a, b) => a.revision - b.revision)) {
+    if (states[override.field]) applyOverride(states[override.field], override);
+  }
+  const origin = (override?: Override) => ({ origin: override?.source ?? automaticOrigin,
+    confirmed: override?.source === "human" && override.confirmed === true, revision: override?.revision ?? null });
+  return Object.fromEntries(OVERRIDE_FIELDS.map((field) => {
+    const state = states[field];
+    const values = typeof view[field] === "string" ? (view[field] ? [view[field] as string] : []) : view[field] as string[];
+    return [field, {
+      values: values.map((term) => ({ term, ...origin(state.action.get(term) === "accept" ? state.origins.get(term) : undefined) })),
+      empty: state.empty ? origin(state.emptyOverride) : null,
+      // Preserve active rejections and a cleared baseline even when no visible
+      // label remains. Reset actions remove origins through the same fold.
+      cleared_automatic: state.clearedAutomatic ? origin(state.emptyOverride) : null,
+      actions: [...state.origins.values()].map((entry) => ({ term: entry.term, action: entry.action, ...origin(entry) }))
+    }];
+  }));
 }
 
 export const EMPTY_AUTOMATIC: AutomaticView = {

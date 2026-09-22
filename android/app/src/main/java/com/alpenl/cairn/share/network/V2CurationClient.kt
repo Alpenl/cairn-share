@@ -28,6 +28,8 @@ internal data class MultidimensionalSelection(
     val available: Boolean = false,
     val automatic: MultidimensionalSelection? = null,
     val unknownResetFields: Set<String> = emptySet(),
+    val state: SelectionState? = null,
+    val pendingFields: Set<String> = emptySet(),
 )
 
 internal sealed interface V2Result<out T> {
@@ -65,7 +67,7 @@ internal class V2CurationClient(
     }
 
     fun loadSelection(id: Int, apiToken: String): V2Result<MultidimensionalSelection> {
-        val connection = endpoint("/api/bookmarks/$id/v2-selection?include_automatic=1").openConnection() as HttpURLConnection
+        val connection = endpoint("/api/bookmarks/$id/v2-selection?include_automatic=1&include_state=1").openConnection() as HttpURLConnection
         return try {
             configure(connection, "GET", apiToken)
             when (val status = connection.responseCode) {
@@ -153,22 +155,32 @@ internal class V2CurationClient(
         }
     }
 
-    private fun decodeSelection(payload: JSONObject): V2Result<MultidimensionalSelection> {
+    internal fun decodeSelection(payload: JSONObject): V2Result<MultidimensionalSelection> {
         if (payload.optBoolean("available", true) == false) return V2Result.Unsupported
-        val selection = payload.optJSONObject("selection")
+        val selection = payload.optJSONObject("selection") ?: return V2Result.Failed(FailureKind.Server)
+        val revision = payload.nonnegativeRevision("revision") ?: return V2Result.Failed(FailureKind.Server)
+        if (decodeAutomatic(selection) == null) return V2Result.Failed(FailureKind.Server)
         val projection = payload.optJSONObject("v1_projection")
+        val state = decodeSelectionState(payload.optJSONObject("state"), revision)?.takeIf { decoded ->
+            decoded.fields.all { (field, detail) ->
+                val values = if (field == "form" || field == "use") listOf(selection.optString(field)).filter { it.isNotEmpty() }
+                    else selection.strings(field)
+                detail.values.map { it.term } == values
+            }
+        }
         return V2Result.Loaded(
             MultidimensionalSelection(
                 topics = selection.strings("topics"),
                 contentFunctions = selection.strings("content_functions"),
                 carriers = selection.strings("carriers"),
                 affordances = selection.strings("affordances"),
-                form = selection?.optString("form").orEmpty(),
-                use = selection?.optString("use").orEmpty(),
+                form = selection.optString("form"),
+                use = selection.optString("use"),
                 v1ProjectionTopics = projection.strings("topics"),
-                revision = payload.optLong("revision", 0),
+                revision = revision,
                 available = true,
                 automatic = decodeAutomatic(payload.optJSONObject("automatic")),
+                state = state,
             )
         )
     }

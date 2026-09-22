@@ -54,6 +54,9 @@ android {
         }
     }
 
+    sourceSets.getByName("test").resources.srcDir("../../worker/test/fixtures")
+    sourceSets.getByName("androidTest").assets.srcDir("../../worker/test/fixtures")
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

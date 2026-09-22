@@ -1,3 +1,4 @@
+import { readSelectionSnapshot } from "./selection-state";
 import type { Env } from "./index";
 import { computeEffective, persistSelectionOverrides } from "./domain-routes";
 import {
@@ -66,7 +67,7 @@ export async function taxonomyV2Route(request: Request, env: Env, path: string):
   let match = path.match(/^\/api\/v2\/links\/(\d+)\/selection$/);
   if (match) {
     const id = Number(match[1]);
-    if (request.method === "GET") return getSelection(env, id, new URL(request.url).searchParams.get("include_automatic") === "1");
+    if (request.method === "GET") return getSelection(env, id, new URL(request.url).searchParams);
     if (request.method === "PATCH") return patchSelection(request, env, id);
     return fail("method_not_allowed", 405);
   }
@@ -184,17 +185,18 @@ async function applyProposal(request: Request, env: Env, id: string): Promise<Re
 // getSelection reads the same effective view that the field-level override API
 // derives. There is exactly one source of truth (decision + override log);
 // link_selections_v2 is a query projection of it, never a parallel truth (F04).
-async function getSelection(env: Env, id: number, includeAutomatic = false): Promise<Response> {
-  const link = await env.DB.prepare(`SELECT personal_revision, why, curation_status FROM links WHERE id = ?`).bind(id)
-    .first<{ personal_revision: number; why: string | null; curation_status: string | null }>();
-  if (!link) return fail("not_found", 404);
-  const { view, automatic, projected, stale } = await computeEffective(env, id);
+async function getSelection(env: Env, id: number, params: URLSearchParams): Promise<Response> {
+  const snapshot = await readSelectionSnapshot(env, id);
+  if (!snapshot) return fail("not_found", 404);
+  const { link, view, automatic, projected, stale, state } = snapshot;
+  const includeAutomatic = params.get("include_automatic") === "1";
   const selection: V2Selection = {
     topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
     affordances: view.affordances, form: view.form, use: view.use
   };
   return reply({
     id, revision: link.personal_revision, selection,
+    ...(params.get("include_state") === "1" ? { state } : {}),
     // This is the same baseline used to derive view, before human overrides.
     // Return only the six selection dimensions; entity state is independent.
     ...(includeAutomatic ? { automatic: { topics: automatic.topics, content_functions: automatic.content_functions,
