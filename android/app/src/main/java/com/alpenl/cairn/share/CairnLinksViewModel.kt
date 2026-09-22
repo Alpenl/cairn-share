@@ -170,6 +170,7 @@ internal class CairnLinksViewModel(
     private var retryPendingUploadsAgain = false
     private var retryPendingUploadsAgainWithSummary = false
     private var loadedPreferencesOnce = false
+    private var lastObservedToken = ""
     private var automaticUploadRetryStarted = false
     // The serial curation action queue. A pending action is only removed after
     // the server confirms it (R2-04/R2-05).
@@ -199,6 +200,12 @@ internal class CairnLinksViewModel(
 
     private fun curationAccountKey(): String =
         accountKeyFor(uiState.apiBaseUrl, uiState.preferences.apiToken)
+
+    private fun clearV2AccountState() {
+        uiState = uiState.copy(v2Selections = emptyMap(), v2Drafts = emptyMap(),
+            v2Conflicts = emptyMap(), v2Busy = emptySet(), v2Queued = emptyMap(), v2LegacyActions = emptyMap(),
+            v2Taxonomy = null, v2TaxonomyLoading = false, v2Available = true)
+    }
 
     /**
      * Loads the effective view. A local draft or a queued action is never
@@ -856,6 +863,9 @@ internal class CairnLinksViewModel(
         val token = value.trim()
         refreshJob?.cancel()
         searchJob?.cancel()
+        // The settings UI updates optimistically, before DataStore emits. Never
+        // expose the previous account's selection to actions in that interval.
+        if (token != currentApiToken()) clearV2AccountState()
         uiState = uiState.copy(preferences = uiState.preferences.copy(apiToken = token), loading = false, taxonomy = null, taxonomyLoading = false)
         viewModelScope.launch { settingsStore.setApiToken(token) }
         refreshLinks()
@@ -977,7 +987,9 @@ internal class CairnLinksViewModel(
                 .catch { emit(SharePreferences()) }
                 .collect { preferences ->
                     val firstLoad = !loadedPreferencesOnce
-                    val previousToken = uiState.preferences.apiToken.trim()
+                    // Compare persisted emissions, not the optimistic settings UI.
+                    val previousToken = lastObservedToken
+                    lastObservedToken = preferences.apiToken.trim()
                     val restoredFilter = if (firstLoad) filterFromPreference(preferences.lastFilter) else uiState.filter
                     val restoredQuery = if (firstLoad) preferences.lastSearchQuery else uiState.searchQuery
                     loadedPreferencesOnce = true
@@ -988,9 +1000,7 @@ internal class CairnLinksViewModel(
                         searchQuery = restoredQuery,
                     )
                     if (firstLoad || previousToken != preferences.apiToken.trim()) {
-                        uiState = uiState.copy(v2Selections = emptyMap(), v2Drafts = emptyMap(),
-                            v2Conflicts = emptyMap(), v2Busy = emptySet(), v2Queued = emptyMap(), v2LegacyActions = emptyMap(),
-                            v2Taxonomy = null, v2TaxonomyLoading = false, v2Available = true)
+                        clearV2AccountState()
                         val all = curationActionStore.snapshot()
                         val mine = all.filter { it.accountKey == curationAccountKey() }
                         val legacyKey = legacyAccountKeyFor(uiState.apiBaseUrl, preferences.apiToken)

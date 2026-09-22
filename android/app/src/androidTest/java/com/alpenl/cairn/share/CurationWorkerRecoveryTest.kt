@@ -231,11 +231,18 @@ class CurationWorkerRecoveryTest {
         withContext(Dispatchers.Main) { model.recoverLegacyV2Actions(other) }
         waitFor { withContext(Dispatchers.Main) { model.uiState.message?.text?.contains("先同步") == true } }
         assertEquals(actions, store.snapshot()) // No implicit merge of two independent chains.
+        withContext(Dispatchers.Main) { model.loadV2Selection(id) }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Selections.containsKey(id) } }
         val before = http("/__test/control").getJSONArray("requests").length()
         val collidingToken = "test-b-12345678"
         assertEquals(legacyAccountKeyFor(base, token), legacyAccountKeyFor(base, collidingToken))
         assertNotEquals(account, accountKeyFor(base, collidingToken))
-        SharePreferencesStore(context).setApiToken(collidingToken)
+        withContext(Dispatchers.Main) {
+            model.setApiToken(collidingToken)
+            assertTrue(model.uiState.v2Selections.isEmpty())
+            assertTrue(model.uiState.v2Drafts.isEmpty())
+            assertTrue(model.uiState.v2Queued.isEmpty())
+        }
         waitFor { withContext(Dispatchers.Main) { model.uiState.preferences.apiToken == collidingToken && model.uiState.v2Queued.isEmpty() } }
         control("online")
         withContext(Dispatchers.Main) { model.flushV2Queue(); model.recoverLegacyV2Actions(id) }
