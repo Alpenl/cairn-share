@@ -213,7 +213,7 @@ it("R3-12: malformed and unbounded references are rejected before any write", as
 
 it("R3-12: migration preserves known legacy references without inventing a complete set", async () => {
   await reset();
-  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.slice(0, -1));
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.slice(0, env.TEST_MIGRATIONS.findIndex(m => m.name.startsWith("0021_"))));
   const { id, ids, body } = await setup();
   const legacyHash = await digest(canonicalJSON({ link_id: id, run_ids: ids, policy_version: body.policy_version,
     policy: body.policy, automatic: body.automatic, spec_id: body.spec_id, requested_model: null }));

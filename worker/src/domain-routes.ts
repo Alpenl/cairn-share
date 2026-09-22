@@ -1,3 +1,4 @@
+import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { taxonomyV2 } from "./taxonomy-v2";
@@ -33,6 +34,8 @@ async function sha256Hex(value: string): Promise<string> {
 // Internal v2 API. Every route requires the enricher token (enforced by the
 // caller); management-only mutations are additionally documented as such.
 export async function domainRoute(request: Request, env: Env, path: string): Promise<Response> {
+  const execution = await evidenceExecutionRoute(request, env, path);
+  if (execution) return execution;
   // --- Evidence snapshots -------------------------------------------------
   let match = path.match(/^\/api\/v2\/links\/(\d+)\/evidence$/);
   if (match) {
@@ -245,6 +248,7 @@ async function getEvidenceRequest(env: Env, requestID: string): Promise<Response
 async function createEvidenceRequest(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
+  if (body.protocol !== undefined) return createOwnedEvidenceRequest(env, id, body);
   if (!text(body.scope, 40) || !["external_link", "image_text", "truncation"].includes(String(body.scope))) {
     return fail("invalid_evidence_request");
   }
@@ -275,9 +279,10 @@ async function decideEvidenceRequest(request: Request, env: Env, requestID: stri
   if (!body) return fail("invalid_json");
   const status = String(body.status);
   if (!["completed", "failed", "blocked", "rejected"].includes(status)) return fail("invalid_evidence_request");
-  const existing = await env.DB.prepare(`SELECT status FROM evidence_requests WHERE id = ?`).bind(requestID)
-    .first<{ status: string }>();
+  const existing = await env.DB.prepare(`SELECT status,protocol FROM evidence_requests WHERE id = ?`).bind(requestID)
+    .first<{ status: string; protocol: number }>();
   if (!existing) return fail("not_found", 404);
+  if (existing.protocol !== 0) return fail("execution_protocol_required", 409);
   if (existing.status !== "pending") return fail("already_decided", 409, { status: existing.status });
   await env.DB.prepare(
     `UPDATE evidence_requests SET status = ?, decided_at = ?, result = ? WHERE id = ? AND status = 'pending'`
