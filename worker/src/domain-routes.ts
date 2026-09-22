@@ -1,5 +1,6 @@
 import type { Env } from "./index";
 import { taxonomyV2 } from "./taxonomy-v2";
+import { storedClassification, taxonomy } from "./curation";
 import {
   canonicalJSON, contentHash, effectiveView, EMPTY_AUTOMATIC, normalizeField, objectivePayload,
   semanticSpecHash, snapshotCompleteness, validOverride, validQuestionSpec, validSnapshot,
@@ -882,48 +883,31 @@ async function entityAutomatic(env: Env, id: number): Promise<string[]> {
   return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
-// legacyCurationOverrides turns the pre-v2 human curation into an explicit,
-// lower-priority legacy_unknown override layer. The value is preserved as a
+// legacyCurationOverrides reads captured legacy input, never the mutable v1
+// display projection, as an explicit legacy_unknown layer. The value remains a
 // human decision instead of being silently overwritten by the first v2 AI
 // result, and it is never promoted to reliable gold (R2-03).
 async function legacyCurationOverrides(env: Env, id: number): Promise<Override[]> {
-  const link = await env.DB.prepare(`SELECT curation FROM links WHERE id = ?`).bind(id)
-    .first<{ curation: string | null }>();
-  const legacy = parseJSON(link?.curation ?? "null", null) as Record<string, unknown> | null;
-  if (!legacy) return [];
+  const source = await env.DB.prepare(`SELECT payload,revision,provenance FROM legacy_curation_history WHERE link_id=? ORDER BY id DESC LIMIT 1`)
+    .bind(id).first<{ payload: string | null; revision: number; provenance: string }>();
+  if (!source || source.provenance !== "legacy_unknown") return [];
+  const legacy = parseJSON(source.payload ?? "null", null) as Record<string, unknown> | null;
   const overrides: Override[] = [];
-  const topics = Array.isArray(legacy.topics) ? legacy.topics.filter((entry): entry is string => typeof entry === "string") : [];
-  for (const term of topics) {
-    overrides.push({ field: "topics", term, action: "accept", source: "legacy_unknown", confirmed: false, revision: 0 });
-  }
-  if (typeof legacy.form === "string" && legacy.form !== "") {
-    overrides.push({ field: "form", term: legacy.form, action: "accept", source: "legacy_unknown", confirmed: false, revision: 0 });
-  }
-  if (typeof legacy.use === "string" && legacy.use !== "") {
-    overrides.push({ field: "use", term: legacy.use, action: "accept", source: "legacy_unknown", confirmed: false, revision: 0 });
+  const append = (field: OverrideField, action: OverrideAction, term = "") => {
+    overrides.push({ field, term, action, source: "legacy_unknown", confirmed: false, revision: source.revision });
+  };
+  // Historical curation is a complete selection in the three expressible v1
+  // dimensions. Empty is intentional; missing v2 dimensions stay automatic.
+  for (const field of ["topics", "form", "use"] as const) {
+    if (legacy === null) { append(field, "reset"); continue; }
+    if (!(field in legacy)) continue;
+    append(field, "set_empty");
+    const values = field === "topics" ? legacy.topics : [legacy[field]];
+    if (Array.isArray(values)) for (const term of values) {
+      if (typeof term === "string" && term !== "") append(field, "accept", term);
+    }
   }
   return overrides;
-}
-
-// importLegacyCuration persists the synthesized legacy layer exactly once, so a
-// later projection write cannot lose it. It only runs when the link has no
-// persisted override history yet.
-async function importLegacyCuration(env: Env, id: number): Promise<void> {
-  const existing = await env.DB.prepare(`SELECT COUNT(*) AS n FROM curation_overrides WHERE link_id = ?`).bind(id)
-    .first<{ n: number }>();
-  if ((existing?.n ?? 0) > 0) return;
-  const legacy = await legacyCurationOverrides(env, id);
-  if (legacy.length === 0) return;
-  const now = new Date().toISOString();
-  const statements = legacy.map((override) => {
-    const key = `legacy:${id}:${override.field}:${override.term}`;
-    return env.DB.prepare(
-      `INSERT INTO curation_overrides(link_id, field, term, action, source, confirmed, revision, operation_key, created_at, payload_hash)
-       SELECT ?, ?, ?, ?, 'legacy_unknown', 0, 0, ?, ?, ? WHERE NOT EXISTS (
-         SELECT 1 FROM curation_overrides WHERE operation_key = ?)`
-    ).bind(id, override.field, override.term, override.action, key, now, key, key);
-  });
-  await env.DB.batch(statements);
 }
 
 // computeEffective derives the single effective view from the latest decision
@@ -938,8 +922,8 @@ export async function computeEffective(env: Env, id: number): Promise<{ view: Ef
   const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
     .first<{ content_revision: number }>();
   const entities = await entityAutomatic(env, id);
-  // Legacy overrides sort first (revision 0), so a persisted human action or a
-  // reset always wins over the imported historical value.
+  // Migration-era legacy values have revision 0. A later old-application write
+  // has its own captured revision and participates in normal action ordering.
   const layered = [...legacy, ...overrides];
   if (decision) {
     const automatic = parseJSON(decision.automatic, EMPTY_AUTOMATIC) as AutomaticView;
@@ -986,27 +970,31 @@ export function projectionStatements(env: Env, id: number, personalRevision: num
 }
 
 async function persistEffective(env: Env, id: number, personalRevision: number): Promise<void> {
-  // Preserve the pre-v2 human curation before it can be overwritten by a new
-  // automatic result.
-  await importLegacyCuration(env, id);
   const { view, projected, stale, contentRevision } = await computeEffective(env, id);
-  const automatic = await automaticOf(env, id);
   const statements = projectionStatements(env, id, personalRevision, view, projected, contentRevision, stale);
+  if (projected) {
+    const automatic = await automaticOf(env, id);
+    const row = await env.DB.prepare("SELECT classification FROM links WHERE id=?").bind(id).first<{ classification: string | null }>();
+    const prior = storedClassification(row?.classification ?? null, null);
+    const generated = {
+      why_suggestion: "", entities: [], uncertainty: false, taxonomy_version: taxonomy.version, discarded_tags: [],
+      ...prior, topics: automatic.topics.slice(0, 3), form: automatic.form, use: automatic.use
+    };
+    // A policy decision can change the AI proposal without creating another
+    // run. Keep the v1 AI projection current in its own column; using curation
+    // for this would falsely tell old clients that a human confirmed it.
+    statements.push(env.DB.prepare("UPDATE links SET classification=? WHERE id=? AND personal_revision=?")
+      .bind(canonicalJSON(generated), id, personalRevision));
+  }
   // links.curation is the v1 human projection. Old clients and the new view must
   // read the same effective result, so the derived v1 values are written here
-  // (the AI suggestion in links.classification is never overwritten). When the
-  // effective v1 values equal the automatic baseline and no explicit empty was
-  // set, there is no active human curation and the column is cleared so old
-  // clients keep seeing "not reviewed".
+  // (the AI suggestion in links.classification is never overwritten). The
+  // existence of active overrides determines review state, not a comparison
+  // between three displayed topics and the full automatic topic set.
   const topicsProjection = view.topics.slice(0, 3);
-  const sameAsAutomatic = topicsProjection.length === automatic.topics.length &&
-    topicsProjection.every((term) => automatic.topics.includes(term)) &&
-    view.form === automatic.form && view.use === automatic.use;
-  const humanCuration = sameAsAutomatic && !view.empty.topics && !view.empty.form && !view.empty.use
-    ? null
-    : canonicalJSON({ topics: topicsProjection, form: view.form, use: view.use });
+  const humanCuration = view.reviewed ? canonicalJSON({ topics: topicsProjection, form: view.form, use: view.use }) : null;
   statements.push(env.DB.prepare(
-    `UPDATE links SET curation = ? WHERE id = ? AND personal_revision = ?`
+    `UPDATE links SET curation = ?, curation_projection_epoch=curation_projection_epoch+1 WHERE id = ? AND personal_revision = ?`
   ).bind(humanCuration, id, personalRevision));
   await env.DB.batch(statements);
 }

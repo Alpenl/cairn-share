@@ -326,7 +326,7 @@ export function effectiveView(automatic: AutomaticView, overrides: Override[]): 
       form: states.form.empty,
       use: states.use.empty
     },
-    reviewed: ordered.length > 0,
+    reviewed: Object.values(states).some((state) => state.action.size > 0 || state.clearedAutomatic || state.empty),
     revision: ordered.length > 0 ? ordered[ordered.length - 1].revision : 0
   };
 }

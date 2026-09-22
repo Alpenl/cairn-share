@@ -3,6 +3,7 @@ import { beforeEach, expect, it } from "vitest";
 import worker from "../src/index";
 import { canonicalJSON, contentHash, effectiveView, objectivePayload, type AutomaticView, type EvidenceSnapshot, type Override } from "../src/domain";
 import vectors from "./fixtures/override-vectors.json";
+import { rebuildProjection } from "../src/domain-routes";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 
@@ -241,6 +242,105 @@ async function submitDecision(id: number, runID: number, automatic: AutomaticVie
     requested_model: "jev-latest", automatic, content_revision: 1
   });
 }
+
+it("R3-03: AI-only four topics never acquire human provenance across rebuilds", async () => {
+  const id = await createLink();
+  const run = await submitRun(id, "ai-only");
+  const automatic = { ...emptyAutomatic, topics: ["llm", "eng", "eval", "design"], form: "method", use: "try" };
+  expect((await submitDecision(id, run, automatic, "ai-four")).status).toBe(200);
+  for (let pass = 0; pass < 2; pass++) {
+    await rebuildProjection({ DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" }, id);
+    const body = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: { topics: string[]; reviewed: boolean } };
+    expect(body.effective.topics).toEqual(automatic.topics);
+    expect(body.effective.reviewed).toBe(false);
+    expect(await env.DB.prepare("SELECT curation FROM links WHERE id=?").bind(id).first("curation")).toBeNull();
+    for (const table of ["curation_overrides", "curation_events", "legacy_curation_history"]) {
+      expect(await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE link_id=?`).bind(id).first("n")).toBe(0);
+    }
+  }
+  expect((await submitDecision(id, run, { ...automatic, topics: ["design"] }, "ai-removed")).status).toBe(200);
+  const current = await (await request(`v2/links/${id}/selection`, undefined, "GET")).json() as { selection: { topics: string[] }; provenance: { overrides: boolean } };
+  expect(current.selection.topics).toEqual(["design"]);
+  expect(current.provenance.overrides).toBe(false);
+  const legacy = await (await request(`enrichment/jobs/${id}`, undefined, "GET")).json() as { classification: { topics: string[] }; classification_reviewed: boolean };
+  expect(legacy.classification.topics).toEqual(["design"]);
+  expect(legacy.classification_reviewed).toBe(false);
+  for (const [topic, expected] of [["design", 1], ["llm", 0]] as const) {
+    const list = await (await request(`enrichment/jobs?topic=${topic}`, undefined, "GET")).json() as { items: Array<{ id: number }> };
+    expect(list.items.filter((item) => item.id === id).length).toBe(expected);
+  }
+});
+
+it("R3-03: reject and reset work on captured legacy curation without a v2 decision", async () => {
+  const id = await createLink();
+  await env.DB.prepare("UPDATE links SET classification=?,curation=? WHERE id=?")
+    .bind(JSON.stringify({ topics: ["llm"], form: "method", use: "try" }), JSON.stringify({ topics: ["eng"], form: "case", use: "quote" }), id).run();
+  expect((await request(`v2/links/${id}/overrides`, { field: "topics", term: "eng", action: "reject", operation_key: "legacy-reject", expected_revision: 1 })).status).toBe(200);
+  let effective = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: AutomaticView };
+  expect(effective.effective.topics).toEqual([]);
+  expect((await request(`v2/links/${id}/overrides`, { field: "topics", term: "", action: "reset", operation_key: "legacy-reset", expected_revision: 2 })).status).toBe(200);
+  effective = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: AutomaticView };
+  expect(effective.effective.topics).toEqual(["llm"]);
+  expect(effective.effective.form).toBe("case");
+  expect(effective.effective.use).toBe("quote");
+});
+
+it.each([false, true])("R3-03: captured legacy complete selection (empty=%s) replaces only expressible dimensions", async (empty) => {
+  const id = await createLink();
+  // Simulate an older application writing the original column. Migration 0018
+  // captures this source without treating later compatibility projections as input.
+  const manual = { topics: empty ? [] : ["eng"], form: "", use: "" };
+  await env.DB.prepare("UPDATE links SET curation=? WHERE id=?").bind(JSON.stringify(manual), id).run();
+  const run = await submitRun(id, "legacy-source");
+  expect((await submitDecision(id, run, { ...emptyAutomatic, topics: ["llm"], form: "method", use: "try", content_functions: ["data"] }, "legacy-decision")).status).toBe(200);
+  const body = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: AutomaticView };
+  expect(body.effective.topics).toEqual(manual.topics);
+  expect(body.effective.form).toBe("");
+  expect(body.effective.use).toBe("");
+  expect(body.effective.content_functions).toEqual(["data"]);
+  expect(await env.DB.prepare("SELECT provenance FROM legacy_curation_history WHERE link_id=?").bind(id).first("provenance")).toBe("legacy_unknown");
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_overrides WHERE link_id=? AND confirmed=1").bind(id).first("n")).toBe(0);
+  // An old-client explicit reset is ordered after its selection and restores
+  // the automatic values; projection writes do not create more source events.
+  await env.DB.prepare("UPDATE links SET curation=NULL WHERE id=?").bind(id).run();
+  await rebuildProjection({ DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" }, id);
+  const resetView = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: AutomaticView & { reviewed: boolean } };
+  expect(resetView.effective.topics).toEqual(["llm"]);
+  expect(resetView.effective.form).toBe("method");
+  expect(resetView.effective.use).toBe("try");
+  expect(resetView.effective.reviewed).toBe(false);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM legacy_curation_history WHERE link_id=?").bind(id).first("n")).toBe(2);
+});
+
+it("R3-03: real historical migration preserves original and ambiguous bytes separately", async () => {
+  await reset();
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.filter((migration) => !migration.name.startsWith("0018")));
+  const manual = JSON.stringify({ topics: ["eng"], form: "", use: "" });
+  for (const id of [1, 2]) {
+    await env.DB.prepare("INSERT INTO links(id,url,note,created_at,curation,classification) VALUES(?,?,'','2026-09-22',?,?)")
+      .bind(id, `https://x.com/synthetic/status/${id}`, manual, JSON.stringify({ topics: ["llm"], form: "method", use: "try" })).run();
+  }
+  await env.DB.prepare("INSERT INTO current_projections(link_id,content_revision,effective,updated_at) VALUES(2,1,'{}','2026-09-22')").run();
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+  const history = await env.DB.prepare("SELECT link_id,payload,provenance FROM legacy_curation_history ORDER BY link_id").all();
+  expect(history.results).toEqual([
+    { link_id: 1, payload: manual, provenance: "legacy_unknown" },
+    { link_id: 2, payload: manual, provenance: "ambiguous_projection" }
+  ]);
+  for (const id of [1, 2]) {
+    expect(await env.DB.prepare("SELECT curation FROM links WHERE id=?").bind(id).first("curation")).toBe(manual);
+  }
+  const original = await (await request("v2/links/1/effective", undefined, "GET")).json() as { effective: AutomaticView };
+  expect(original.effective.topics).toEqual(["eng"]);
+  expect(original.effective.form).toBe("");
+  const ambiguous = await (await request("v2/links/2/effective", undefined, "GET")).json() as { effective: AutomaticView & { reviewed: boolean } };
+  expect(ambiguous.effective.topics).toEqual(["llm"]);
+  expect(ambiguous.effective.reviewed).toBe(false);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_overrides").first("n")).toBe(0);
+  // Private legacy snapshots follow bookmark deletion via the real FK.
+  await env.DB.prepare("DELETE FROM links WHERE id=1").run();
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM legacy_curation_history WHERE link_id=1").first("n")).toBe(0);
+});
 
 it("derives the effective view from the decision and applies four-dimension overrides (F04/F11)", async () => {
   const id = await createLink();
