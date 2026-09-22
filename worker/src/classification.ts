@@ -1,3 +1,4 @@
+import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { record, taxonomy, validateClassification } from "./curation";
 import type { AutomaticView } from "./domain";
@@ -443,6 +444,11 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     if (isV2 && (!text(result.spec_id, 64) || !text(result.spec_hash, 128) || automatic === null)) {
       return fail("invalid_classification");
     }
+    if (isV2 && !await validRunProvenance(env, id, result.raw_judgments, {
+      specId: String(result.spec_id), specHash: String(result.spec_hash),
+      requestedModel: String(result.requested_model ?? result.model), resolvedModel: String(result.model),
+      coverage: result.coverage === "partial" ? "partial" : "complete", answers: result.answers, usage: result.usage ?? { missing: true }
+    })) return fail("invalid_classification");
     const key = operationKey(body);
     // The logical payload identity covers the link, the lease epoch and the
     // full result, so a replayed key with a different payload is a conflict
@@ -453,10 +459,10 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       if (!target) return { failure: "configuration_error" as const };
       // Reject completions that no longer match the active target *before*
       // touching storage, so a stale worker cannot overwrite the projection.
-      const job = await env.DB.prepare(`SELECT status, target_generation, spec_id, taxonomy_version, revision, input_revision, lease_token, lease_until, content_revision, evidence_hash
+      const job = await env.DB.prepare(`SELECT status, target_generation, spec_id, taxonomy_version, revision, input_revision, lease_token, lease_until, content_revision, evidence_hash, evidence_snapshot_id, attempts
         FROM classification_jobs WHERE link_id=?`).bind(id).first<{
           status: string; target_generation: number; spec_id: string; taxonomy_version: string; revision: number; input_revision: number;
-          lease_token: string | null; lease_until: string | null; content_revision: number; evidence_hash: string;
+          lease_token: string | null; lease_until: string | null; content_revision: number; evidence_hash: string; evidence_snapshot_id: number | null; attempts: number;
         }>();
       if (!job) return { failure: "not_found" as const };
       if (job.status === "completed") return { failure: "already_completed" as const };
@@ -518,9 +524,10 @@ export async function classificationRoute(request: Request, env: Env, path: stri
           specHash: String(result.spec_hash), targetGeneration: target.generation,
           requestedModel: text(result.requested_model, 200) ? result.requested_model : String(result.model),
           resolvedModel: String(result.model), policyVersion: String(result.policy_version),
-          policy: result.policy ?? {}, answers: result.answers,
+          policy: result.policy ?? {}, answers: result.answers, rawJudgments: result.raw_judgments ?? null,
+          evidenceSnapshotId: job.evidence_snapshot_id, sourceHash: job.evidence_hash || null,
           usage: result.usage ?? { missing: true },
-          attempt: Number.isSafeInteger(body.attempt) ? Number(body.attempt) : job.revision,
+          attempt: job.attempts,
           operationKey: runKey, coverage: result.coverage === "partial" ? "partial" : "complete",
           evidenceCoverage: text(result.evidence_coverage, 40) ? result.evidence_coverage : "",
           aliasDrift: result.alias_drift === true, createdAt, payloadHash

@@ -1,3 +1,4 @@
+import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { taxonomyV2 } from "./taxonomy-v2";
 import { storedClassification, taxonomy } from "./curation";
@@ -411,6 +412,7 @@ type RunRow = {
   requested_model: string; resolved_model: string; policy_version: string; policy: string;
   answers: string; usage: string; attempt: number; operation_key: string; coverage: string;
   evidence_coverage: string; alias_drift: number; status: string; created_at: string;
+  raw_judgments: string | null; evidence_snapshot_id: number | null; source_hash: string | null;
 };
 
 function parseJSON(value: string | null | undefined, fallback: unknown): unknown {
@@ -431,7 +433,8 @@ function runView(row: RunRow): Record<string, unknown> {
     usage: parseJSON(row.usage, {}),
     attempt: row.attempt, operation_key: row.operation_key, coverage: row.coverage,
     evidence_coverage: row.evidence_coverage, alias_drift: row.alias_drift === 1,
-    status: row.status, created_at: row.created_at
+    status: row.status, created_at: row.created_at, raw_judgments: parseJSON(row.raw_judgments, null),
+    evidence_snapshot_id: row.evidence_snapshot_id, source_hash: row.source_hash
   };
 }
 
@@ -439,7 +442,7 @@ async function listRuns(env: Env, id: number): Promise<Response> {
   const rows = await env.DB.prepare(
     `SELECT id, content_revision, spec_id, spec_hash, target_generation, requested_model, resolved_model,
             policy_version, policy, answers, usage, attempt, operation_key, coverage, evidence_coverage,
-            alias_drift, status, created_at
+            alias_drift, status, created_at, raw_judgments, evidence_snapshot_id, source_hash
      FROM classification_runs WHERE link_id = ? ORDER BY id`).bind(id).all<RunRow>();
   return reply({ runs: rows.results.map(runView) });
 }
@@ -457,7 +460,15 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
   if (body.policy !== undefined && (typeof body.policy !== "object" || body.policy === null || Array.isArray(body.policy))) {
     return fail("invalid_run");
   }
+  if (!await validRunProvenance(env, id, body.raw_judgments, {
+    specId: String(body.spec_id), specHash: String(body.spec_hash), requestedModel: String(body.requested_model ?? ""),
+    resolvedModel: String(body.resolved_model ?? ""), coverage: body.coverage === "partial" ? "partial" : "complete", answers: body.answers as Record<string, unknown>, usage: body.usage ?? {}
+  })) return fail("invalid_run_provenance");
   const payloadHash = await sha256Hex(canonicalJSON({
+    ...(body.raw_judgments === undefined ? {} : { raw_judgments: body.raw_judgments }),
+    ...(typeof body.raw_judgments === "object" && body.raw_judgments !== null && "metadata_version" in body.raw_judgments ? { policy: body.policy ?? {}, usage: body.usage ?? {} } : {}),
+    ...(body.evidence_snapshot_id === undefined ? {} : { evidence_snapshot_id: body.evidence_snapshot_id }),
+    ...(body.source_hash === undefined ? {} : { source_hash: body.source_hash }),
     link_id: id, content_revision: body.content_revision, spec_id: body.spec_id, spec_hash: body.spec_hash,
     target_generation: body.target_generation, policy_version: body.policy_version, answers: body.answers,
     requested_model: body.requested_model ?? null, resolved_model: body.resolved_model ?? null,
@@ -481,13 +492,18 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
     .first<{ spec_hash: string }>();
   if (!spec) return fail("unknown_spec", 409);
   if (spec.spec_hash !== body.spec_hash) return fail("spec_hash_mismatch", 409);
+  if (body.evidence_snapshot_id !== undefined || body.source_hash !== undefined) {
+    const snapshot = await env.DB.prepare("SELECT id FROM evidence_snapshots WHERE id=? AND link_id=? AND content_revision=? AND content_hash=?")
+      .bind(body.evidence_snapshot_id ?? null, id, body.content_revision, body.source_hash ?? null).first();
+    if (!snapshot) return fail("run_evidence_mismatch", 409);
+  }
   const now = new Date().toISOString();
   const coverage = body.coverage === "partial" ? "partial" : "complete";
   const row = await env.DB.prepare(
     `INSERT INTO classification_runs(link_id, content_revision, spec_id, spec_hash, target_generation, requested_model,
        resolved_model, policy_version, policy, answers, usage, attempt, operation_key, coverage, evidence_coverage,
-       alias_drift, status, created_at, payload_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+       alias_drift, status, created_at, payload_hash, raw_judgments, evidence_snapshot_id, source_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
   ).bind(id, body.content_revision, body.spec_id, body.spec_hash, body.target_generation,
     text(body.requested_model, 200) ? body.requested_model : "",
     text(body.resolved_model, 200) ? body.resolved_model : "",
@@ -495,7 +511,8 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
     Number.isSafeInteger(body.attempt) ? body.attempt : 1, operationKey, coverage,
     text(body.evidence_coverage, 40) ? body.evidence_coverage : "",
     body.alias_drift === true ? 1 : 0,
-    coverage === "complete" ? "succeeded" : "partial", now, payloadHash).first<{ id: number }>();
+    coverage === "complete" ? "succeeded" : "partial", now, payloadHash, body.raw_judgments == null ? null : canonicalJSON(body.raw_judgments),
+    body.evidence_snapshot_id ?? null, body.source_hash ?? null).first<{ id: number }>();
   return reply({ id, run: { id: row?.id, coverage, status: coverage === "complete" ? "succeeded" : "partial", created_at: now }, replayed: false });
 }
 
@@ -514,17 +531,18 @@ export function runInsertStatement(env: Env, run: {
   requestedModel: string; resolvedModel: string; policyVersion: string; policy: unknown; answers: unknown;
   usage: unknown; attempt: number; operationKey: string; coverage: string; evidenceCoverage: string;
   aliasDrift: boolean; createdAt: string; payloadHash: string;
+  rawJudgments: unknown; evidenceSnapshotId: number | null; sourceHash: string | null;
 }, guard: WriteGuard): D1PreparedStatement {
   return env.DB.prepare(
     `INSERT INTO classification_runs(link_id, content_revision, spec_id, spec_hash, target_generation, requested_model,
        resolved_model, policy_version, policy, answers, usage, attempt, operation_key, coverage, evidence_coverage,
-       alias_drift, status, created_at, payload_hash)
-     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`
+       alias_drift, status, created_at, payload_hash, raw_judgments, evidence_snapshot_id, source_hash)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`
   ).bind(run.linkId, run.contentRevision, run.specId, run.specHash, run.targetGeneration, run.requestedModel,
     run.resolvedModel, run.policyVersion, canonicalJSON(run.policy), canonicalJSON(run.answers),
     canonicalJSON(run.usage), run.attempt, run.operationKey, run.coverage, run.evidenceCoverage,
     run.aliasDrift ? 1 : 0, run.coverage === "complete" ? "succeeded" : "partial", run.createdAt,
-    run.payloadHash, ...guard.bindings);
+    run.payloadHash, run.rawJudgments == null ? null : canonicalJSON(run.rawJudgments), run.evidenceSnapshotId, run.sourceHash, ...guard.bindings);
 }
 
 export function decisionInsertStatement(env: Env, decision: {
