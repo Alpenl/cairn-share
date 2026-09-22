@@ -411,6 +411,59 @@ class CurationWorkerRecoveryTest {
         withContext(Dispatchers.Main) { models.clear() }
     }
 
+    @Test fun blankKeywordLibraryUsesFullEffectiveFiltersAndConfirmedWrites() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        store.clear()
+        SharePreferencesStore(context).setApiToken(token)
+        SharePreferencesStore(context).setLastFilter("all")
+        SharePreferencesStore(context).setLastSearchQuery("")
+        control("online")
+        val ids = mutableListOf<Int>()
+        for ((index, fields) in listOf(
+            mapOf("topics" to listOf("llm", "eng", "eval", "design"), "content_functions" to listOf("method"), "carriers" to listOf("single"), "affordances" to listOf("practice")),
+            mapOf("topics" to listOf("eng"), "content_functions" to listOf("data"), "carriers" to listOf("external_article"), "affordances" to listOf("background")),
+        ).withIndex()) {
+            val id = http("/__test/direct/api/links", JSONObject().put("url", "https://example.com/android-library-$index")).getInt("id")
+            ids += id
+            var revision = 0L
+            for ((field, terms) in fields) for (term in terms) {
+                http("/__test/direct/api/bookmarks/$id/v2-override", JSONObject(FieldOverride(field, term, "accept", "library-$id-$field-$term", revision++).encode()))
+            }
+        }
+        val id = ids.first()
+        val model = start()
+        waitFor { withContext(Dispatchers.Main) { model.uiState.preferencesLoaded && model.uiState.v2Taxonomy != null } }
+        val filters = BookmarkFilters(topics = listOf("design"), contentFunctions = listOf("method", "data"),
+            carriers = listOf("single"), affordances = listOf("practice"), entityState = "not_run")
+        withContext(Dispatchers.Main) {
+            model.loadV2Selection(id)
+            model.setBookmarkFilters(filters)
+        }
+        waitFor { withContext(Dispatchers.Main) { !model.uiState.libraryLoading && model.uiState.visibleLibraryLinks().map { it.id } == listOf(id) && model.uiState.v2Selections.containsKey(id) } }
+        withContext(Dispatchers.Main) {
+            assertEquals("", model.uiState.searchQuery)
+            assertFalse("the visible v1 summary cannot explain fourth-topic membership", model.uiState.libraryResults.single().enrichment!!.classification!!.topics.contains("design"))
+        }
+        control("writes_offline")
+        withContext(Dispatchers.Main) { model.applyV2Action(id, "topics", "design", "reject") }
+        waitFor { store.snapshot().size == 1 && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() } }
+        withContext(Dispatchers.Main) {
+            assertFalse(model.uiState.v2Drafts[id]!!.topics.contains("design"))
+            assertEquals(listOf(id), model.uiState.visibleLibraryLinks().map { it.id })
+            model.retryLibraryFilters()
+        }
+        waitFor { withContext(Dispatchers.Main) { !model.uiState.libraryLoading && model.uiState.visibleLibraryLinks().map { it.id } == listOf(id) } }
+        control("online")
+        withContext(Dispatchers.Main) { model.flushV2Queue() }
+        waitFor { store.snapshot().isEmpty() && withContext(Dispatchers.Main) { !model.uiState.libraryLoading && model.uiState.libraryResults.isEmpty() && model.uiState.v2Busy.isEmpty() } }
+        assertFalse(remote(id).getJSONObject("selection").getJSONArray("topics").toString().contains("design"))
+        withContext(Dispatchers.Main) {
+            model.setBookmarkFilters(filters.copy(topics = listOf("design", "eng"), carriers = listOf("single", "external_article"), affordances = listOf("practice", "background")))
+        }
+        waitFor { withContext(Dispatchers.Main) { !model.uiState.libraryLoading && model.uiState.libraryResults.map { it.id } == ids.sortedDescending() } }
+        withContext(Dispatchers.Main) { models.clear() }
+    }
+
     @Test fun restoreAutomaticDraftAfterProcessDeath() = runBlocking<Unit> {
         assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
         val id = store.snapshot().single().linkId

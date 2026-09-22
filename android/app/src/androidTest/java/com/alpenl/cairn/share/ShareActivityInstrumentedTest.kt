@@ -241,6 +241,74 @@ class ShareActivityInstrumentedTest {
     }
 
     @Test
+    fun libraryMultiSelectControlsSendFullFiltersAndExplainOldBackend() {
+        val latest = java.util.concurrent.atomic.AtomicReference<RecordedRequest?>()
+        val oldBackend = java.util.concurrent.atomic.AtomicBoolean(false)
+        val mock = MockWebServer()
+        mock.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val url = request.requestUrl!!
+                return when (url.encodedPath) {
+                    "/api/taxonomy", "/api/v2-taxonomy" -> MockResponse().setBody("""{
+                        "topics":[{"id":"llm","label":"LLM","active":true},{"id":"design","label":"设计","active":true}],
+                        "forms":[],"uses":[],
+                        "content_functions":[{"id":"method","label":"方法","active":true},{"id":"data","label":"数据","active":true}],
+                        "carriers":[{"id":"single","label":"单帖","active":true}],
+                        "affordances":[{"id":"practice","label":"可实践","active":true}]
+                    }""")
+                    "/api/links" -> {
+                        latest.set(request)
+                        val payload = JSONObject("""{"items":[],"next_before_id":null}""")
+                        if (!oldBackend.get()) payload.put("filter_contract_version", 1)
+                        if (url.queryParameter("topics") != null) payload.getJSONArray("items").put(JSONObject("""{
+                            "id":99,"url":"https://example.com/filtered","note":"服务端匹配结果",
+                            "created_at":"2026-09-23T00:00:00Z","learned":false
+                        }"""))
+                        MockResponse().setBody(payload.toString())
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        mock.start()
+        server = mock
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            .setClass(targetContext(), LauncherActivity::class.java)
+            .putExtra(ShareActivity.EXTRA_API_BASE_URL, mock.url("/").toString())
+            .putExtra(ShareActivity.EXTRA_RELEASES_API_URL, mock.url("/latest").toString())
+        ActivityScenario.launch<LauncherActivity>(intent).use {
+            compose.waitUntil(5_000) { latest.get() != null }
+            compose.onNodeWithTag("bookmark_filters").performClick()
+            compose.waitUntil(5_000) {
+                runCatching { compose.onAllNodesWithTag("filter_topics_design").assertCountEquals(1); true }.getOrDefault(false)
+            }
+            for (tag in listOf("filter_topics_design", "filter_topics_llm", "filter_content_functions_method", "filter_content_functions_data", "filter_carriers_single", "filter_affordances_practice", "filter_entity_state_failed", "filter_entity_state_stale")) {
+                compose.onNodeWithTag(tag).performScrollTo().performClick()
+            }
+            compose.waitUntil(5_000) { latest.get()?.requestUrl?.queryParameter("entity_state") == "failed,stale" }
+            val query = latest.get()!!.requestUrl!!
+            assertEquals("design,llm", query.queryParameter("topics"))
+            assertEquals("method,data", query.queryParameter("content_functions"))
+            assertEquals("single", query.queryParameter("carriers"))
+            assertEquals("practice", query.queryParameter("affordances"))
+            assertEquals("1", query.queryParameter("filter_contract_version"))
+            assertEquals(null, query.queryParameter("q"))
+            compose.waitUntil(5_000) {
+                runCatching { compose.onAllNodesWithTag("link_99").assertCountEquals(1); true }.getOrDefault(false)
+            }
+            oldBackend.set(true)
+            compose.waitUntil(5_000) { runCatching { compose.onNodeWithTag("retry_library_filters").assertIsEnabled(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("retry_library_filters").performClick()
+            compose.waitUntil(5_000) {
+                runCatching { compose.onNodeWithTag("library_filter_status").assertTextContains("服务暂不支持完整筛选", substring = true); true }.getOrDefault(false)
+            }
+            compose.onAllNodesWithTag("link_99").assertCountEquals(0)
+            compose.onNodeWithText("清除筛选").performClick()
+            compose.onAllNodesWithTag("library_filter_status").assertCountEquals(0)
+        }
+    }
+
+    @Test
     fun launcherAutomaticallyRetriesLocalQueueAndAllowsManualRetry() {
         val queued = runBlocking {
             PendingUploadStore(targetContext()).enqueue(

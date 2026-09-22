@@ -90,13 +90,208 @@ class AccountCacheInstrumentedTest {
         .put("created_at", "2026-09-22T00:00:00Z").put("learned", false)
         .put("enrichment", JSONObject().put("status", "completed").put("source", "other")
             .put("content_loaded", loaded).put("original_text", if (loaded) owner else ""))
-    private fun page(owner: String) = json(JSONObject().put("items", JSONArray((1..4).map { link(it, owner) })).put("next_before_id", JSONObject.NULL))
+    private fun page(owner: String) = json(JSONObject().put("items", JSONArray((4 downTo 1).map { link(it, owner) })).put("next_before_id", JSONObject.NULL))
     private fun taxonomy(label: String) = json(JSONObject().put("topics", JSONArray().put(JSONObject()
         .put("id", "llm").put("label", label).put("active", true))).put("forms", JSONArray()).put("uses", JSONArray()))
     private fun selection(topic: String, revision: Long = 0, automatic: String = topic): MockResponse {
         fun value(t: String) = JSONObject().put("topics", JSONArray().put(t)).put("content_functions", JSONArray())
             .put("carriers", JSONArray()).put("affordances", JSONArray()).put("form", "").put("use", "")
         return json(JSONObject().put("revision", revision).put("selection", value(topic)).put("automatic", value(automatic)))
+    }
+
+    @Test fun blankKeywordLibraryLoadsServerMembershipBeyondLocalProjection() = runBlocking<Unit> {
+        settings.setLastFilter("all")
+        val filteredRequest = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val url = request.requestUrl!!
+                return when (url.encodedPath) {
+                    "/api/links" -> {
+                        val topics = listOfNotNull(url.queryParameter("topic"), url.queryParameter("topics")).flatMap { it.split(',') }
+                        if ("design" !in topics) page("local unfiltered snapshot") else {
+                            assertTrue("no keyword is needed for a library filter", url.queryParameter("q").isNullOrEmpty())
+                            filteredRequest.countDown()
+                            // The matching row is absent from the unfiltered
+                            // local snapshot; its v1 summary cannot express the
+                            // fourth topic. Membership belongs to the server.
+                            val row = link(99, "confirmed fourth topic")
+                            row.getJSONObject("enrichment").put("classification", JSONObject()
+                                .put("topics", JSONArray(listOf("llm", "eng", "eval"))))
+                            json(JSONObject().put("items", JSONArray().put(row))
+                                .put("next_before_id", JSONObject.NULL).put("filter_contract_version", 1))
+                        }
+                    }
+                    "/api/taxonomy" -> taxonomy("v1")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val model = start()
+        awaitState(model) { it.links.size == 4 && !it.loading }
+        withContext(Dispatchers.Main) { model.setBookmarkFilters(BookmarkFilters(topic = "design")) }
+        assertTrue("blank-keyword library must request server membership", withContext(Dispatchers.IO) { filteredRequest.await(5, TimeUnit.SECONDS) })
+        awaitState(model) { it.visibleLibraryLinks().map { row -> row.id } == listOf(99) }
+        withContext(Dispatchers.Main) {
+            assertEquals("", model.uiState.searchQuery)
+            assertEquals("queue snapshot stays separate from filtered membership", listOf(1, 2, 3, 4), model.uiState.links.map { it.id }.sorted())
+        }
+    }
+
+    @Test fun effectiveFiltersRequireServerConfirmationAndStablePagingTime() = runBlocking<Unit> {
+        val client = LinksApiClient(base)
+        val filters = BookmarkFilters(topics = listOf("llm", "design"), contentFunctions = listOf("method", "data"),
+            carriers = listOf("single", "external_article"), affordances = listOf("practice"),
+            entityState = "failed,stale", recentDays = 7)
+        val instant = java.time.Instant.parse("2026-09-23T00:00:00Z")
+        for (version in listOf<Any?>(null, JSONObject.NULL, 0, 2, "1", 1)) {
+            val payload = JSONObject().put("items", JSONArray()).put("next_before_id", JSONObject.NULL)
+            if (version != null) payload.put("filter_contract_version", version)
+            server.enqueue(json(payload))
+            val result = withContext(Dispatchers.IO) { client.listPage(LinkFilter.All, "", tokenA, 99, filters, instant) }
+            if (version == 1) assertTrue(result is LinkPageResult.Loaded) else assertEquals(LinkPageResult.UnsupportedFilters, result)
+            val query = server.takeRequest(5, TimeUnit.SECONDS)!!.requestUrl!!
+            for ((key, value) in filters.parameters(instant)) assertEquals(value, query.queryParameter(key))
+            assertEquals("1", query.queryParameter("filter_contract_version"))
+            assertEquals("99", query.queryParameter("before_id"))
+            assertNull(query.queryParameter("q"))
+        }
+        server.enqueue(json(JSONObject().put("items", JSONArray()).put("next_before_id", JSONObject.NULL)))
+        assertTrue(withContext(Dispatchers.IO) { client.listPage(LinkFilter.All, "", tokenA) } is LinkPageResult.Loaded)
+        assertNull(server.takeRequest(5, TimeUnit.SECONDS)!!.requestUrl!!.queryParameter("filter_contract_version"))
+    }
+
+    @Test fun delayedLibraryPageCannotCrossFiltersAndBadCursorStopsPaging() = runBlocking<Unit> {
+        settings.setLastFilter("all")
+        val entered = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        fun matches(id: Int, next: Int? = null) = json(JSONObject().put("items", JSONArray().put(link(id, "filtered")))
+            .put("next_before_id", next ?: JSONObject.NULL).put("filter_contract_version", 1))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val url = request.requestUrl!!
+                return when (url.encodedPath) {
+                    "/api/links" -> when (url.queryParameter("topics")) {
+                        "design" -> if (url.queryParameter("before_id") == null) matches(100, 100) else {
+                            entered.countDown()
+                            if (!release.await(20, TimeUnit.SECONDS)) MockResponse().setResponseCode(503) else {
+                                returned.countDown(); matches(90)
+                            }
+                        }
+                        "llm" -> matches(200)
+                        "eng" -> matches(200, 300) // Must never advance using an invalid cursor.
+                        else -> page("unfiltered")
+                    }
+                    "/api/taxonomy" -> taxonomy("v1")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val model = start()
+        awaitState(model) { it.links.size == 4 && !it.loading }
+        withContext(Dispatchers.Main) { model.setBookmarkFilters(BookmarkFilters(topics = listOf("design"))) }
+        awaitState(model) { it.libraryResults.map { row -> row.id } == listOf(100) && !it.libraryLoading }
+        withContext(Dispatchers.Main) { model.loadMoreLibraryResults() }
+        assertTrue(withContext(Dispatchers.IO) { entered.await(5, TimeUnit.SECONDS) })
+        withContext(Dispatchers.Main) { model.setBookmarkFilters(BookmarkFilters(topics = listOf("llm"))) }
+        awaitState(model) { it.libraryResults.map { row -> row.id } == listOf(200) && !it.libraryLoading }
+        release.countDown()
+        assertTrue(withContext(Dispatchers.IO) { returned.await(5, TimeUnit.SECONDS) })
+        delay(300)
+        withContext(Dispatchers.Main) {
+            assertEquals(listOf(200), model.uiState.visibleLibraryLinks().map { it.id })
+            assertNull(model.uiState.libraryNextBeforeId)
+            model.setBookmarkFilters(BookmarkFilters(topics = listOf("eng")))
+        }
+        awaitState(model) { !it.libraryLoading && it.libraryStatusText.contains("分页响应无效") }
+        withContext(Dispatchers.Main) {
+            assertTrue(model.uiState.libraryResults.isEmpty())
+            assertNull(model.uiState.libraryNextBeforeId)
+            model.loadMoreLibraryResults()
+            model.setBookmarkFilters(BookmarkFilters())
+            assertEquals(listOf(4, 3, 2, 1), model.uiState.visibleLibraryLinks().map { it.id })
+        }
+    }
+
+    @Test fun libraryPaginationFreezesConditionsAndConfirmedCurationRestartsMembership() = runBlocking<Unit> {
+        settings.setLastFilter("all")
+        val confirmed = AtomicReference(false)
+        val queries = java.util.Collections.synchronizedList(mutableListOf<Map<String, String?>>())
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val url = request.requestUrl!!
+                return when (url.encodedPath) {
+                    "/api/links" -> if (url.queryParameter("topic") == null) page("root") else {
+                        queries += listOf("topic", "since", "content_functions", "filter_contract_version").associateWith { url.queryParameter(it) }
+                        val before = url.queryParameter("before_id")
+                        val id = when (before) { null -> 7; "7" -> 5; else -> 1 }
+                        val next: Any = if (id == 1 || (confirmed.get() && id == 5)) JSONObject.NULL else id
+                        json(JSONObject().put("items", JSONArray().put(link(id, "filtered")))
+                            .put("next_before_id", next).put("filter_contract_version", 1))
+                    }
+                    "/api/links/1/curation" -> { confirmed.set(true); json(link(1, "curation confirmed", true)) }
+                    "/api/taxonomy" -> taxonomy("v1")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val model = start()
+        awaitState(model) { !it.loading && it.links.size == 4 }
+        withContext(Dispatchers.Main) { model.setBookmarkFilters(BookmarkFilters(topic = "design", contentFunctions = listOf("method", "data"), recentDays = 7)) }
+        for (expected in listOf(listOf(7), listOf(7, 5), listOf(7, 5, 1))) {
+            awaitState(model) { !it.libraryLoading && it.libraryResults.map { row -> row.id } == expected }
+            if (expected.size < 3) withContext(Dispatchers.Main) { model.loadMoreLibraryResults() }
+        }
+        assertEquals("paging must reuse the exact since boundary", 1, queries.toList().distinct().size)
+        withContext(Dispatchers.Main) {
+            assertNull(model.uiState.libraryNextBeforeId)
+            model.saveCuration(1, CurationUpdate(classification = BookmarkClassification(topics = emptyList(), form = "", use = "", uncertainty = false))) {}
+        }
+        awaitState(model) { !it.libraryLoading && it.links.first { row -> row.id == 1 }.note == "curation confirmed" && it.libraryResults.map { row -> row.id } == listOf(7) }
+        withContext(Dispatchers.Main) {
+            assertEquals(7, model.uiState.libraryNextBeforeId)
+            model.loadMoreLibraryResults()
+        }
+        awaitState(model) { !it.libraryLoading && it.libraryResults.map { row -> row.id } == listOf(7, 5) }
+        withContext(Dispatchers.Main) { assertNull(model.uiState.libraryNextBeforeId) }
+        assertEquals(5, queries.size)
+    }
+
+    @Test fun libraryResponseCannotReturnThroughAnAccountRoundTrip() = runBlocking<Unit> {
+        settings.setLastFilter("all")
+        val entered = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        val requests = AtomicInteger()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> if (request.requestUrl!!.queryParameter("topics") == null) page("root") else {
+                    val old = requests.incrementAndGet() == 1
+                    if (old) {
+                        entered.countDown()
+                        assertTrue(release.await(20, TimeUnit.SECONDS))
+                        returned.countDown()
+                    }
+                    json(JSONObject().put("items", JSONArray().put(link(if (old) 100 else 200, if (old) "OLD" else "current")))
+                        .put("next_before_id", JSONObject.NULL).put("filter_contract_version", 1))
+                }
+                "/api/taxonomy" -> taxonomy("v1")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val model = start()
+        awaitState(model) { it.links.size == 4 && !it.loading }
+        withContext(Dispatchers.Main) { model.setBookmarkFilters(BookmarkFilters(topics = listOf("design"))) }
+        assertTrue(withContext(Dispatchers.IO) { entered.await(5, TimeUnit.SECONDS) })
+        for (token in listOf(tokenB, tokenA)) {
+            withContext(Dispatchers.Main) { model.setApiToken(token); assertTrue(model.uiState.libraryResults.isEmpty()) }
+            awaitStoredToken(token)
+            awaitState(model) { it.links.size == 4 && !it.loading }
+        }
+        withContext(Dispatchers.Main) { model.setBookmarkFilters(BookmarkFilters(topics = listOf("design"))) }
+        awaitState(model) { !it.libraryLoading && it.libraryResults.map { row -> row.id } == listOf(200) }
+        release.countDown()
+        assertTrue(withContext(Dispatchers.IO) { returned.await(5, TimeUnit.SECONDS) })
+        delay(300)
+        withContext(Dispatchers.Main) { assertEquals(listOf(200), model.uiState.visibleLibraryLinks().map { it.id }) }
     }
 
     @Test fun delayedPersistedTokenCannotReactivateTheAccountAfterANewerSetting() = runBlocking<Unit> {
@@ -560,19 +755,21 @@ class AccountCacheInstrumentedTest {
         assertEquals(original, actions.snapshot())
         assertEquals(1, sends.get()) // Refresh is read-only.
         // Selection unavailable must survive a successful vocabulary read.
+        selectionStatus.set(404)
         withContext(Dispatchers.Main) { model.setApiToken(tokenB) }
         awaitStoredToken(tokenB)
-        selectionStatus.set(404)
         withContext(Dispatchers.Main) { model.loadV2Selection(1) }
         awaitState(model) { !it.v2Available }
         withContext(Dispatchers.Main) { model.loadV2Taxonomy() }
         awaitState(model) { it.v2Taxonomy != null }
         withContext(Dispatchers.Main) { assertFalse(model.uiState.v2Available) }
         // And the inverse: loaded selection cannot mask an unsupported vocabulary.
-        withContext(Dispatchers.Main) { model.setApiToken("cache-c-12345678") }
-        awaitStoredToken("cache-c-12345678")
+        // Configure the new account before activation: the library now loads
+        // its vocabulary immediately, so a later change races that first read.
         taxonomyStatus.set(404)
         selectionStatus.set(200)
+        withContext(Dispatchers.Main) { model.setApiToken("cache-c-12345678") }
+        awaitStoredToken("cache-c-12345678")
         withContext(Dispatchers.Main) { model.loadV2Taxonomy() }
         awaitState(model) { !it.v2Available }
         withContext(Dispatchers.Main) { model.loadV2Selection(1) }

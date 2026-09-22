@@ -6,6 +6,7 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -29,6 +30,7 @@ internal enum class LinkFilter(val apiValue: String) {
 internal sealed interface LinkPageResult {
     data class Loaded(val page: LinkPage) : LinkPageResult
     data class Failed(val kind: FailureKind) : LinkPageResult
+    data object UnsupportedFilters : LinkPageResult
 }
 
 internal data class LinkPage(
@@ -59,8 +61,8 @@ internal class LinksApiClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
-    fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null, filters: BookmarkFilters = BookmarkFilters()): LinkPageResult {
-        val endpoint = URL(listUrl(filter, query, beforeId, filters))
+    fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null, filters: BookmarkFilters = BookmarkFilters(), filterTime: Instant = Instant.now()): LinkPageResult {
+        val endpoint = URL(listUrl(filter, query, beforeId, filters, filterTime))
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
@@ -69,7 +71,9 @@ internal class LinksApiClient(
             val status = connection.responseCode
             val body = responseBody(connection)
             when (status) {
-                HttpURLConnection.HTTP_OK -> LinkPageResult.Loaded(LinkJson.decodePage(body))
+                HttpURLConnection.HTTP_OK -> if (filters.needsEffectiveFilterContract() && JSONObject(body).opt("filter_contract_version") != 1) {
+                    LinkPageResult.UnsupportedFilters
+                } else LinkPageResult.Loaded(LinkJson.decodePage(body))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> LinkPageResult.Failed(FailureKind.Unauthorized)
                 else -> LinkPageResult.Failed(FailureKind.Server)
             }
@@ -203,7 +207,7 @@ internal class LinksApiClient(
         }
     }
 
-    private fun listUrl(filter: LinkFilter, query: String, beforeId: Int?, filters: BookmarkFilters): String {
+    private fun listUrl(filter: LinkFilter, query: String, beforeId: Int?, filters: BookmarkFilters, filterTime: Instant): String {
         val params = mutableListOf(
             "limit=100",
             "include=enrichment", "include_cache_identity=1",
@@ -212,7 +216,8 @@ internal class LinksApiClient(
         if (beforeId != null) {
             params += "before_id=$beforeId"
         }
-        for ((key, value) in filters.parameters()) params += "$key=${URLEncoder.encode(value, "UTF-8")}"
+        for ((key, value) in filters.parameters(filterTime)) params += "$key=${URLEncoder.encode(value, "UTF-8")}"
+        if (filters.needsEffectiveFilterContract()) params += "filter_contract_version=1"
         val trimmed = query.trim()
         if (trimmed.isNotEmpty()) {
             params += "q=${URLEncoder.encode(trimmed, "UTF-8")}"

@@ -225,6 +225,8 @@ internal fun CairnLinksApp(
                     state = state,
                     onFilterChange = viewModel::setFilter,
                     onBookmarkFiltersChange = viewModel::setBookmarkFilters,
+                    onLoadMore = viewModel::loadMoreLibraryResults,
+                    onRetryFilters = viewModel::retryLibraryFilters,
                     onOpenSearch = { navController.navigate(Routes.Search) },
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
@@ -502,15 +504,19 @@ private fun LibraryScreen(
     state: CairnLinksUiState,
     onFilterChange: (LinkFilter) -> Unit,
     onBookmarkFiltersChange: (BookmarkFilters) -> Unit,
+    onLoadMore: () -> Unit,
+    onRetryFilters: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
     val stats = remember(state.links, java.time.LocalDate.now()) { state.stats() }
-    val items = remember(state.links, state.filter, state.bookmarkFilters) { state.visibleLibraryLinks() }
+    val items = remember(state.links, state.libraryResults, state.filter, state.bookmarkFilters) { state.visibleLibraryLinks() }
+    val querying = state.usesLibraryQuery()
+    val loading = if (querying) state.libraryLoading else state.loading
     ScreenColumn {
         AppHeader(
             title = "链接库",
-            subtitle = "${if (state.loading) "已加载 " else ""}${stats.total} 条收藏 · ${stats.pending} 条待读",
+            subtitle = "已加载 ${stats.total} 条收藏 · ${stats.pending} 条待读",
             actions = {
                 HeaderIconButton(
                     icon = Icons.Default.Search,
@@ -526,13 +532,20 @@ private fun LibraryScreen(
             enabled = true,
             onFilterChange = onFilterChange,
         )
-        BookmarkFilterPanel(state.bookmarkFilters, state.taxonomy, onBookmarkFiltersChange)
+        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange)
+        if (querying) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(state.libraryStatusText, Modifier.weight(1f).testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onRetryFilters, enabled = !state.libraryLoading, modifier = Modifier.testTag("retry_library_filters")) { Text("重新筛选") }
+        }
         LinkList(
             items = items,
-            loading = state.loading,
-            emptyText = libraryEmptyText(state),
+            loading = loading && items.isEmpty(),
+            emptyText = if (querying) state.libraryStatusText.ifBlank { "正在筛选..." } else libraryEmptyText(state),
             onOpenLinkDetail = onOpenLinkDetail,
-            refreshing = state.loading && items.isNotEmpty(),
+            refreshing = !querying && state.loading && items.isNotEmpty(),
+            hasMore = querying && state.libraryNextBeforeId != null,
+            loadingMore = querying && loading && items.isNotEmpty(),
+            onLoadMore = onLoadMore,
         )
     }
 }
@@ -554,14 +567,18 @@ private fun SearchScreen(
             onValueChange = onSearchQueryChange,
             enabled = true,
         )
-        BookmarkFilterPanel(state.bookmarkFilters, state.taxonomy, onBookmarkFiltersChange)
+        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange)
+        if (state.searchQuery.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(state.searchStatusText, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = { onSearchQueryChange(state.searchQuery) }, enabled = !state.searchLoading) { Text("重新搜索") }
+        }
         LinkList(
             items = results,
             loading = state.searchLoading && results.isEmpty(),
             emptyText = when {
                 state.searchQuery.isBlank() -> "搜索标题、正文、摘要、收藏原因或链接。"
                 state.searchLoading -> "正在搜索..."
-                else -> "没有匹配的链接。"
+                else -> state.searchStatusText.ifBlank { "没有匹配的链接。" }
             },
             onOpenLinkDetail = onOpenLinkDetail,
             hasMore = state.searchNextBeforeId != null,

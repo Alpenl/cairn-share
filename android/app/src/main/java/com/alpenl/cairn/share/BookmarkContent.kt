@@ -234,7 +234,11 @@ private fun filterPanelLabel(filters: BookmarkFilters): String {
     }
     if (filters.uncertain) parts += "待确认"
     if (filters.recentDays > 0) parts += "近 ${filters.recentDays} 天"
-    if (filters.topic.isNotBlank()) parts += "主题"
+    if (filters.topic.isNotBlank() || filters.topics.isNotEmpty()) parts += "主题"
+    if (filters.contentFunctions.isNotEmpty()) parts += "内容功能"
+    if (filters.carriers.isNotEmpty()) parts += "载体"
+    if (filters.affordances.isNotEmpty()) parts += "潜在用途"
+    if (filters.entityState.isNotEmpty()) parts += "实体状态"
     if (filters.form.isNotBlank()) parts += "形态"
     if (filters.use.isNotBlank()) parts += "用途"
     return "筛选 · " + parts.joinToString(" · ")
@@ -254,6 +258,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
             if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) }) { Text("清除筛选") }
         }
         if (expanded) Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
+            Text("同一维度匹配任一所选项，不同维度需同时满足。", style = MaterialTheme.typography.bodySmall)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (status in CurationStatus.entries) FilterChip(
                     selected = filters.curationStatus == status.apiValue,
@@ -268,11 +273,41 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                 FilterChip(selected = filters.uncertain, onClick = { onChange(filters.copy(uncertain = !filters.uncertain)) }, label = { Text("分类待确认") })
                 for (days in listOf(7, 30)) FilterChip(selected = filters.recentDays == days, onClick = { onChange(filters.copy(recentDays = if (filters.recentDays == days) 0 else days)) }, label = { Text("近 $days 天") })
             }
-            if (taxonomy != null) FlowRow {
-                TermSelector("主题", filters.topic, taxonomy.topics) { onChange(filters.copy(topic = it)) }
-                TermSelector("形态", filters.form, taxonomy.forms) { onChange(filters.copy(form = it)) }
-                TermSelector("用途", filters.use, taxonomy.uses) { onChange(filters.copy(use = it)) }
+            if (taxonomy != null) {
+                val topicValues = (filters.topics + listOf(filters.topic).filter { it.isNotBlank() }).distinct()
+                FilterDimension("主题", "topics", topicValues, taxonomy.topics) { onChange(filters.copy(topic = "", topics = it)) }
+                if (taxonomy.multiDimensional) {
+                    FilterDimension("内容功能", "content_functions", filters.contentFunctions, taxonomy.contentFunctions) { onChange(filters.copy(contentFunctions = it)) }
+                    FilterDimension("载体（任一）", "carriers", filters.carriers, taxonomy.carriers) { onChange(filters.copy(carriers = it)) }
+                    FilterDimension("潜在用途", "affordances", filters.affordances, taxonomy.affordances) { onChange(filters.copy(affordances = it)) }
+                } else Text("多维词表暂不可用；已选条件仍保留。", style = MaterialTheme.typography.bodySmall)
+                FlowRow {
+                    TermSelector("形态", filters.form, taxonomy.forms) { onChange(filters.copy(form = it)) }
+                    TermSelector("用途", filters.use, taxonomy.uses) { onChange(filters.copy(use = it)) }
+                }
+            }
+            Text("实体处理状态（任一）", style = MaterialTheme.typography.labelLarge)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val selected = filters.entityState.split(',').filter { it.isNotEmpty() }
+                for ((value, label) in listOf("not_run" to "未运行", "failed" to "失败", "completed_empty" to "完成，无实体", "completed_nonempty" to "完成，有实体", "stale" to "来源已变化")) {
+                    FilterChip(selected = value in selected,
+                        onClick = { onChange(filters.copy(entityState = (if (value in selected) selected - value else selected + value).joinToString(","))) },
+                        label = { Text(label) }, modifier = Modifier.testTag("filter_entity_state_$value"))
+                }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FilterDimension(label: String, key: String, selected: List<String>, terms: List<TaxonomyTerm>, onChange: (List<String>) -> Unit) {
+    Text(label, style = MaterialTheme.typography.labelLarge)
+    val choices = terms.map { it.id to (it.label + if (it.active) "" else "（已停用）") } +
+        selected.filter { id -> terms.none { it.id == id } }.map { it to "$it（词表不可用）" }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        for ((id, text) in choices) FilterChip(selected = id in selected,
+            onClick = { onChange(if (id in selected) selected - id else selected + id) },
+            label = { Text(text) }, modifier = Modifier.testTag("filter_${key}_$id"))
     }
 }

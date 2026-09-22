@@ -17,10 +17,16 @@ internal data class BookmarkFilters(
     val carriers: List<String> = emptyList(),
     val affordances: List<String> = emptyList(),
     val entityState: String = "",
+    val topics: List<String> = emptyList(),
 ) {
+    fun needsEffectiveFilterContract(): Boolean = topic.isNotEmpty() || topics.isNotEmpty() ||
+        form.isNotEmpty() || use.isNotEmpty() || contentFunctions.isNotEmpty() ||
+        carriers.isNotEmpty() || affordances.isNotEmpty() || entityState.isNotEmpty()
+
     fun parameters(now: Instant = Instant.now()): Map<String, String> = buildMap {
         put("curation_status", curationStatus)
         put("topic", topic)
+        if (topics.isNotEmpty()) put("topics", topics.joinToString(","))
         put("form", form)
         put("use", use)
         put("source", source)
@@ -36,13 +42,13 @@ internal data class BookmarkFilters(
         val data = link.enrichment
         val labels = data?.classification
         return (curationStatus.isBlank() || (data?.curationStatus?.apiValue ?: "inbox") == curationStatus) &&
-            (topic.isBlank() || topic in labels?.topics.orEmpty()) &&
+            ((topics + listOf(topic).filter { it.isNotBlank() }).let { requested -> requested.isEmpty() || requested.any { it in labels?.topics.orEmpty() } }) &&
             (form.isBlank() || labels?.form == form) && (use.isBlank() || labels?.use == use) &&
             (source.isBlank() || data?.source == source) &&
             (contentFunctions.isEmpty() || contentFunctions.any { it in labels?.contentFunctions.orEmpty() }) &&
             (carriers.isEmpty() || carriers.any { it in labels?.carriers.orEmpty() }) &&
             (affordances.isEmpty() || affordances.any { it in labels?.affordances.orEmpty() }) &&
-            (entityState.isBlank() || data?.entityState == entityState) &&
+            (entityState.isBlank() || data?.entityState in entityState.split(',')) &&
             (!uncertain || (data?.classificationReviewed != true && labels?.uncertainty != false)) &&
             (recentDays <= 0 || runCatching { !Instant.parse(link.createdAt).isBefore(now.minus(recentDays.toLong(), ChronoUnit.DAYS)) }.getOrDefault(false))
     }

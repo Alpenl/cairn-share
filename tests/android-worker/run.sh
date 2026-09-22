@@ -51,7 +51,7 @@ python3 "$root/tests/android-worker/fault_proxy.py" "http://127.0.0.1:$worker_po
 proxy_pid=$!
 "$adb" -s "$serial" reverse tcp:18978 "tcp:$proxy_port"
 (cd "$root/android" && ./gradlew --no-daemon --dependency-verification strict installDebug installDebugAndroidTest)
-for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConflictsAndMidChainFailure discardAndAccountSwitchPreserveUnrelatedActions preserveAmbiguousLegacyAndSeparateSameSuffixAccounts explicitlyRecoverLegacyAfterRestart persistResetWithIndependentAutomaticBaseline restoreAutomaticDraftAfterProcessDeath persistTermResetAfterExplicitEmpty restoreTermResetAfterProcessDeath confirmedCurationRefreshesRealFilteredSearch; do
+for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConflictsAndMidChainFailure discardAndAccountSwitchPreserveUnrelatedActions preserveAmbiguousLegacyAndSeparateSameSuffixAccounts explicitlyRecoverLegacyAfterRestart persistResetWithIndependentAutomaticBaseline restoreAutomaticDraftAfterProcessDeath persistTermResetAfterExplicitEmpty restoreTermResetAfterProcessDeath confirmedCurationRefreshesRealFilteredSearch blankKeywordLibraryUsesFullEffectiveFiltersAndConfirmedWrites; do
   "$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
   "$adb" -s "$serial" shell am instrument -w -r \
     -e class "com.alpenl.cairn.share.CurationWorkerRecoveryTest#$phase" \
@@ -61,4 +61,4 @@ for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConfl
   grep -Eq '^OK \(1 test\)' "$work/$phase.log"
 done
 curl -fsS "http://127.0.0.1:$proxy_port/__test/control" > "$work/transport-history.json"
-echo "PASS: ten phases ran in separate Android processes against actual authenticated Worker/D1"
+echo "PASS: eleven phases ran in separate Android processes against actual authenticated Worker/D1"

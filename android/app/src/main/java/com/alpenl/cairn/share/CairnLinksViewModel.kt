@@ -42,6 +42,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.time.DayOfWeek
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.TemporalAdjusters
@@ -59,6 +60,10 @@ internal data class CairnLinksUiState(
     val statusText: String = "",
     val filter: LinkFilter = LinkFilter.All,
     val bookmarkFilters: BookmarkFilters = BookmarkFilters(),
+    val libraryResults: List<SavedLink> = emptyList(),
+    val libraryLoading: Boolean = false,
+    val libraryNextBeforeId: Int? = null,
+    val libraryStatusText: String = "",
     val searchQuery: String = "",
     val searchResults: List<SavedLink> = emptyList(),
     val searchLoading: Boolean = false,
@@ -173,6 +178,10 @@ internal class CairnLinksViewModel(
 
     private var messageId = 0L
     private var searchJob: Job? = null
+    private var libraryJob: Job? = null
+    private var libraryGeneration = 0L
+    private var libraryFilterTime = Instant.now()
+    private var searchFilterTime = Instant.now()
     private var searchGeneration = 0L
     private var refreshJob: Job? = null
     private var pendingUploadsRetryJob: Job? = null
@@ -235,8 +244,10 @@ internal class CairnLinksViewModel(
         }
         activeAccountToken = token
         searchGeneration += 1
+        libraryGeneration += 1
         refreshJob?.cancel()
         searchJob?.cancel()
+        libraryJob?.cancel()
         selectionRequests.clear()
         val key = accountKeyFor(uiState.apiBaseUrl, token)
         clearV2AccountState()
@@ -244,6 +255,7 @@ internal class CairnLinksViewModel(
             links = emptyList(), loading = false, taxonomy = null, taxonomyLoading = false,
             statusText = "", searchQuery = "", searchResults = emptyList(), searchLoading = false,
             searchNextBeforeId = null, searchStatusText = "", bookmarkFilters = BookmarkFilters(),
+            libraryResults = emptyList(), libraryLoading = false, libraryNextBeforeId = null, libraryStatusText = "",
             busyIds = emptySet(), detailLoads = emptyMap(), editDraft = accountEditDrafts.remove(key),
             manualAdd = accountAddDrafts.remove(key) ?: ManualAddState(), apiDebug = ApiDebugUiState(), message = null)
     }
@@ -493,7 +505,8 @@ internal class CairnLinksViewModel(
             return
         }
         if (uiState.searchQuery.isNotBlank()) setSearchQuery(uiState.searchQuery)
-        if (uiState.v2TaxonomyAvailable != null) refreshV2Taxonomy(force = true)
+        refreshLibraryFilters()
+        refreshV2Taxonomy(force = true)
         for (id in uiState.v2Selections.keys + uiState.v2Drafts.keys) loadV2Selection(id, force = true)
         val hadLinks = uiState.links.isNotEmpty()
         uiState = uiState.copy(
@@ -544,6 +557,10 @@ internal class CairnLinksViewModel(
                         )
                         return@launch
                     }
+                    LinkPageResult.UnsupportedFilters -> {
+                        uiState = uiState.copy(loading = false, statusText = FILTER_UNSUPPORTED_MESSAGE)
+                        return@launch
+                    }
                 }
             }
             uiState = uiState.copy(loading = false, statusText = "已加载 5000 条链接，请通过搜索查找更早的内容。")
@@ -553,16 +570,19 @@ internal class CairnLinksViewModel(
 
     fun setFilter(filter: LinkFilter) {
         uiState = uiState.copy(filter = filter)
+        refreshLibraryFilters()
         viewModelScope.launch { settingsStore.setLastFilter(filter.apiValue) }
     }
 
     fun setBookmarkFilters(filters: BookmarkFilters) {
         uiState = uiState.copy(bookmarkFilters = filters)
+        refreshLibraryFilters()
         if (uiState.searchQuery.isNotBlank()) setSearchQuery(uiState.searchQuery)
     }
 
     fun setSearchQuery(value: String) {
         searchGeneration += 1
+        searchFilterTime = Instant.now()
         searchJob?.cancel()
         val query = value.trim()
         viewModelScope.launch { settingsStore.setLastSearchQuery(value) }
@@ -595,7 +615,67 @@ internal class CairnLinksViewModel(
     // merging stale membership or continuing its cursor. Debounce coalesces a
     // burst of confirmed actions; old requests cannot publish into this search.
     private fun refreshSearchAfterMutation() {
+        refreshLibraryFilters()
         if (uiState.searchQuery.isNotBlank()) setSearchQuery(uiState.searchQuery)
+    }
+
+    // Query membership is authoritative and independent of the bounded root
+    // snapshot used for the queue. Draft actions do not change saved membership.
+    private fun refreshLibraryFilters() {
+        libraryGeneration += 1
+        libraryJob?.cancel()
+        libraryFilterTime = Instant.now()
+        uiState = uiState.copy(libraryResults = emptyList(), libraryNextBeforeId = null,
+            libraryLoading = uiState.usesLibraryQuery(), libraryStatusText = "")
+        if (!uiState.usesLibraryQuery()) return
+        libraryJob = viewModelScope.launch {
+            delay(250)
+            loadLibraryPage(null, append = false)
+        }
+    }
+
+    fun retryLibraryFilters() = refreshLibraryFilters()
+
+    fun loadMoreLibraryResults() {
+        val before = uiState.libraryNextBeforeId
+        if (!uiState.usesLibraryQuery() || uiState.libraryLoading || before == null) return
+        libraryJob?.cancel()
+        libraryJob = viewModelScope.launch { loadLibraryPage(before, append = true) }
+    }
+
+    private suspend fun loadLibraryPage(beforeId: Int?, append: Boolean) {
+        val queryGeneration = libraryGeneration
+        val account = uiState.accountGeneration
+        val token = currentApiToken()
+        val filters = uiState.bookmarkFilters
+        val learned = uiState.filter
+        val queryTime = libraryFilterTime
+        if (token.isBlank()) {
+            uiState = uiState.copy(libraryLoading = false, libraryStatusText = "请先在设置中配置访问 Token。")
+            return
+        }
+        uiState = uiState.copy(libraryLoading = true, libraryStatusText = if (append) "正在加载更多..." else "正在筛选...")
+        val result = withContext(Dispatchers.IO) { repository.listPage(learned, "", token, beforeId, filters, queryTime) }
+        if (queryGeneration != libraryGeneration || !isCurrentAccount(account) || token != currentApiToken() ||
+            filters != uiState.bookmarkFilters || learned != uiState.filter) return
+        when (result) {
+            is LinkPageResult.Loaded -> {
+                if (!result.page.validContinuation(beforeId)) {
+                    uiState = uiState.copy(libraryLoading = false, libraryNextBeforeId = null, libraryStatusText = "分页响应无效，请重新筛选。")
+                    return
+                }
+                val known = (uiState.libraryResults + uiState.links).associateBy { it.id }
+                val incoming = result.page.items.map { it.retainLoadedContent(known[it.id]) }
+                val rows = (if (append) uiState.libraryResults + incoming else incoming).distinctBy { it.id }.sortedByDescending { it.id }
+                uiState = uiState.copy(libraryResults = rows, libraryLoading = false,
+                    libraryNextBeforeId = result.page.nextBeforeId,
+                    libraryStatusText = if (rows.isEmpty()) "没有符合条件的收藏。" else "已显示 ${rows.size} 条${if (result.page.nextBeforeId != null) "，还有更多。" else "。"}")
+            }
+            is LinkPageResult.Failed -> uiState = uiState.copy(libraryLoading = false,
+                libraryStatusText = failureText(result.kind, if (append) "加载更多失败，请重试。" else "筛选失败，请检查网络后重试。"))
+            LinkPageResult.UnsupportedFilters -> uiState = uiState.copy(libraryLoading = false,
+                libraryNextBeforeId = null, libraryStatusText = FILTER_UNSUPPORTED_MESSAGE)
+        }
     }
 
     fun loadMoreSearchResults() {
@@ -1300,11 +1380,16 @@ internal class CairnLinksViewModel(
             searchLoading = true,
             searchStatusText = if (append) "正在加载更多..." else "正在搜索...",
         )
-        val result = withContext(Dispatchers.IO) { repository.listPage(LinkFilter.All, query, apiToken, beforeId, filters) }
+        val queryTime = searchFilterTime
+        val result = withContext(Dispatchers.IO) { repository.listPage(LinkFilter.All, query, apiToken, beforeId, filters, queryTime) }
         if (search != searchGeneration || !isCurrentAccount(generation) || uiState.searchQuery.trim() != query || uiState.bookmarkFilters != filters) return
         when (result) {
             is LinkPageResult.Loaded -> {
                 if (uiState.searchQuery.trim() != query || uiState.bookmarkFilters != filters || apiToken != currentApiToken()) return
+                if (!result.page.validContinuation(beforeId)) {
+                    uiState = uiState.copy(searchLoading = false, searchNextBeforeId = null, searchStatusText = "分页响应无效，请重新搜索。")
+                    return
+                }
                 val nextItems = if (append) {
                     (uiState.searchResults + result.page.items)
                         .distinctBy { it.id }
@@ -1338,6 +1423,8 @@ internal class CairnLinksViewModel(
                     ),
                 )
             }
+            LinkPageResult.UnsupportedFilters -> uiState = uiState.copy(searchLoading = false,
+                searchNextBeforeId = null, searchStatusText = FILTER_UNSUPPORTED_MESSAGE)
         }
     }
 
@@ -1392,14 +1479,18 @@ internal class CairnLinksViewModel(
 }
 
 internal fun CairnLinksUiState.visibleLibraryLinks(): List<SavedLink> {
-    val now = java.time.Instant.now()
-    return links.asSequence().filter { bookmarkFilters.matches(it, now) }.filter { link ->
-        when (filter) {
-            LinkFilter.All -> true
-            LinkFilter.Unlearned -> !link.learned
-            LinkFilter.Learned -> link.learned
-        }
-    }.sortedByDescending { it.id }.toList()
+    return (if (usesLibraryQuery()) libraryResults else links).sortedByDescending { it.id }
+}
+
+internal fun CairnLinksUiState.usesLibraryQuery(): Boolean = filter != LinkFilter.All || bookmarkFilters != BookmarkFilters()
+
+private const val FILTER_UNSUPPORTED_MESSAGE = "服务暂不支持完整筛选，请更新服务或清除筛选后浏览。"
+
+private fun com.alpenl.cairn.share.network.LinkPage.validContinuation(beforeId: Int?): Boolean {
+    val ids = items.map { it.id }
+    if (ids.any { it <= 0 || (beforeId != null && it >= beforeId) } || ids.distinct().size != ids.size || ids != ids.sortedDescending()) return false
+    val next = nextBeforeId ?: return true
+    return ids.isNotEmpty() && next == ids.last() && (beforeId == null || next < beforeId)
 }
 
 internal fun CairnLinksUiState.searchResultLinks(): List<SavedLink> {
