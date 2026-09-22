@@ -48,6 +48,7 @@ internal data class CairnLinksUiState(
     val releasesApiUrl: String,
     val currentVersionName: String,
     val currentVersionCode: Int,
+    val accountGeneration: Long = 0,
     val links: List<SavedLink> = emptyList(),
     val loading: Boolean = false,
     val taxonomy: BookmarkTaxonomy? = null,
@@ -81,11 +82,14 @@ internal data class CairnLinksUiState(
     val v2Busy: Set<Int> = emptySet(),
     val v2Queued: Map<Int, Int> = emptyMap(),
     val v2LegacyActions: Map<Int, List<QueuedCurationAction>> = emptyMap(),
-    val v2Available: Boolean = true,
+    val v2SelectionAvailable: Boolean? = null,
+    val v2TaxonomyAvailable: Boolean? = null,
     val v2Taxonomy: BookmarkTaxonomy? = null,
     val v2TaxonomyLoading: Boolean = false,
     val message: UiMessage? = null,
-)
+) {
+    val v2Available: Boolean get() = v2SelectionAvailable != false && v2TaxonomyAvailable != false
+}
 
 internal enum class DetailLoadState {
     Loading,
@@ -171,6 +175,10 @@ internal class CairnLinksViewModel(
     private var retryPendingUploadsAgainWithSummary = false
     private var loadedPreferencesOnce = false
     private var lastObservedToken = ""
+    private var activeAccountToken: String? = null
+    private val accountEditDrafts = mutableMapOf<String, EditDraft>()
+    private val accountAddDrafts = mutableMapOf<String, ManualAddState>()
+    private val selectionRequests = mutableMapOf<Int, Long>()
     private var automaticUploadRetryStarted = false
     // The serial curation action queue. A pending action is only removed after
     // the server confirms it (R2-04/R2-05).
@@ -204,8 +212,32 @@ internal class CairnLinksViewModel(
     private fun clearV2AccountState() {
         uiState = uiState.copy(v2Selections = emptyMap(), v2Drafts = emptyMap(),
             v2Conflicts = emptyMap(), v2Busy = emptySet(), v2Queued = emptyMap(), v2LegacyActions = emptyMap(),
-            v2Taxonomy = null, v2TaxonomyLoading = false, v2Available = true)
+            v2Taxonomy = null, v2TaxonomyLoading = false, v2SelectionAvailable = null, v2TaxonomyAvailable = null)
     }
+
+    /** Invalidate account-bound views immediately, including an A -> B -> A round trip. */
+    private fun activateAccount(token: String) {
+        if (activeAccountToken == token) return
+        activeAccountToken?.let { previous ->
+            val key = accountKeyFor(uiState.apiBaseUrl, previous)
+            uiState.editDraft?.let { accountEditDrafts[key] = it.copy(saving = false) }
+            if (uiState.manualAdd.visible) accountAddDrafts[key] = uiState.manualAdd.copy(submitting = false)
+        }
+        activeAccountToken = token
+        refreshJob?.cancel()
+        searchJob?.cancel()
+        selectionRequests.clear()
+        val key = accountKeyFor(uiState.apiBaseUrl, token)
+        clearV2AccountState()
+        uiState = uiState.copy(accountGeneration = uiState.accountGeneration + 1,
+            links = emptyList(), loading = false, taxonomy = null, taxonomyLoading = false,
+            statusText = "", searchQuery = "", searchResults = emptyList(), searchLoading = false,
+            searchNextBeforeId = null, searchStatusText = "", bookmarkFilters = BookmarkFilters(),
+            busyIds = emptySet(), detailLoads = emptyMap(), editDraft = accountEditDrafts.remove(key),
+            manualAdd = accountAddDrafts.remove(key) ?: ManualAddState(), apiDebug = ApiDebugUiState(), message = null)
+    }
+
+    private fun isCurrentAccount(generation: Long): Boolean = generation == uiState.accountGeneration
 
     /**
      * Loads the effective view. A local draft or a queued action is never
@@ -216,24 +248,27 @@ internal class CairnLinksViewModel(
         if (token.isBlank()) return
         if (!force && uiState.v2Selections.containsKey(id) && (uiState.v2Drafts.containsKey(id) || (uiState.v2Queued[id] ?: 0) > 0)) return
         val account = curationAccountKey()
+        val generation = uiState.accountGeneration
+        val request = (selectionRequests[id] ?: 0) + 1
+        selectionRequests[id] = request
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { v2Repository.load(id, token) }
-            if (account != curationAccountKey()) return@launch
+            if (account != curationAccountKey() || !isCurrentAccount(generation) || selectionRequests[id] != request) return@launch
             when (result) {
                 is V2Result.Loaded -> {
                     if (result.value.revision < (uiState.v2Selections[id]?.revision ?: 0)) return@launch
                     val pending = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
-                    if (account != curationAccountKey()) return@launch
+                    if (account != curationAccountKey() || !isCurrentAccount(generation) || selectionRequests[id] != request) return@launch
                     val draft = pending.fold(result.value) { current, action ->
                         v2Repository.applyLocal(current, result.value.automatic, action.field, action.term, action.action)
                     }
                     uiState = uiState.copy(
                         v2Selections = uiState.v2Selections + (id to result.value),
                         v2Drafts = if (pending.isEmpty()) uiState.v2Drafts - id else uiState.v2Drafts + (id to draft),
-                        v2Available = true,
+                        v2SelectionAvailable = true,
                     )
                 }
-                V2Result.Unsupported -> uiState = uiState.copy(v2Available = false)
+                V2Result.Unsupported -> uiState = uiState.copy(v2SelectionAvailable = false)
                 else -> Unit
             }
         }
@@ -243,17 +278,20 @@ internal class CairnLinksViewModel(
      * Loads the multidimensional vocabulary. It is a separate endpoint from the
      * v1 taxonomy, so a backend without v2 stays visibly read-only.
      */
-    fun loadV2Taxonomy() {
+    fun loadV2Taxonomy() = refreshV2Taxonomy(force = false)
+
+    private fun refreshV2Taxonomy(force: Boolean) {
         val token = uiState.preferences.apiToken
-        if (token.isBlank() || uiState.v2Taxonomy != null || uiState.v2TaxonomyLoading) return
+        if (token.isBlank() || (!force && uiState.v2Taxonomy != null) || uiState.v2TaxonomyLoading) return
         val account = curationAccountKey()
+        val generation = uiState.accountGeneration
         uiState = uiState.copy(v2TaxonomyLoading = true)
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { v2Repository.loadTaxonomy(token) }
-            if (account != curationAccountKey()) return@launch
+            if (account != curationAccountKey() || !isCurrentAccount(generation)) return@launch
             when (result) {
-                is V2Result.Loaded -> uiState = uiState.copy(v2TaxonomyLoading = false, v2Taxonomy = result.value, v2Available = true)
-                V2Result.Unsupported -> uiState = uiState.copy(v2TaxonomyLoading = false, v2Available = false)
+                is V2Result.Loaded -> uiState = uiState.copy(v2TaxonomyLoading = false, v2Taxonomy = result.value, v2TaxonomyAvailable = true)
+                V2Result.Unsupported -> uiState = uiState.copy(v2TaxonomyLoading = false, v2TaxonomyAvailable = false)
                 else -> uiState = uiState.copy(v2TaxonomyLoading = false)
             }
         }
@@ -264,15 +302,16 @@ internal class CairnLinksViewModel(
         if (uiState.preferences.apiToken.isBlank()) return
         val selection = uiState.v2Selections[id] ?: return
         val account = curationAccountKey()
+        val generation = uiState.accountGeneration
         val draft = v2Repository.applyLocal(uiState.v2Drafts[id] ?: selection, selection.automatic, field, term, action)
         val queued = QueuedCurationAction(id, UUID.randomUUID().toString(), field, term, action, selection.revision, account)
         uiState = uiState.copy(v2Drafts = uiState.v2Drafts + (id to draft), v2Busy = uiState.v2Busy + id)
         viewModelScope.launch {
             try {
                 curationActionStore.enqueue(queued)
-                if (account == curationAccountKey()) pumpV2Actions()
+                if (account == curationAccountKey() && isCurrentAccount(generation)) pumpV2Actions()
             } catch (error: java.io.IOException) {
-                if (account == curationAccountKey()) uiState = uiState.copy(v2Busy = uiState.v2Busy - id,
+                if (account == curationAccountKey() && isCurrentAccount(generation)) uiState = uiState.copy(v2Busy = uiState.v2Busy - id,
                     message = nextMessage("无法保存离线动作，草稿已保留，请重试。"))
             }
         }
@@ -283,19 +322,20 @@ internal class CairnLinksViewModel(
         val token = uiState.preferences.apiToken
         if (token.isBlank()) return
         val account = curationAccountKey()
+        val generation = uiState.accountGeneration
         v2Pumping = true
         viewModelScope.launch {
             try {
                 curationActionStore.syncMutex.withLock {
                     v2Repository.flush(curationActionStore, account, token,
-                        active = { account == curationAccountKey() },
+                        active = { account == curationAccountKey() && isCurrentAccount(generation) },
                     ) { pending, result ->
-                        if (account == curationAccountKey()) {
+                        if (account == curationAccountKey() && isCurrentAccount(generation)) {
                             val selection = uiState.v2Selections[pending.linkId]
                             when (result) {
                                 is CurationSubmitResult.Applied -> {
                                     val remaining = curationActionStore.snapshot().any { it.accountKey == account && it.linkId == pending.linkId }
-                                    if (account != curationAccountKey()) return@flush
+                                    if (account != curationAccountKey() || !isCurrentAccount(generation)) return@flush
                                     if (selection != null) {
                                         val accepted = v2Repository.applyLocal(selection, selection.automatic, pending.field, pending.term, pending.action)
                                         uiState = uiState.copy(v2Selections = uiState.v2Selections + (pending.linkId to accepted.copy(revision = result.revision)))
@@ -321,10 +361,10 @@ internal class CairnLinksViewModel(
                     }
                 }
             } catch (error: java.io.IOException) {
-                if (account == curationAccountKey()) uiState = uiState.copy(message = nextMessage("离线队列读写失败，请重试。"))
+                if (account == curationAccountKey() && isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("离线队列读写失败，请重试。"))
             } finally {
                 v2Pumping = false
-                if (account == curationAccountKey()) uiState = uiState.copy(v2Busy = emptySet())
+                if (account == curationAccountKey() && isCurrentAccount(generation)) uiState = uiState.copy(v2Busy = emptySet())
                 else pumpV2Actions()
             }
         }
@@ -334,15 +374,16 @@ internal class CairnLinksViewModel(
     fun reapplyV2Draft(id: Int) {
         if (uiState.v2Conflicts[id] == null) return
         val account = curationAccountKey()
+        val generation = uiState.accountGeneration
         val token = uiState.preferences.apiToken
         viewModelScope.launch {
             curationActionStore.syncMutex.withLock {
                 val result = withContext(Dispatchers.IO) { v2Repository.load(id, token) }
-                if (account != curationAccountKey()) return@withLock
+                if (account != curationAccountKey() || !isCurrentAccount(generation)) return@withLock
                 if (result is V2Result.Loaded) {
                     curationActionStore.rebase(account, id, result.value.revision)
                     val actions = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
-                    if (account != curationAccountKey()) return@withLock
+                    if (account != curationAccountKey() || !isCurrentAccount(generation)) return@withLock
                     val draft = actions.fold(result.value) { current, action ->
                         v2Repository.applyLocal(current, result.value.automatic, action.field, action.term, action.action)
                     }
@@ -352,16 +393,17 @@ internal class CairnLinksViewModel(
                     uiState = uiState.copy(message = nextMessage("无法读取最新整理，已保留冲突和草稿。"))
                 }
             }
-            if (account == curationAccountKey()) pumpV2Actions()
+            if (account == curationAccountKey() && isCurrentAccount(generation)) pumpV2Actions()
         }
     }
 
     fun discardV2Draft(id: Int) {
         val account = curationAccountKey()
+        val generation = uiState.accountGeneration
         viewModelScope.launch {
             curationActionStore.syncMutex.withLock {
                 curationActionStore.discard(account, id)
-                if (account == curationAccountKey()) {
+                if (account == curationAccountKey() && isCurrentAccount(generation)) {
                     uiState = uiState.copy(v2Drafts = uiState.v2Drafts - id,
                         v2Conflicts = uiState.v2Conflicts - id, v2Busy = uiState.v2Busy - id)
                     loadV2Selection(id, force = true)
@@ -375,17 +417,18 @@ internal class CairnLinksViewModel(
         val token = uiState.preferences.apiToken
         if (token.isBlank()) return
         val account = curationAccountKey()
+        val generation = uiState.accountGeneration
         if (confirmedAccount != account) return
         val legacyKey = legacyAccountKeyFor(uiState.apiBaseUrl, token)
         viewModelScope.launch {
             var recovered = false
             curationActionStore.syncMutex.withLock {
                 val result = withContext(Dispatchers.IO) { v2Repository.load(id, token) }
-                if (account != curationAccountKey()) return@withLock
+                if (account != curationAccountKey() || !isCurrentAccount(generation)) return@withLock
                 if (result is V2Result.Loaded) {
                     val adopted = curationActionStore.adoptLegacy(legacyKey, account, id, result.value.revision)
                     recovered = adopted
-                    if (account != curationAccountKey()) return@withLock
+                    if (account != curationAccountKey() || !isCurrentAccount(generation)) return@withLock
                     if (adopted) {
                         loadV2Selection(id, force = true)
                         uiState = uiState.copy(message = nextMessage("旧版动作已恢复；版本冲突会保留供你确认。"))
@@ -396,7 +439,7 @@ internal class CairnLinksViewModel(
                     uiState = uiState.copy(message = nextMessage("无法确认当前收藏，旧版动作仍保留在本地。"))
                 }
             }
-            if (recovered && account == curationAccountKey()) pumpV2Actions()
+            if (recovered && account == curationAccountKey() && isCurrentAccount(generation)) pumpV2Actions()
         }
     }
 
@@ -421,6 +464,7 @@ internal class CairnLinksViewModel(
     }
 
     fun refreshLinks() {
+        val generation = uiState.accountGeneration
         if (!uiState.preferencesLoaded) return
         if (uiState.loading) return
         val apiToken = currentApiToken()
@@ -436,6 +480,9 @@ internal class CairnLinksViewModel(
             )
             return
         }
+        if (uiState.searchQuery.isNotBlank()) setSearchQuery(uiState.searchQuery)
+        if (uiState.v2TaxonomyAvailable != null) refreshV2Taxonomy(force = true)
+        for (id in uiState.v2Selections.keys + uiState.v2Drafts.keys) loadV2Selection(id, force = true)
         val hadLinks = uiState.links.isNotEmpty()
         uiState = uiState.copy(
             loading = true,
@@ -449,7 +496,7 @@ internal class CairnLinksViewModel(
             var beforeId: Int? = null
             repeat(50) {
                 val result = withContext(Dispatchers.IO) { repository.listPage(LinkFilter.All, "", apiToken, beforeId) }
-                if (apiToken != currentApiToken()) return@launch
+                if (!isCurrentAccount(generation) || apiToken != currentApiToken()) return@launch
                 when (result) {
                     is LinkPageResult.Loaded -> {
                         val current = uiState.links.associateBy { it.id }
@@ -541,6 +588,7 @@ internal class CairnLinksViewModel(
     }
 
     fun ensureLink(id: Int) {
+        val generation = uiState.accountGeneration
         if (uiState.links.any { it.id == id && it.enrichment?.contentLoaded == true } || uiState.detailLoads[id] == DetailLoadState.Loading) return
         val apiToken = currentApiToken()
         if (apiToken.isBlank()) {
@@ -550,12 +598,23 @@ internal class CairnLinksViewModel(
             )
             return
         }
+        val initial = uiState.links.firstOrNull { it.id == id }
         uiState = uiState.copy(detailLoads = uiState.detailLoads + (id to DetailLoadState.Loading))
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.get(id, apiToken) }) {
+            val result = withContext(Dispatchers.IO) { repository.get(id, apiToken) }
+            if (!isCurrentAccount(generation)) return@launch
+            if (uiState.links.firstOrNull { it.id == id } != initial) {
+                // A refresh or confirmed edit advanced the visible link while
+                // this read was in flight. Read again if its body is still absent.
+                uiState = uiState.copy(detailLoads = uiState.detailLoads - id)
+                ensureLink(id)
+                return@launch
+            }
+            when (result) {
                 is LinkGetResult.Loaded -> {
                     uiState = uiState.copy(
                         links = uiState.links.upsert(result.link),
+                        searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it },
                         detailLoads = uiState.detailLoads - id,
                     )
                 }
@@ -577,17 +636,19 @@ internal class CairnLinksViewModel(
     }
 
     fun loadTaxonomy() {
+        val generation = uiState.accountGeneration
         val token = currentApiToken()
         if (token.isBlank() || uiState.taxonomy != null || uiState.taxonomyLoading) return
         uiState = uiState.copy(taxonomyLoading = true)
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { repository.taxonomy(token) }
-            if (token != currentApiToken()) return@launch
+            if (!isCurrentAccount(generation) || token != currentApiToken()) return@launch
             uiState = uiState.copy(taxonomyLoading = false, taxonomy = (result as? TaxonomyResult.Loaded)?.taxonomy)
         }
     }
 
     fun saveCuration(id: Int, update: CurationUpdate, onSuccess: () -> Unit) {
+        val generation = uiState.accountGeneration
         if (id in uiState.busyIds) return
         val token = currentApiToken()
         if (token.isBlank()) {
@@ -596,14 +657,17 @@ internal class CairnLinksViewModel(
         }
         uiState = uiState.copy(busyIds = uiState.busyIds + id)
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.curate(id, update, token) }) {
+            val result = withContext(Dispatchers.IO) { repository.curate(id, update, token) }
+            if (!isCurrentAccount(generation)) return@launch
+            when (result) {
                 is LinkMutationResult.Updated -> {
                     uiState = uiState.copy(
                         links = uiState.links.upsert(result.link),
-                        searchResults = uiState.searchResults.map { if (it.id == id) result.link else it },
+                        searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it },
                         busyIds = uiState.busyIds - id,
                         message = nextMessage("已保存整理。"),
                     )
+                    if (id in uiState.v2Selections || id in uiState.v2Drafts) loadV2Selection(id, force = true)
                     onSuccess()
                 }
                 is LinkMutationResult.Failed -> uiState = uiState.copy(
@@ -633,6 +697,7 @@ internal class CairnLinksViewModel(
     }
 
     fun createManualLink() {
+        val generation = uiState.accountGeneration
         val draft = uiState.manualAdd
         if (draft.submitting) return
         val url = draft.url.trim()
@@ -647,6 +712,7 @@ internal class CairnLinksViewModel(
         uiState = uiState.copy(manualAdd = draft.copy(submitting = true, statusText = "正在保存到本地..."))
         viewModelScope.launch {
             val pending = runCatching { pendingUploadStore.enqueue(preparedUrl, note) }.getOrNull()
+            if (!isCurrentAccount(generation)) return@launch
             if (pending == null) {
                 uiState = uiState.copy(
                     manualAdd = uiState.manualAdd.copy(
@@ -668,7 +734,9 @@ internal class CairnLinksViewModel(
             )
             if (apiToken.isBlank()) return@launch
 
-            when (val result = uploadPending(pending, apiToken)) {
+            val result = uploadPending(pending, apiToken)
+            if (!isCurrentAccount(generation)) return@launch
+            when (result) {
                 is LinkCreateResult.Created -> {
                     uiState = uiState.copy(
                         message = nextMessage("已保存到链接库。"),
@@ -698,6 +766,7 @@ internal class CairnLinksViewModel(
     }
 
     fun saveEdit(onSuccess: () -> Unit) {
+        val generation = uiState.accountGeneration
         val draft = uiState.editDraft ?: return
         if (draft.saving) return
         val url = draft.url.trim()
@@ -714,12 +783,15 @@ internal class CairnLinksViewModel(
 
         uiState = uiState.copy(editDraft = draft.copy(saving = true, error = ""))
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) {
+            val result = withContext(Dispatchers.IO) {
                 repository.update(id = draft.id, url = url, note = draft.note, apiToken = apiToken)
-            }) {
+            }
+            if (!isCurrentAccount(generation)) return@launch
+            when (result) {
                 is LinkMutationResult.Updated -> {
                     uiState = uiState.copy(
                         links = uiState.links.upsert(result.link),
+                        searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it },
                         editDraft = null,
                         message = nextMessage("已保存修改。"),
                     )
@@ -744,6 +816,7 @@ internal class CairnLinksViewModel(
     }
 
     fun setLearned(linkId: Int, learned: Boolean, undoLearned: Boolean? = null) {
+        val generation = uiState.accountGeneration
         if (linkId in uiState.busyIds) return
         val apiToken = currentApiToken()
         if (apiToken.isBlank()) {
@@ -752,7 +825,9 @@ internal class CairnLinksViewModel(
         }
         uiState = uiState.copy(busyIds = uiState.busyIds + linkId)
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.update(linkId, learned = learned, apiToken = apiToken) }) {
+            val result = withContext(Dispatchers.IO) { repository.update(linkId, learned = learned, apiToken = apiToken) }
+            if (!isCurrentAccount(generation)) return@launch
+            when (result) {
                 is LinkMutationResult.Updated -> {
                     val message = if (undoLearned != null) {
                         nextMessage(
@@ -765,6 +840,7 @@ internal class CairnLinksViewModel(
                     }
                     uiState = uiState.copy(
                         links = uiState.links.upsert(result.link),
+                        searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it },
                         busyIds = uiState.busyIds - linkId,
                         message = message,
                     )
@@ -781,6 +857,7 @@ internal class CairnLinksViewModel(
     }
 
     fun deleteLink(linkId: Int, onSuccess: () -> Unit) {
+        val generation = uiState.accountGeneration
         if (linkId in uiState.busyIds) return
         val apiToken = currentApiToken()
         if (apiToken.isBlank()) {
@@ -789,10 +866,13 @@ internal class CairnLinksViewModel(
         }
         uiState = uiState.copy(busyIds = uiState.busyIds + linkId)
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) { repository.delete(linkId, apiToken) }) {
+            val result = withContext(Dispatchers.IO) { repository.delete(linkId, apiToken) }
+            if (!isCurrentAccount(generation)) return@launch
+            when (result) {
                 LinkMutationResult.Deleted -> {
                     uiState = uiState.copy(
                         links = uiState.links.filterNot { it.id == linkId },
+                        searchResults = uiState.searchResults.filterNot { it.id == linkId },
                         busyIds = uiState.busyIds - linkId,
                         editDraft = uiState.editDraft?.takeUnless { it.id == linkId },
                         message = nextMessage("已删除链接。"),
@@ -811,6 +891,7 @@ internal class CairnLinksViewModel(
     }
 
     fun markAllPendingLearned() {
+        val generation = uiState.accountGeneration
         val pending = uiState.queueLinks()
         if (pending.isEmpty()) {
             uiState = uiState.copy(message = nextMessage("待学习队列已经清空。"))
@@ -826,10 +907,13 @@ internal class CairnLinksViewModel(
             var failed = 0
             for (link in pending) {
                 uiState = uiState.copy(busyIds = uiState.busyIds + link.id)
-                when (val result = withContext(Dispatchers.IO) { repository.update(link.id, learned = true, apiToken = apiToken) }) {
+                val result = withContext(Dispatchers.IO) { repository.update(link.id, learned = true, apiToken = apiToken) }
+                if (!isCurrentAccount(generation)) return@launch
+                when (result) {
                     is LinkMutationResult.Updated -> {
                         success += 1
-                        uiState = uiState.copy(links = uiState.links.upsert(result.link))
+                        uiState = uiState.copy(links = uiState.links.upsert(result.link),
+                            searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it })
                     }
                     LinkMutationResult.Deleted -> Unit
                     is LinkMutationResult.Failed -> failed += 1
@@ -865,7 +949,7 @@ internal class CairnLinksViewModel(
         searchJob?.cancel()
         // The settings UI updates optimistically, before DataStore emits. Never
         // expose the previous account's selection to actions in that interval.
-        if (token != currentApiToken()) clearV2AccountState()
+        activateAccount(token)
         uiState = uiState.copy(preferences = uiState.preferences.copy(apiToken = token), loading = false, taxonomy = null, taxonomyLoading = false)
         viewModelScope.launch { settingsStore.setApiToken(token) }
         refreshLinks()
@@ -873,6 +957,7 @@ internal class CairnLinksViewModel(
     }
 
     fun retryPendingUpload(id: String) {
+        val generation = uiState.accountGeneration
         if (id in uiState.uploadBusyIds) return
         val pending = uiState.pendingUploads.firstOrNull { it.id == id } ?: return
         val apiToken = currentApiToken()
@@ -881,7 +966,9 @@ internal class CairnLinksViewModel(
             return
         }
         viewModelScope.launch {
-            when (val result = uploadPending(pending, apiToken)) {
+            val result = uploadPending(pending, apiToken)
+            if (!isCurrentAccount(generation)) return@launch
+            when (result) {
                 is LinkCreateResult.Created -> {
                     uiState = uiState.copy(message = nextMessage("已上传到链接库。"))
                 }
@@ -945,13 +1032,17 @@ internal class CairnLinksViewModel(
     }
 
     fun sendApiDebugRequest() {
+        val generation = uiState.accountGeneration
         val state = uiState.apiDebug
+        val token = currentApiToken()
         if (state.sending) return
         uiState = uiState.copy(apiDebug = state.copy(sending = true, statusLine = "发送中..."))
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) {
-                apiDebugClient.send(state.method, state.path, state.body, currentApiToken())
-            }) {
+            val result = withContext(Dispatchers.IO) {
+                apiDebugClient.send(state.method, state.path, state.body, token)
+            }
+            if (!isCurrentAccount(generation)) return@launch
+            when (result) {
                 is ApiDebugResult.Loaded -> {
                     val response = result.response
                     uiState = uiState.copy(
@@ -987,6 +1078,7 @@ internal class CairnLinksViewModel(
                 .catch { emit(SharePreferences()) }
                 .collect { preferences ->
                     val firstLoad = !loadedPreferencesOnce
+                    activateAccount(preferences.apiToken.trim())
                     // Compare persisted emissions, not the optimistic settings UI.
                     val previousToken = lastObservedToken
                     lastObservedToken = preferences.apiToken.trim()
@@ -1000,8 +1092,9 @@ internal class CairnLinksViewModel(
                         searchQuery = restoredQuery,
                     )
                     if (firstLoad || previousToken != preferences.apiToken.trim()) {
-                        clearV2AccountState()
+                        val generation = uiState.accountGeneration
                         val all = curationActionStore.snapshot()
+                        if (!isCurrentAccount(generation)) return@collect
                         val mine = all.filter { it.accountKey == curationAccountKey() }
                         val legacyKey = legacyAccountKeyFor(uiState.apiBaseUrl, preferences.apiToken)
                         uiState = uiState.copy(v2Queued = mine.groupingBy { it.linkId }.eachCount(),
@@ -1044,6 +1137,7 @@ internal class CairnLinksViewModel(
     }
 
     private fun startPendingUploadRetry(showSummary: Boolean) {
+        val generation = uiState.accountGeneration
         if (pendingUploadsRetryJob?.isActive == true) {
             retryPendingUploadsAgain = true
             retryPendingUploadsAgainWithSummary = retryPendingUploadsAgainWithSummary || showSummary
@@ -1067,6 +1161,7 @@ internal class CairnLinksViewModel(
             var uploaded = 0
             var retained = 0
             for (pending in uploads) {
+                if (!isCurrentAccount(generation)) break
                 when (uploadPending(pending, apiToken)) {
                     is LinkCreateResult.Created -> uploaded += 1
                     is LinkCreateResult.Failed,
@@ -1079,6 +1174,7 @@ internal class CairnLinksViewModel(
             uiState = uiState.copy(
                 retryingUploads = false,
                 message = when {
+                    !isCurrentAccount(generation) -> uiState.message
                     showSummary && remaining == 0 -> nextMessage("已上传 $uploaded 条本地链接，队列已清空。")
                     showSummary -> nextMessage("已上传 $uploaded 条，另有 $remaining 条保存在本地。")
                     uploaded > 0 -> nextMessage("已自动上传 $uploaded 条本地链接。")
@@ -1095,6 +1191,7 @@ internal class CairnLinksViewModel(
     }
 
     private suspend fun uploadPending(pending: PendingUpload, apiToken: String): LinkCreateResult? {
+        val generation = uiState.accountGeneration
         if (pending.id in uiState.uploadBusyIds) return null
         uiState = uiState.copy(uploadBusyIds = uiState.uploadBusyIds + pending.id)
         val result = withContext(Dispatchers.IO) {
@@ -1110,7 +1207,8 @@ internal class CairnLinksViewModel(
         when (result) {
             is LinkCreateResult.Created -> {
                 runCatching { pendingUploadStore.remove(pending.id) }
-                uiState = uiState.copy(links = uiState.links.upsert(result.link))
+                if (isCurrentAccount(generation)) uiState = uiState.copy(links = uiState.links.upsert(result.link),
+                    searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it })
             }
             is LinkCreateResult.Failed -> {
                 runCatching { pendingUploadStore.recordFailure(pending.id, result.kind) }
@@ -1121,6 +1219,7 @@ internal class CairnLinksViewModel(
     }
 
     private suspend fun loadSearchPage(query: String, beforeId: Int?, append: Boolean) {
+        val generation = uiState.accountGeneration
         val apiToken = currentApiToken()
         val filters = uiState.bookmarkFilters
         if (apiToken.isBlank()) {
@@ -1135,7 +1234,9 @@ internal class CairnLinksViewModel(
             searchLoading = true,
             searchStatusText = if (append) "正在加载更多..." else "正在搜索...",
         )
-        when (val result = withContext(Dispatchers.IO) { repository.listPage(LinkFilter.All, query, apiToken, beforeId, filters) }) {
+        val result = withContext(Dispatchers.IO) { repository.listPage(LinkFilter.All, query, apiToken, beforeId, filters) }
+        if (!isCurrentAccount(generation) || uiState.searchQuery.trim() != query || uiState.bookmarkFilters != filters) return
+        when (result) {
             is LinkPageResult.Loaded -> {
                 if (uiState.searchQuery.trim() != query || uiState.bookmarkFilters != filters || apiToken != currentApiToken()) return
                 val nextItems = if (append) {

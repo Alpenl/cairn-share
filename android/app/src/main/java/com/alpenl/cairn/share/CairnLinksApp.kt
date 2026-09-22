@@ -897,9 +897,10 @@ private fun DetailScreen(
     val enrichment = link?.enrichment
     val readingText = if (showOriginal || enrichment?.translatedText.isNullOrBlank()) enrichment?.originalText.orEmpty() else enrichment?.translatedText.orEmpty()
     val paragraphs = remember(readingText) { readingText.split(Regex("\\n+")).map { it.trim() }.filter { it.isNotEmpty() } }
-    LaunchedEffect(id) {
+    LaunchedEffect(id, state.accountGeneration, link?.enrichment?.cacheIdentity,
+        link?.enrichment?.updatedAt, link?.enrichment?.status, link?.url, link?.note) {
         onEnsureLink(id)
-        onLoadV2(id, false)
+        onLoadV2(id, true)
         onLoadV2Taxonomy()
     }
 

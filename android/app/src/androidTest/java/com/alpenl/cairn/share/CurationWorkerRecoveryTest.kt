@@ -78,6 +78,17 @@ class CurationWorkerRecoveryTest {
         val id = created.getInt("id")
         val model = start()
         waitFor { withContext(Dispatchers.Main) { model.uiState.preferencesLoaded } }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.links.any { it.id == id } } }
+        withContext(Dispatchers.Main) {
+            val identity = model.uiState.links.first { it.id == id }.enrichment!!.cacheIdentity
+            assertNotNull("real Worker list negotiates a recognized cache identity", identity)
+            assertEquals("enrichment_summary", identity!!.representation)
+            model.ensureLink(id)
+        }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.links.first { it.id == id }.enrichment!!.contentLoaded } }
+        withContext(Dispatchers.Main) {
+            assertEquals("enrichment_detail", model.uiState.links.first { it.id == id }.enrichment!!.cacheIdentity!!.representation)
+        }
         withContext(Dispatchers.Main) { model.loadV2Selection(id) }
         waitFor { withContext(Dispatchers.Main) { model.uiState.v2Selections.containsKey(id) } }
         control("offline")

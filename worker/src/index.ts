@@ -44,6 +44,11 @@ type EnrichmentStatus = "pending" | "processing" | "completed" | "failed" | "exh
 type EnrichmentFilter = EnrichmentStatus | "unsupported";
 
 interface EnrichmentListRow {
+  content_revision?: number;
+  personal_revision?: number;
+  app_body_revision?: number;
+  cache_decision_id?: number;
+  cache_entity_revision?: number;
   id: number;
   url: string;
   note: string;
@@ -191,6 +196,18 @@ function contentColumns(summary: boolean): string {
 
 function includeEnrichment(url: URL): boolean {
   return url.searchParams.get("include") === "enrichment";
+}
+
+function includeCacheIdentity(url: URL): boolean {
+  return includeEnrichment(url) && url.searchParams.get("include_cache_identity") === "1";
+}
+
+function cacheIdentityColumns(enabled: boolean): string {
+  // Latest canonical versions are invalidation markers, not provenance of the
+  // legacy classification projection returned alongside them.
+  return enabled ? `, content_revision, app_body_revision, personal_revision,
+    COALESCE((SELECT MAX(d.id) FROM classification_decisions d WHERE d.link_id=links.id),0) AS cache_decision_id,
+    COALESCE((SELECT e.revision FROM entity_states e WHERE e.link_id=links.id),0) AS cache_entity_revision` : "";
 }
 
 type CacheState = "MISS" | "HIT" | "BYPASS";
@@ -463,7 +480,7 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
 
   return cachedJson(request, env, timing, (generation) => listCacheUrl(url, { limit, beforeId, learned, query }, generation), async () => {
     const pageSize = limit + 1;
-    const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}` : ""} FROM links`;
+    const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""} FROM links`;
     const order = "ORDER BY id DESC LIMIT ?";
     const clauses = [...filters.clauses];
     const bindings = [...filters.bindings];
@@ -489,7 +506,7 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
     const rows = result.results ?? [];
     const items = rows.slice(0, limit);
     const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
-    return { items: items.map((row) => enriched ? mapAppLink(row, false) : mapLink(row)), next_before_id: next };
+    return { items: items.map((row) => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row)), next_before_id: next };
   });
 }
 
@@ -497,7 +514,7 @@ async function getLink(request: Request, url: URL, id: number, env: Env, timing:
   return cachedJson(request, env, timing, (generation) => detailCacheUrl(id, url, generation), async () => {
     const row = await timing.measure("db", () =>
       env.DB.prepare(
-        `SELECT ${LINK_COLUMNS}${includeEnrichment(url) ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}` : ""} FROM links WHERE id = ?`
+        `SELECT ${LINK_COLUMNS}${includeEnrichment(url) ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""} FROM links WHERE id = ?`
       )
         .bind(id)
         .first<LinkRow & EnrichmentListRow>()
@@ -506,7 +523,7 @@ async function getLink(request: Request, url: URL, id: number, env: Env, timing:
     if (row === null) {
       return null;
     }
-    return includeEnrichment(url) ? mapAppLink(row, true) : mapLink(row);
+    return includeEnrichment(url) ? mapAppLink(row, true, includeCacheIdentity(url)) : mapLink(row);
   });
 }
 
@@ -592,13 +609,14 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
   }
 
   bindings.push(id);
-  const enriched = includeEnrichment(new URL(request.url));
+  const requestUrl = new URL(request.url);
+  const enriched = includeEnrichment(requestUrl);
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `UPDATE links
         SET ${updates.join(", ")}
         WHERE id = ?
-        RETURNING ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}` : ""}`
+        RETURNING ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(includeCacheIdentity(requestUrl))}` : ""}`
     )
       .bind(...bindings)
       .first<LinkRow & EnrichmentListRow>()
@@ -608,6 +626,14 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     return error("not_found", 404);
   }
   await bumpLinksCacheGeneration(env, timing);
+  if (includeCacheIdentity(requestUrl)) {
+    // SQLite RETURNING precedes AFTER triggers. Read body and identity together
+    // after their revisions have advanced, never attach pre-trigger revisions.
+    const current = await timing.measure("db", () => env.DB.prepare(
+      `SELECT ${LINK_COLUMNS}, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(true)} FROM links WHERE id=?`
+    ).bind(id).first<LinkRow & EnrichmentListRow>());
+    return current ? json(mapAppLink(current, true, true)) : error("not_found", 404);
+  }
   return json(enriched ? mapAppLink(row, true) : mapLink(row));
 }
 
@@ -1448,7 +1474,7 @@ function listCacheUrl(
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
   if (parsed.query !== undefined) url.searchParams.set("q", parsed.query);
-  for (const key of ["include", "curation_status", "topic", "form", "use", "source", "uncertain", "since"]) {
+  for (const key of ["include", "include_cache_identity", "curation_status", "topic", "form", "use", "source", "uncertain", "since"]) {
     const value = requestUrl.searchParams.get(key);
     if (value) url.searchParams.set(key, value);
   }
@@ -1461,6 +1487,7 @@ function detailCacheUrl(id: number, requestUrl: URL, generation: number): string
   url.searchParams.set("v", CACHE_VERSION);
   url.searchParams.set("g", String(generation));
   if (includeEnrichment(requestUrl)) url.searchParams.set("include", "enrichment");
+  if (includeCacheIdentity(requestUrl)) url.searchParams.set("include_cache_identity", "1");
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
 }
@@ -1586,7 +1613,7 @@ function mapLink(row: LinkRow): LinkRecord {
   };
 }
 
-function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean): LinkRecord & { enrichment: Record<string, unknown> } {
+function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean, withIdentity = false): LinkRecord & { enrichment: Record<string, unknown> } {
   return {
     ...mapLink(row),
     enrichment: {
@@ -1602,6 +1629,11 @@ function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean): LinkReco
       updated_at: row.enrichment_updated_at,
       enriched_at: row.enriched_at,
       content_loaded: detail,
+      ...(withIdentity ? { cache_identity: {
+        schema_version: 1, representation: detail ? "enrichment_detail" : "enrichment_summary",
+        content_revision: row.content_revision, body_revision: row.app_body_revision, personal_revision: row.personal_revision,
+        latest_decision_id: row.cache_decision_id, latest_entity_revision: row.cache_entity_revision
+      } } : {}),
       ...(detail ? {
         original_text: row.original_text,
         translated_text: row.translated_text,

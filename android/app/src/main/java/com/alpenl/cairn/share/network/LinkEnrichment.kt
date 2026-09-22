@@ -55,6 +55,30 @@ internal data class FieldOverride(
     }.toString()
 }
 
+internal data class EnrichmentCacheIdentity(
+    val schemaVersion: Int,
+    val representation: String,
+    val contentRevision: Long,
+    val personalRevision: Long,
+    val bodyRevision: Long,
+    // Canonical invalidation markers; not provenance of the legacy projection.
+    val latestDecisionId: Long,
+    val latestEntityRevision: Long,
+)
+
+private fun decodeCacheIdentity(json: JSONObject?): EnrichmentCacheIdentity? {
+    if (json == null) return null
+    val representation = json.optString("representation")
+    if (json.opt("schema_version") != 1 || representation !in setOf("enrichment_summary", "enrichment_detail")) return null
+    fun revision(key: String): Long? {
+        val value = json.opt(key) as? Number ?: return null
+        return value.toLong().takeIf { it >= 0 && it.toDouble() == value.toDouble() }
+    }
+    return EnrichmentCacheIdentity(1, representation, revision("content_revision") ?: return null,
+        revision("personal_revision") ?: return null, revision("body_revision") ?: return null,
+        revision("latest_decision_id") ?: return null, revision("latest_entity_revision") ?: return null)
+}
+
 internal data class LinkEnrichment(
     val status: String = "pending",
     val source: String = "other",
@@ -74,6 +98,8 @@ internal data class LinkEnrichment(
     val entityState: String = "not_run",
     val contentLoaded: Boolean = false,
     val updatedAt: String = "",
+    val cacheIdentity: EnrichmentCacheIdentity? = null,
+    val cacheIdentityPresent: Boolean = false,
 )
 
 internal data class TaxonomyTerm(
@@ -149,12 +175,26 @@ internal fun decodeEnrichment(json: JSONObject): LinkEnrichment = LinkEnrichment
     entityState = json.text("entity_state").ifBlank { "not_run" },
     contentLoaded = json.optBoolean("content_loaded", false),
     updatedAt = json.text("updated_at"),
+    cacheIdentity = decodeCacheIdentity(json.optJSONObject("cache_identity")),
+    cacheIdentityPresent = json.has("cache_identity"),
 )
 
 internal fun SavedLink.retainLoadedContent(previous: SavedLink?): SavedLink {
     val fresh = enrichment ?: return this
     val loaded = previous?.enrichment ?: return this
-    if (fresh.contentLoaded || !loaded.contentLoaded || url != previous.url || note != previous.note ||
+    val freshIdentity = fresh.cacheIdentity
+    val loadedIdentity = loaded.cacheIdentity
+    // A new server supplies explicit representation and material revision. On
+    // older servers only a nonempty equal timestamp can justify body reuse.
+    val sameMaterial = if (freshIdentity != null && loadedIdentity != null) {
+        freshIdentity.schemaVersion == loadedIdentity.schemaVersion &&
+            freshIdentity.representation == "enrichment_summary" &&
+            loadedIdentity.representation in setOf("enrichment_summary", "enrichment_detail") &&
+            freshIdentity.contentRevision == loadedIdentity.contentRevision &&
+            freshIdentity.bodyRevision == loadedIdentity.bodyRevision
+    } else freshIdentity == null && loadedIdentity == null && !fresh.cacheIdentityPresent &&
+        !loaded.cacheIdentityPresent && fresh.updatedAt.isNotBlank()
+    if (!sameMaterial || fresh.contentLoaded || !loaded.contentLoaded || url != previous.url || note != previous.note ||
         fresh.updatedAt != loaded.updatedAt || fresh.status != loaded.status) return this
     return copy(enrichment = fresh.copy(
         originalText = loaded.originalText, translatedText = loaded.translatedText,

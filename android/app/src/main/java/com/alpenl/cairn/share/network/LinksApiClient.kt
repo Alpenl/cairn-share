@@ -85,7 +85,7 @@ internal class LinksApiClient(
     }
 
     fun get(id: Int, apiToken: String): LinkGetResult {
-        val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id?include=enrichment")
+        val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id?include=enrichment&include_cache_identity=1")
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
@@ -146,7 +146,7 @@ internal class LinksApiClient(
         note: String? = null,
         learned: Boolean? = null,
         apiToken: String,
-    ): LinkMutationResult = patch("/api/links/$id?include=enrichment", LinkJson.encodeUpdate(url, note, learned), apiToken)
+    ): LinkMutationResult = patch("/api/links/$id?include=enrichment&include_cache_identity=1", LinkJson.encodeUpdate(url, note, learned), apiToken)
 
     fun curate(id: Int, update: CurationUpdate, apiToken: String): LinkMutationResult =
         patch("/api/links/$id/curation", update.encode(), apiToken)
@@ -206,7 +206,7 @@ internal class LinksApiClient(
     private fun listUrl(filter: LinkFilter, query: String, beforeId: Int?, filters: BookmarkFilters): String {
         val params = mutableListOf(
             "limit=100",
-            "include=enrichment",
+            "include=enrichment", "include_cache_identity=1",
             "learned=${filter.apiValue}",
         )
         if (beforeId != null) {

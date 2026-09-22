@@ -7,7 +7,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.remember
 import com.alpenl.cairn.share.network.QueuedCurationAction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -72,7 +72,11 @@ internal fun MultidimensionalCurationSection(
             TextButton(onClick = onLoadTaxonomy) { Text("加载多维词表") }
             return@Column
         }
-        val effective = draft ?: selection ?: MultidimensionalSelection(available = true)
+        val effective = draft ?: selection
+        if (effective == null) {
+            Text("正在读取整理结果…", modifier = Modifier.testTag("v2_selection_loading"))
+            return@Column
+        }
         if (conflictRevision != null) {
             Column(Modifier.fillMaxWidth().testTag("v2_conflict")) {
                 Text(
@@ -161,7 +165,9 @@ internal fun LegacyCurationRecoveryNotice(
     actions: List<QueuedCurationAction>,
     onRecover: () -> Unit,
 ) {
-    var confirming by rememberSaveable(linkId, accountIdentity) { mutableStateOf(false) }
+    // Consent belongs to this mounted account view. LazyColumn's saveable state
+    // can restore an old open dialog after the account temporarily removes it.
+    var confirming by remember(linkId, accountIdentity) { mutableStateOf(false) }
     Column(Modifier.testTag("v2_legacy_queue")) {
         Text("发现 ${actions.size} 条旧版离线修改，尚未确认账号归属。")
         TextButton(onClick = { confirming = true }, modifier = Modifier.testTag("v2_legacy_review")) {
