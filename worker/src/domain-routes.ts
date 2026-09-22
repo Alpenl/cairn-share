@@ -767,13 +767,20 @@ async function recordOverride(
   operationKey: string, expectedRevision: unknown
 ): Promise<Response> {
   const payloadHash = await sha256Hex(canonicalJSON({ link_id: id, field, term, action }));
-  const existing = await env.DB.prepare(`SELECT id, link_id, field, term, action, revision, payload_hash FROM curation_overrides WHERE operation_key = ?`)
-    .bind(operationKey).first<{ id: number; link_id: number; field: string; term: string; action: string; revision: number; payload_hash: string }>();
-  if (existing) {
-    // Same key, same link and same logical action replays; anything else is a
-    // conflict, never another bookmark's override (R2-12).
+  type StoredOverride = { id: number; link_id: number; field: string; term: string; action: string; revision: number; payload_hash: string };
+  const stored = () => env.DB.prepare(`SELECT id, link_id, field, term, action, revision, payload_hash FROM curation_overrides WHERE operation_key = ?`)
+    .bind(operationKey).first<StoredOverride>();
+  const acknowledge = (existing: StoredOverride, replayed: boolean): Response => {
     if (existing.link_id !== id || existing.payload_hash !== payloadHash) return fail("operation_conflict", 409);
-    return reply({ override: existing, replayed: true });
+    // One receipt shape for first delivery and lost-response recovery. The
+    // nested value remains for older consumers; id is always the bookmark id.
+    return reply({ id, field, term, action, operation_key: operationKey,
+      revision: existing.revision, override: existing, replayed });
+  };
+  const existing = await stored();
+  if (existing) return acknowledge(existing, true);
+  if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || Number(expectedRevision) < 0)) {
+    return fail("invalid_expected_revision");
   }
   const link = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
     .first<{ personal_revision: number }>();
@@ -784,33 +791,41 @@ async function recordOverride(
   // read-then-write and two concurrent writers cannot both succeed (F08).
   const expected = expectedRevision === undefined ? link.personal_revision : Number(expectedRevision);
   if (expected !== link.personal_revision) {
+    const concurrent = await stored();
+    if (concurrent) return acknowledge(concurrent, true);
     return fail("revision_conflict", 409, { revision: link.personal_revision });
   }
   const now = new Date().toISOString();
   const revision = link.personal_revision + 1;
   const guard = `SELECT 1 FROM links WHERE id = ? AND personal_revision = ?`;
+  const accepted = `SELECT 1 FROM curation_overrides WHERE operation_key = ? AND link_id = ? AND revision = ? AND payload_hash = ?`;
   const results = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO curation_overrides(link_id, field, term, action, source, confirmed, revision, operation_key, created_at, payload_hash)
-       SELECT ?, ?, ?, ?, 'human', 1, ?, ?, ?, ? WHERE EXISTS (${guard})`
+       SELECT ?, ?, ?, ?, 'human', 1, ?, ?, ?, ? WHERE EXISTS (${guard})
+       ON CONFLICT(operation_key) DO NOTHING`
     ).bind(id, field, term, action, revision, operationKey, now, payloadHash, id, link.personal_revision),
     env.DB.prepare(
       `INSERT INTO curation_events(link_id, kind, payload, revision, operation_key, created_at)
-       SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (${guard})`
-    ).bind(id, action, canonicalJSON({ field, term }), revision, operationKey + ":event", now, id, link.personal_revision),
-    env.DB.prepare(`UPDATE links SET personal_revision = personal_revision + 1 WHERE id = ? AND personal_revision = ? RETURNING personal_revision`)
-      .bind(id, link.personal_revision)
+       SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (${guard}) AND EXISTS (${accepted})
+       ON CONFLICT(operation_key) DO NOTHING`
+    ).bind(id, action, canonicalJSON({ field, term }), revision, operationKey + ":event", now,
+      id, link.personal_revision, operationKey, id, revision, payloadHash),
+    env.DB.prepare(`UPDATE links SET personal_revision = personal_revision + 1
+      WHERE id = ? AND personal_revision = ? AND EXISTS (${accepted}) RETURNING personal_revision`)
+      .bind(id, link.personal_revision, operationKey, id, revision, payloadHash)
   ]);
   const updated = results[2].results as unknown[];
-  if (updated.length === 0) {
-    // The guarded writes all no-op'd: another writer advanced the revision
-    // between our read and the batch. No side effects were applied.
-    const current = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
-      .first<{ personal_revision: number }>();
-    return fail("revision_conflict", 409, { revision: current?.personal_revision ?? link.personal_revision });
+  // A concurrent identical operation may already have committed. Confirm that
+  // exact receipt before treating a changed mutable revision as a conflict.
+  const receipt = await stored();
+  if (receipt) {
+    if (updated.length > 0) await persistEffective(env, id, revision);
+    return acknowledge(receipt, updated.length === 0);
   }
-  await persistEffective(env, id, revision);
-  return reply({ id, field, term, action, revision, replayed: false });
+  const current = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
+    .first<{ personal_revision: number }>();
+  return fail("revision_conflict", 409, { revision: current?.personal_revision ?? link.personal_revision });
 }
 
 // persistSelectionOverrides translates a whole-selection write into the

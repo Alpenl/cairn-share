@@ -5,6 +5,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.alpenl.cairn.share.network.QueuedCurationAction
+import com.alpenl.cairn.share.network.CurationQueue
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
@@ -20,7 +23,9 @@ private val Context.curationActionDataStore by preferencesDataStore("cairn_curat
  * stable operation key is idempotent and safe to retry. The queue survives a
  * process death so a user edit made offline is not lost.
  */
-internal class CurationActionStore(private val context: Context) {
+internal class CurationActionStore(private val context: Context) : CurationQueue {
+    // Shared by recreated ViewModels; enqueue remains independent of network IO.
+    val syncMutex get() = SYNC_MUTEX
 
     val actions: Flow<List<QueuedCurationAction>> = context.curationActionDataStore.data.map { preferences ->
         CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
@@ -32,21 +37,65 @@ internal class CurationActionStore(private val context: Context) {
             // The same logical action is never queued twice; a retry keeps its
             // original operation key.
             if (current.none { it.operationKey == action.operationKey }) {
-                preferences[ACTIONS_KEY] = CurationActionJson.encode(current + action)
+                val predecessor = current.lastOrNull { it.accountKey == action.accountKey && it.linkId == action.linkId }
+                val queued = if (predecessor == null) action else action.copy(
+                    predecessorKey = predecessor.operationKey, predecessorRevision = null, expectedRevision = null,
+                )
+                preferences[ACTIONS_KEY] = CurationActionJson.encode(current + queued)
             }
         }
     }
 
-    suspend fun remove(operationKey: String) {
+    override suspend fun snapshot(): List<QueuedCurationAction> = actions.first()
+
+    override suspend fun acknowledge(action: QueuedCurationAction, revision: Long) {
+        require(revision > 0)
         context.curationActionDataStore.edit { preferences ->
             val current = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
-            preferences[ACTIONS_KEY] = CurationActionJson.encode(current.filterNot { it.operationKey == operationKey })
+            // A stale drainer cannot remove a rebased or replaced action.
+            check(current.firstOrNull { it.operationKey == action.operationKey } == action)
+            val next = current.filterNot { it.operationKey == action.operationKey }.map {
+                if (it.accountKey == action.accountKey && it.linkId == action.linkId && it.predecessorKey == action.operationKey) {
+                    it.copy(expectedRevision = revision, predecessorRevision = revision)
+                } else it
+            }
+            preferences[ACTIONS_KEY] = CurationActionJson.encode(next)
         }
     }
 
-    suspend fun replace(actions: List<QueuedCurationAction>) {
+    override suspend fun conflict(action: QueuedCurationAction, revision: Long) {
         context.curationActionDataStore.edit { preferences ->
-            preferences[ACTIONS_KEY] = CurationActionJson.encode(actions)
+            val current = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
+            preferences[ACTIONS_KEY] = CurationActionJson.encode(current.map {
+                if (it == action) it.copy(conflictRevision = revision) else it
+            })
+        }
+    }
+
+    /** Called only after the user explicitly chooses to reapply and reloads. */
+    suspend fun rebase(accountKey: String, linkId: Int, revision: Long) {
+        context.curationActionDataStore.edit { preferences ->
+            val current = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
+            val mine = current.filter { it.accountKey == accountKey && it.linkId == linkId }
+            // A repeated tap may arrive after the first resolution completed.
+            if (mine.firstOrNull()?.conflictRevision == null) return@edit
+            var previous: String? = null
+            val next = current.map { action ->
+                if (action.accountKey != accountKey || action.linkId != linkId) action else {
+                    val updated = action.copy(expectedRevision = if (previous == null) revision else null,
+                        predecessorKey = previous, predecessorRevision = null, conflictRevision = null, queueVersion = 1)
+                    previous = action.operationKey
+                    updated
+                }
+            }
+            preferences[ACTIONS_KEY] = CurationActionJson.encode(next)
+        }
+    }
+
+    suspend fun discard(accountKey: String, linkId: Int) {
+        context.curationActionDataStore.edit { preferences ->
+            val current = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
+            preferences[ACTIONS_KEY] = CurationActionJson.encode(current.filterNot { it.accountKey == accountKey && it.linkId == linkId })
         }
     }
 
@@ -55,6 +104,7 @@ internal class CurationActionStore(private val context: Context) {
     }
 
     private companion object {
+        val SYNC_MUTEX = Mutex()
         val ACTIONS_KEY = stringPreferencesKey("curation_actions_json")
     }
 }

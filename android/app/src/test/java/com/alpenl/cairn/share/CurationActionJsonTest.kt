@@ -41,4 +41,16 @@ class CurationActionJsonTest {
         assertEquals(first, accountKeyFor("https://share.example", "token-aaaa"))
         assertTrue(first != second)
     }
+
+    @Test
+    fun `dependency acknowledgement and conflict survive JSON without upgrading legacy rows`() {
+        val pending = QueuedCurationAction(7, "child", "topics", "llm", "reject", 4, "account",
+            predecessorKey = "parent", predecessorRevision = 4, conflictRevision = 5)
+        assertEquals(pending, CurationActionJson.decode(CurationActionJson.encode(listOf(pending))).single())
+        val legacy = CurationActionJson.decode("""[{"link_id":7,"operation_key":"old","field":"topics","term":"llm","action":"accept","expected_revision":0,"account_key":"account"}]""").single()
+        assertEquals(0, legacy.queueVersion)
+        assertEquals(null, legacy.predecessorKey)
+        assertEquals(null, legacy.predecessorRevision)
+        assertEquals(0L, legacy.expectedRevision)
+    }
 }

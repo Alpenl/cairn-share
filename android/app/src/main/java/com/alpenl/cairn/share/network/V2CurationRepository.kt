@@ -89,7 +89,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
             expectedRevision = expectedRevision,
         )
         return when (val result = transport.applyOverride(id, override, apiToken)) {
-            is V2Result.Loaded -> CurationSubmitResult.Applied(result.value.optLong("revision", expectedRevision), result.value)
+            is V2Result.Loaded -> confirmed(result.value, id, override)
             is V2Result.Conflict -> CurationSubmitResult.Conflict(result.revision)
             is V2Result.Unsupported -> CurationSubmitResult.Failed(FailureKind.Server)
             is V2Result.Failed -> when (result.kind) {
@@ -99,29 +99,51 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         }
     }
 
-    /**
-     * Replays queued actions in order. Only a server-confirmed [Applied] result
-     * removes an action: a still-offline [Queued] outcome, a conflict or a
-     * failure keeps the action, its operation key, its expected revision and
-     * the caller's draft, and stops the flush so nothing is reported as synced
-     * while it is not (R2-04).
-     */
-    fun flush(actions: List<QueuedCurationAction>, apiToken: String): List<QueuedCurationAction> {
-        var remaining = actions
-        for (action in actions) {
-            val result = submit(
-                id = action.linkId, field = action.field, term = action.term, action = action.action,
-                expectedRevision = action.expectedRevision ?: 0, apiToken = apiToken,
-                operationKey = action.operationKey,
-            )
-            when (result) {
-                is CurationSubmitResult.Applied -> {
-                    remaining = remaining.filterNot { it.operationKey == action.operationKey }
+    private fun confirmed(payload: org.json.JSONObject, id: Int, sent: FieldOverride): CurationSubmitResult {
+        // Older Workers used a nested override on replay. Accept that explicit
+        // shape only if the receipt still identifies this exact logical action.
+        val receipt = payload.optJSONObject("override") ?: payload
+        val revision = receipt.opt("revision")
+        val link = if (receipt.has("link_id")) receipt.opt("link_id") else receipt.opt("id")
+        val key = payload.opt("operation_key")
+        val valid = revision is Number && revision.toLong() > 0 && revision.toDouble() == revision.toLong().toDouble() &&
+            link is Number && link.toLong() == id.toLong() &&
+            receipt.opt("field") == sent.field && receipt.opt("term") == sent.term && receipt.opt("action") == sent.action &&
+            (key == null || key == sent.operationKey) && payload.opt("replayed") is Boolean &&
+            (!payload.has("revision") || payload.opt("revision") == revision)
+        return if (valid) CurationSubmitResult.Applied((revision as Number).toLong(), payload)
+        else CurationSubmitResult.Failed(FailureKind.Server)
+    }
+
+    /** Each acknowledgement is durable before the next request is sent. */
+    suspend fun flush(
+        queue: CurationQueue,
+        accountKey: String,
+        apiToken: String,
+        active: () -> Boolean = { true },
+        onResult: suspend (QueuedCurationAction, CurationSubmitResult) -> Unit = { _, _ -> },
+    ): CurationFlushResult {
+        val outcomes = mutableListOf<Pair<QueuedCurationAction, CurationSubmitResult>>()
+        while (active()) {
+            val action = queue.snapshot().firstOrNull { it.accountKey == accountKey } ?: break
+            val result = when {
+                action.conflictRevision != null -> CurationSubmitResult.Conflict(action.conflictRevision)
+                !action.ready -> CurationSubmitResult.Failed(FailureKind.Server)
+                else -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    submit(action.linkId, action.field, action.term, action.action,
+                        action.expectedRevision!!, apiToken, action.operationKey)
                 }
-                else -> return remaining
             }
+            when (result) {
+                is CurationSubmitResult.Applied -> queue.acknowledge(action, result.revision)
+                is CurationSubmitResult.Conflict -> queue.conflict(action, result.revision)
+                else -> Unit
+            }
+            outcomes += action to result
+            onResult(action, result)
+            if (result !is CurationSubmitResult.Applied) break
         }
-        return remaining
+        return CurationFlushResult(queue.snapshot().filter { it.accountKey == accountKey }, outcomes)
     }
 
     private fun resolveMulti(current: List<String>, automatic: List<String>, term: String, action: String): List<String> = when (action) {
@@ -150,3 +172,15 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         else -> current
     }
 }
+
+
+internal interface CurationQueue {
+    suspend fun snapshot(): List<QueuedCurationAction>
+    suspend fun acknowledge(action: QueuedCurationAction, revision: Long)
+    suspend fun conflict(action: QueuedCurationAction, revision: Long)
+}
+
+internal data class CurationFlushResult(
+    val remaining: List<QueuedCurationAction>,
+    val outcomes: List<Pair<QueuedCurationAction, CurationSubmitResult>>,
+)

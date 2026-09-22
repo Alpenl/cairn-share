@@ -781,3 +781,51 @@ it("R2-08: the entity success baseline appears in the effective view", async () 
   const restored = await (await request(`v2/links/${id}/effective`, undefined, "GET")).json() as { effective: { entities: string[] } };
   expect(restored.effective.entities).toEqual(["acme"]);
 });
+
+
+it("confirms identical concurrent and lost-response curation with the same operation receipt", async () => {
+  const id = await createLink();
+  const body = { field: "topics", term: "llm", action: "accept", operation_key: "android-first", expected_revision: 0 };
+  const responses = await Promise.all(Array.from({ length: 4 }, () => request(`v2/links/${id}/overrides`, body)));
+  for (const response of responses) {
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id, field: body.field, term: body.term, action: body.action, operation_key: body.operation_key, revision: 1 });
+  }
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_events WHERE link_id=?").bind(id).first("n")).toBe(1);
+  expect((await request(`v2/links/${id}/overrides`, { ...body, term: "eng", operation_key: "web-second", expected_revision: 1 })).status).toBe(200);
+  const replay = await request(`v2/links/${id}/overrides`, body);
+  expect(await replay.json()).toMatchObject({ id, operation_key: "android-first", revision: 1, replayed: true });
+  // Own predecessor acknowledgement only advances to 1; the Web edit at 2
+  // remains a real conflict for the next offline action.
+  const next = await request(`v2/links/${id}/overrides`, { ...body, action: "reject", operation_key: "android-next", expected_revision: 1 });
+  expect(next.status).toBe(409);
+  expect(await next.json()).toMatchObject({ error: "revision_conflict", revision: 2 });
+  expect(await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id).first("personal_revision")).toBe(2);
+});
+
+
+it("allows only authenticated App curation reads and actions on the Android paths", async () => {
+  const id = await createLink();
+  for (const path of ["v2-taxonomy", `bookmarks/${id}/v2-selection`]) {
+    expect((await request(path, undefined, "GET", "app")).status).toBe(200);
+    expect((await request(path, undefined, "GET", "wrong")).status).toBe(401);
+    expect((await request(path, {}, "POST", "app")).status).toBe(405);
+  }
+  const body = { field: "topics", term: "llm", action: "accept", operation_key: "app-owned", expected_revision: 0 };
+  for (const expected_revision of [undefined, null, "0", -1, 0.5]) {
+    expect((await request(`bookmarks/${id}/v2-override`, { ...body, expected_revision }, "POST", "app")).status).toBe(400);
+  }
+  expect((await request(`bookmarks/${id}/v2-override`, body, "POST", "wrong")).status).toBe(401);
+  const first = await request(`bookmarks/${id}/v2-override`, body, "POST", "app");
+  expect(first.status).toBe(200);
+  expect(await first.json()).toMatchObject({ operation_key: "app-owned", revision: 1, replayed: false });
+  expect(await (await request(`bookmarks/${id}/v2-override`, body, "POST", "app")).json()).toMatchObject({ operation_key: "app-owned", revision: 1, replayed: true });
+  expect((await request(`bookmarks/${id}/v2-selection`, {}, "PATCH", "app")).status).toBe(405);
+  for (const path of ["v2/question-specs", `v2/links/${id}/runs`, `v2/links/${id}/evidence-requests`, "v2/taxonomy/proposals"]) {
+    expect((await request(path, {}, "POST", "app")).status).toBe(401);
+  }
+  expect((await request(`bookmarks/${id}/v2-override`, { ...body, field: "why", operation_key: "invalid" }, "POST", "app")).status).toBe(400);
+  const view = await (await request(`bookmarks/${id}/v2-selection`, undefined, "GET", "app")).json() as { revision: number; selection: { topics: string[] } };
+  expect(view.revision).toBe(1);
+  expect(view.selection.topics).toEqual(["llm"]);
+});

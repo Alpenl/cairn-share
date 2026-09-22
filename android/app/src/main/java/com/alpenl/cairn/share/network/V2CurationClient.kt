@@ -38,10 +38,9 @@ internal sealed interface V2Result<out T> {
 }
 
 /**
- * Talks to the v2 multidimensional endpoints through the local dashboard proxy.
- *
- * The proxy is the same-origin Go server, so the App never receives internal
- * management credentials and cannot reach the Worker's admin surface directly.
+ * Talks to the App-scoped multidimensional endpoints on the Worker. The same
+ * read/action contract is also served by the local dashboard. The App never
+ * receives internal management credentials.
  */
 internal class V2CurationClient(
     private val baseUrl: String,
@@ -104,7 +103,10 @@ internal class V2CurationClient(
                 HttpURLConnection.HTTP_CONFLICT -> {
                     val payload = runCatching { JSONObject(connection.errorStream?.bufferedReader()?.readText() ?: "{}") }.getOrNull()
                     if (payload?.optString("error") == "revision_conflict") {
-                        V2Result.Conflict(payload.optLong("revision", 0))
+                        val revision = payload.opt("revision")
+                        if (revision is Number && revision.toLong() >= 0 && revision.toDouble() == revision.toLong().toDouble()) {
+                            V2Result.Conflict(revision.toLong())
+                        } else V2Result.Failed(FailureKind.Server)
                     } else if (payload?.optString("error") == "v2_unsupported") {
                         V2Result.Unsupported
                     } else {
@@ -187,7 +189,13 @@ internal data class QueuedCurationAction(
     val action: String,
     val expectedRevision: Long?,
     val accountKey: String,
+    val predecessorKey: String? = null,
+    val predecessorRevision: Long? = null,
+    val conflictRevision: Long? = null,
+    val queueVersion: Int = 1,
 ) {
+    val ready: Boolean get() = expectedRevision != null && (predecessorKey == null || predecessorRevision != null)
+
     fun encode(): JSONObject = JSONObject().apply {
         put("link_id", linkId)
         put("operation_key", operationKey)
@@ -196,6 +204,10 @@ internal data class QueuedCurationAction(
         put("action", action)
         expectedRevision?.let { put("expected_revision", it) }
         put("account_key", accountKey)
+        put("queue_version", queueVersion)
+        predecessorKey?.let { put("predecessor_key", it) }
+        predecessorRevision?.let { put("predecessor_revision", it) }
+        conflictRevision?.let { put("conflict_revision", it) }
     }
 
     companion object {
@@ -207,6 +219,10 @@ internal data class QueuedCurationAction(
             action = json.optString("action"),
             expectedRevision = if (json.has("expected_revision")) json.optLong("expected_revision") else null,
             accountKey = json.optString("account_key"),
+            predecessorKey = if (json.has("predecessor_key")) json.getString("predecessor_key") else null,
+            predecessorRevision = if (json.has("predecessor_revision")) json.getLong("predecessor_revision") else null,
+            conflictRevision = if (json.has("conflict_revision")) json.getLong("conflict_revision") else null,
+            queueVersion = json.optInt("queue_version", 0),
         )
     }
 }

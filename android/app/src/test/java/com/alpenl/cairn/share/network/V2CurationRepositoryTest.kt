@@ -4,6 +4,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 
 /**
  * B07: the shared action semantics and the offline replay path. These tests are
@@ -15,15 +16,31 @@ class V2CurationRepositoryTest {
     private class FakeTransport(
         var loadResult: V2Result<MultidimensionalSelection> = V2Result.Failed(FailureKind.Network),
         var applyResults: MutableList<V2Result<JSONObject>> = mutableListOf(),
+        val identify: Boolean = true,
     ) : V2Transport {
         val overrides = mutableListOf<FieldOverride>()
         override fun loadSelection(id: Int, apiToken: String) = loadResult
         override fun applyOverride(id: Int, override: FieldOverride, apiToken: String): V2Result<JSONObject> {
             overrides.add(override)
-            return if (applyResults.isEmpty()) V2Result.Loaded(JSONObject().put("revision", 5))
+            val result = if (applyResults.isEmpty()) V2Result.Loaded(JSONObject().put("revision", 5))
             else applyResults.removeAt(0)
+            if (identify && result is V2Result.Loaded) result.value.put("id", id).put("field", override.field)
+                .put("term", override.term).put("action", override.action).put("operation_key", override.operationKey).put("replayed", false)
+            return result
         }
         override fun loadTaxonomy(apiToken: String) = V2Result.Unsupported
+    }
+
+    private class MemoryQueue(var actions: List<QueuedCurationAction>) : CurationQueue {
+        override suspend fun snapshot() = actions
+        override suspend fun acknowledge(action: QueuedCurationAction, revision: Long) {
+            actions = actions.filterNot { it.operationKey == action.operationKey }.map {
+                if (it.predecessorKey == action.operationKey) it.copy(expectedRevision = revision, predecessorRevision = revision) else it
+            }
+        }
+        override suspend fun conflict(action: QueuedCurationAction, revision: Long) {
+            actions = actions.map { if (it.operationKey == action.operationKey) it.copy(conflictRevision = revision) else it }
+        }
     }
 
     private fun selection(
@@ -112,7 +129,7 @@ class V2CurationRepositoryTest {
             QueuedCurationAction(7, "op-a", "topics", "llm", "accept", 9, "account"),
             QueuedCurationAction(7, "op-b", "topics", "eng", "accept", 10, "account"),
         )
-        val remaining = repository.flush(queued, "token")
+        val remaining = runBlocking { repository.flush(MemoryQueue(queued), "account", "token") }.remaining
         assertEquals(listOf("op-b"), remaining.map { it.operationKey })
         assertEquals(listOf("op-a", "op-b"), transport.overrides.map { it.operationKey })
         // A conflict is surfaced, never silently dropped.
@@ -129,7 +146,7 @@ class V2CurationRepositoryTest {
             QueuedCurationAction(7, "op-a", "topics", "llm", "reject", 9, "account"),
             QueuedCurationAction(7, "op-b", "content_functions", "data", "accept", 9, "account"),
         )
-        val remaining = repository.flush(queued, "token")
+        val remaining = runBlocking { repository.flush(MemoryQueue(queued), "account", "token") }.remaining
         // Nothing was confirmed, so nothing may be reported as synced or
         // removed from the durable queue.
         assertEquals(queued, remaining)
@@ -144,7 +161,7 @@ class V2CurationRepositoryTest {
         ))
         val repository = V2CurationRepository(transport)
         val queued = listOf(QueuedCurationAction(7, "op-a", "carriers", "single", "accept", 3, "account"))
-        assertEquals(queued, repository.flush(queued, "token"))
+        assertEquals(queued, runBlocking { repository.flush(MemoryQueue(queued), "account", "token") }.remaining)
     }
 
     @Test
@@ -158,7 +175,7 @@ class V2CurationRepositoryTest {
             QueuedCurationAction(7, "op-a", "topics", "llm", "accept", 9, "account"),
             QueuedCurationAction(7, "op-b", "topics", "eng", "accept", 10, "account"),
         )
-        val remaining = repository.flush(queued, "token")
+        val remaining = runBlocking { repository.flush(MemoryQueue(queued), "account", "token") }.remaining
         assertEquals(listOf("op-b"), remaining.map { it.operationKey })
     }
 
@@ -193,5 +210,42 @@ class V2CurationRepositoryTest {
         val repository = V2CurationRepository(transport)
         val result = repository.submit(7, "topics", "llm", "accept", 3, "token")
         assertEquals(42L, (result as CurationSubmitResult.Conflict).revision)
+    }
+
+    @Test
+    fun `missing malformed and foreign acknowledgements keep the action`() {
+        for (payload in listOf(
+            JSONObject("{}"),
+            JSONObject("""{"id":7,"field":"topics","term":"llm","action":"accept","revision":"1","replayed":true}"""),
+            JSONObject("""{"id":8,"field":"topics","term":"llm","action":"accept","revision":1,"replayed":true}"""),
+            JSONObject("""{"id":7,"field":"topics","term":"llm","action":"accept","revision":1,"replayed":true,"operation_key":"foreign"}"""),
+        )) {
+            val repo = V2CurationRepository(FakeTransport(applyResults = mutableListOf(V2Result.Loaded(payload)), identify = false))
+            assertEquals(CurationSubmitResult.Failed(FailureKind.Server), repo.submit(7, "topics", "llm", "accept", 0, "token", "mine"))
+        }
+    }
+
+    @Test
+    fun `explicit legacy nested replay supplies confirmed revision without guessing`() {
+        val receipt = JSONObject("""{"override":{"link_id":7,"field":"topics","term":"llm","action":"accept","revision":1},"replayed":true}""")
+        val repo = V2CurationRepository(FakeTransport(applyResults = mutableListOf(V2Result.Loaded(receipt)), identify = false))
+        assertEquals(1L, (repo.submit(7, "topics", "llm", "accept", 0, "token", "mine") as CurationSubmitResult.Applied).revision)
+    }
+
+    @Test
+    fun `successor revision advances only from durable predecessor acknowledgement`() = runBlocking {
+        val transport = FakeTransport(applyResults = mutableListOf(V2Result.Loaded(JSONObject().put("revision", 1)), V2Result.Conflict(2)))
+        val queue = MemoryQueue(listOf(
+            QueuedCurationAction(7, "a", "topics", "llm", "accept", 0, "account"),
+            QueuedCurationAction(7, "b", "topics", "llm", "reject", null, "account", predecessorKey = "a"),
+        ))
+        val result = V2CurationRepository(transport).flush(queue, "account", "token")
+        assertEquals(listOf(0L, 1L), transport.overrides.map { it.expectedRevision })
+        assertEquals(1L, result.remaining.single().predecessorRevision)
+        assertEquals(2L, result.remaining.single().conflictRevision)
+        assertEquals(CurationSubmitResult.Conflict(2), result.outcomes.last().second)
+        // Restart never silently adopts the unrelated revision 2.
+        V2CurationRepository(transport).flush(queue, "account", "token")
+        assertEquals(2, transport.overrides.size)
     }
 }

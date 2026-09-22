@@ -132,7 +132,7 @@ class V2CurationInstrumentedTest {
                 return when {
                     path == "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
                     path == "/api/bookmarks/4" -> response(link(4))
-                    path == "/api/bookmarks/4/v2-selection" -> response(selection(3))
+                    path == "/api/bookmarks/4/v2-selection" -> response(selection(if (attempts.get() == 0) 3 else 9))
                     path == "/api/v2-taxonomy" -> response(taxonomy())
                     path == "/api/bookmarks/4/v2-override" -> {
                         val body = JSONObject(request.body.readUtf8())

@@ -88,6 +88,7 @@ interface EnrichmentCountRow {
 
 type ErrorCode =
   | "invalid_json"
+  | "invalid_expected_revision"
   | "invalid_content_type"
   | "invalid_url"
   | "invalid_note"
@@ -295,6 +296,28 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
       return refreshSource(env, Number(refreshMatch[1]));
     }
     return sourceMatch ? sourceRoute(request, env, Number(sourceMatch[1])) : classificationRoute(request, env, path);
+  }
+
+  // App-facing curation is an exact allowlist, never an alias for arbitrary
+  // internal v2 paths. Reads and human field actions do not invoke a model.
+  const appV2 = path.match(/^\/api\/bookmarks\/(\d+)\/(v2-selection|v2-override)$/);
+  if (path === "/api/v2-taxonomy" || appV2) {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    if (path === "/api/v2-taxonomy") {
+      return routeMethod(request, ["GET"], () => taxonomyV2Route(request, env, "/api/v2/taxonomy"));
+    }
+    const [, id, action] = appV2!;
+    if (action === "v2-selection") {
+      return routeMethod(request, ["GET"], () => taxonomyV2Route(request, env, `/api/v2/links/${id}/selection`));
+    }
+    return routeMethod(request, ["POST"], async () => {
+      const body = await request.clone().json().catch(() => null) as Record<string, unknown> | null;
+      if (!body || !Number.isSafeInteger(body.expected_revision) || Number(body.expected_revision) < 0) {
+        return error("invalid_expected_revision", 400);
+      }
+      return domainRoute(request, env, `/api/v2/links/${id}/overrides`);
+    });
   }
 
   // Internal v2 domain API (evidence, specs, runs, decisions, overrides).

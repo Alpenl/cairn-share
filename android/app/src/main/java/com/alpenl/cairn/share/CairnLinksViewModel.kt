@@ -31,6 +31,7 @@ import com.alpenl.cairn.share.network.UpdateApiClient
 import com.alpenl.cairn.share.network.UpdateCheckResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
@@ -171,7 +172,6 @@ internal class CairnLinksViewModel(
     private var automaticUploadRetryStarted = false
     // The serial curation action queue. A pending action is only removed after
     // the server confirms it (R2-04/R2-05).
-    private val pendingV2Actions = mutableListOf<PendingV2Action>()
     private var v2Pumping = false
 
     init {
@@ -186,8 +186,10 @@ internal class CairnLinksViewModel(
     private fun observeCurationActions() {
         viewModelScope.launch {
             curationActionStore.actions.catch { emit(emptyList()) }.collect { actions ->
-                val queued = actions.groupingBy { it.linkId }.eachCount()
-                uiState = uiState.copy(v2Queued = queued)
+                val mine = actions.filter { it.accountKey == curationAccountKey() }
+                val queued = mine.groupingBy { it.linkId }.eachCount()
+                val conflicts = mine.mapNotNull { action -> action.conflictRevision?.let { action.linkId to it } }.toMap()
+                uiState = uiState.copy(v2Queued = queued, v2Conflicts = conflicts)
             }
         }
     }
@@ -202,14 +204,24 @@ internal class CairnLinksViewModel(
     fun loadV2Selection(id: Int, force: Boolean = false) {
         val token = uiState.preferences.apiToken
         if (token.isBlank()) return
-        if (!force && (uiState.v2Drafts.containsKey(id) || (uiState.v2Queued[id] ?: 0) > 0)) return
+        if (!force && uiState.v2Selections.containsKey(id) && (uiState.v2Drafts.containsKey(id) || (uiState.v2Queued[id] ?: 0) > 0)) return
+        val account = curationAccountKey()
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { v2Repository.load(id, token) }
+            if (account != curationAccountKey()) return@launch
             when (result) {
-                is V2Result.Loaded -> uiState = uiState.copy(
-                    v2Selections = uiState.v2Selections + (id to result.value),
-                    v2Available = true,
-                )
+                is V2Result.Loaded -> {
+                    if (result.value.revision < (uiState.v2Selections[id]?.revision ?: 0)) return@launch
+                    val pending = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
+                    val draft = pending.fold(result.value) { current, action ->
+                        v2Repository.applyLocal(current, result.value, action.field, action.term, action.action)
+                    }
+                    uiState = uiState.copy(
+                        v2Selections = uiState.v2Selections + (id to result.value),
+                        v2Drafts = if (pending.isEmpty()) uiState.v2Drafts - id else uiState.v2Drafts + (id to draft),
+                        v2Available = true,
+                    )
+                }
                 V2Result.Unsupported -> uiState = uiState.copy(v2Available = false)
                 else -> Unit
             }
@@ -234,148 +246,117 @@ internal class CairnLinksViewModel(
         }
     }
 
-    /**
-     * Applies one field action. Each new logical action gets its own UUID; a
-     * retry of the same action reuses it. Actions are serialised through a
-     * queue, so a rapid second edit is never dropped while the first is in
-     * flight (R2-05), and the local draft is updated with the same semantics the
-     * server uses.
-     */
+    /** Persist the original intent before the first HTTP attempt. */
     fun applyV2Action(id: Int, field: String, term: String, action: String) {
-        val token = uiState.preferences.apiToken
-        if (token.isBlank()) return
+        if (uiState.preferences.apiToken.isBlank()) return
         val selection = uiState.v2Selections[id] ?: return
-        val current = uiState.v2Drafts[id] ?: selection
-        val draft = v2Repository.applyLocal(current, selection, field, term, action)
-        pendingV2Actions += PendingV2Action(
-            id = id, field = field, term = term, action = action,
-            operationKey = UUID.randomUUID().toString(),
-        )
-        uiState = uiState.copy(
-            v2Drafts = uiState.v2Drafts + (id to draft),
-            v2Busy = uiState.v2Busy + id,
-            v2Conflicts = uiState.v2Conflicts - id,
-        )
-        pumpV2Actions()
+        val account = curationAccountKey()
+        val draft = v2Repository.applyLocal(uiState.v2Drafts[id] ?: selection, selection, field, term, action)
+        val queued = QueuedCurationAction(id, UUID.randomUUID().toString(), field, term, action, selection.revision, account)
+        uiState = uiState.copy(v2Drafts = uiState.v2Drafts + (id to draft), v2Busy = uiState.v2Busy + id)
+        viewModelScope.launch {
+            try {
+                curationActionStore.enqueue(queued)
+                if (account == curationAccountKey()) pumpV2Actions()
+            } catch (error: java.io.IOException) {
+                uiState = uiState.copy(v2Busy = uiState.v2Busy - id,
+                    message = nextMessage("无法保存离线动作，草稿已保留，请重试。"))
+            }
+        }
     }
 
     private fun pumpV2Actions() {
-        if (v2Pumping || pendingV2Actions.isEmpty()) return
+        if (v2Pumping) return
         val token = uiState.preferences.apiToken
         if (token.isBlank()) return
+        val account = curationAccountKey()
         v2Pumping = true
         viewModelScope.launch {
-            while (pendingV2Actions.isNotEmpty()) {
-                val pending = pendingV2Actions.first()
-                val selection = uiState.v2Selections[pending.id] ?: break
-                val result = withContext(Dispatchers.IO) {
-                    v2Repository.submit(
-                        pending.id, pending.field, pending.term, pending.action,
-                        selection.revision, token, pending.operationKey,
-                    )
-                }
-                when (result) {
-                    is CurationSubmitResult.Applied -> {
-                        pendingV2Actions.removeAt(0)
-                        uiState = uiState.copy(
-                            v2Selections = uiState.v2Selections + (pending.id to selection.copy(revision = result.revision)),
-                            v2Busy = if (pendingV2Actions.any { it.id == pending.id }) uiState.v2Busy else uiState.v2Busy - pending.id,
-                        )
-                        if (pendingV2Actions.none { it.id == pending.id }) {
-                            // Reload the server state before dropping the draft,
-                            // so the UI never flickers back to a stale value.
-                            loadV2Selection(pending.id, force = true)
-                            uiState = uiState.copy(v2Drafts = uiState.v2Drafts - pending.id)
-                            uiState = uiState.copy(message = nextMessage("已保存多维整理。"))
+            try {
+                curationActionStore.syncMutex.withLock {
+                    v2Repository.flush(curationActionStore, account, token,
+                        active = { account == curationAccountKey() },
+                    ) { pending, result ->
+                        if (account == curationAccountKey()) {
+                            val selection = uiState.v2Selections[pending.linkId]
+                            when (result) {
+                                is CurationSubmitResult.Applied -> {
+                                    val remaining = curationActionStore.snapshot().any { it.accountKey == account && it.linkId == pending.linkId }
+                                    if (selection != null) {
+                                        val accepted = v2Repository.applyLocal(selection, selection, pending.field, pending.term, pending.action)
+                                        uiState = uiState.copy(v2Selections = uiState.v2Selections + (pending.linkId to accepted.copy(revision = result.revision)))
+                                    }
+                                    if (!remaining) {
+                                        uiState = uiState.copy(v2Drafts = uiState.v2Drafts - pending.linkId,
+                                            v2Conflicts = uiState.v2Conflicts - pending.linkId,
+                                            message = nextMessage("已保存多维整理。"))
+                                        loadV2Selection(pending.linkId, force = true)
+                                    }
+                                }
+                                is CurationSubmitResult.Queued -> uiState = uiState.copy(
+                                    message = nextMessage("网络不可用，动作已保存在离线队列，可稍后重试。"))
+                                is CurationSubmitResult.Conflict -> {
+                                    uiState = uiState.copy(v2Conflicts = uiState.v2Conflicts + (pending.linkId to result.revision),
+                                        message = nextMessage("这条整理已被其他客户端更新。草稿已保留，可重新应用或放弃。"))
+                                    loadV2Selection(pending.linkId, force = true)
+                                }
+                                is CurationSubmitResult.Failed -> uiState = uiState.copy(
+                                    message = nextMessage("保存失败：${failureLabel(result.kind)}；动作已保留。"))
+                            }
                         }
                     }
-                    is CurationSubmitResult.Queued -> {
-                        // Still offline: persist the action with its identity and
-                        // keep the draft; nothing is reported as synced.
-                        curationActionStore.enqueue(
-                            QueuedCurationAction(
-                                linkId = pending.id, operationKey = result.operationKey, field = pending.field,
-                                term = pending.term, action = pending.action,
-                                expectedRevision = selection.revision, accountKey = curationAccountKey(),
-                            ),
-                        )
-                        pendingV2Actions.removeAt(0)
-                        uiState = uiState.copy(
-                            v2Busy = uiState.v2Busy - pending.id,
-                            message = nextMessage("网络不可用，已保存到离线队列，稍后会自动重试。"),
-                        )
-                    }
-                    is CurationSubmitResult.Conflict -> {
-                        // Keep the pending action and the draft; the user must
-                        // explicitly re-apply after adopting the server revision.
-                        uiState = uiState.copy(
-                            v2Busy = uiState.v2Busy - pending.id,
-                            v2Conflicts = uiState.v2Conflicts + (pending.id to result.revision),
-                            message = nextMessage("这条整理已被其他客户端更新。草稿已保留，可重新应用或放弃。"),
-                        )
-                        break
-                    }
-                    is CurationSubmitResult.Failed -> {
-                        uiState = uiState.copy(
-                            v2Busy = uiState.v2Busy - pending.id,
-                            message = nextMessage("保存失败：${failureLabel(result.kind)}"),
-                        )
-                        break
-                    }
                 }
+            } catch (error: java.io.IOException) {
+                if (account == curationAccountKey()) uiState = uiState.copy(message = nextMessage("离线队列读写失败，请重试。"))
+            } finally {
+                v2Pumping = false
+                if (account == curationAccountKey()) uiState = uiState.copy(v2Busy = emptySet())
+                else pumpV2Actions()
             }
-            v2Pumping = false
         }
     }
 
-    /**
-     * Re-applies the preserved actions after adopting the server revision. It
-     * replays the original logical actions (rejects, set_empty, resets and
-     * multi-tag edits included) with their original operation keys instead of
-     * rewriting the draft into accepts (R2-05).
-     */
+    /** Explicit user resolution reloads the server before replaying the intents. */
     fun reapplyV2Draft(id: Int) {
-        val revision = uiState.v2Conflicts[id] ?: return
-        val selection = uiState.v2Selections[id] ?: return
-        uiState = uiState.copy(
-            v2Selections = uiState.v2Selections + (id to selection.copy(revision = revision)),
-            v2Conflicts = uiState.v2Conflicts - id,
-            v2Busy = uiState.v2Busy + id,
-        )
-        pumpV2Actions()
+        if (uiState.v2Conflicts[id] == null) return
+        val account = curationAccountKey()
+        val token = uiState.preferences.apiToken
+        viewModelScope.launch {
+            curationActionStore.syncMutex.withLock {
+                val result = withContext(Dispatchers.IO) { v2Repository.load(id, token) }
+                if (account != curationAccountKey()) return@withLock
+                if (result is V2Result.Loaded) {
+                    curationActionStore.rebase(account, id, result.value.revision)
+                    val actions = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
+                    val draft = actions.fold(result.value) { current, action ->
+                        v2Repository.applyLocal(current, result.value, action.field, action.term, action.action)
+                    }
+                    uiState = uiState.copy(v2Selections = uiState.v2Selections + (id to result.value),
+                        v2Drafts = uiState.v2Drafts + (id to draft), v2Conflicts = uiState.v2Conflicts - id)
+                } else {
+                    uiState = uiState.copy(message = nextMessage("无法读取最新整理，已保留冲突和草稿。"))
+                }
+            }
+            if (account == curationAccountKey()) pumpV2Actions()
+        }
     }
 
     fun discardV2Draft(id: Int) {
-        pendingV2Actions.removeAll { it.id == id }
-        uiState = uiState.copy(
-            v2Drafts = uiState.v2Drafts - id,
-            v2Conflicts = uiState.v2Conflicts - id,
-            v2Busy = uiState.v2Busy - id,
-        )
-        loadV2Selection(id, force = true)
-    }
-
-    /** Flushes the offline queue for the active account. */
-    fun flushV2Queue() {
-        val token = uiState.preferences.apiToken
-        if (token.isBlank()) return
+        val account = curationAccountKey()
         viewModelScope.launch {
-            val all = curationActionStore.actions.catch { emit(emptyList()) }.first()
-            val accountKey = curationAccountKey()
-            val mine = all.filter { it.accountKey == accountKey }
-            if (mine.isEmpty()) return@launch
-            val remaining = withContext(Dispatchers.IO) { v2Repository.flush(mine, token) }
-            val cleared = mine.filterNot { action -> remaining.any { it.operationKey == action.operationKey } }
-            for (action in cleared) curationActionStore.remove(action.operationKey)
-            if (remaining.isEmpty()) {
-                uiState = uiState.copy(message = nextMessage("离线整理已同步。"))
-                uiState = uiState.copy(v2Drafts = emptyMap(), v2Conflicts = emptyMap())
-                uiState.v2Selections.keys.forEach { loadV2Selection(it, force = true) }
-            } else {
-                uiState = uiState.copy(message = nextMessage("仍有 ${remaining.size} 条离线整理未同步。"))
+            curationActionStore.syncMutex.withLock {
+                curationActionStore.discard(account, id)
+                if (account == curationAccountKey()) {
+                    uiState = uiState.copy(v2Drafts = uiState.v2Drafts - id,
+                        v2Conflicts = uiState.v2Conflicts - id, v2Busy = uiState.v2Busy - id)
+                    loadV2Selection(id, force = true)
+                }
             }
         }
     }
+
+    /** Flush only the active account; confirmed actions alone leave the store. */
+    fun flushV2Queue() = pumpV2Actions()
 
     private fun valueOf(selection: MultidimensionalSelection, field: String): List<String> = when (field) {
         "topics" -> selection.topics
@@ -969,7 +950,13 @@ internal class CairnLinksViewModel(
                         searchQuery = restoredQuery,
                     )
                     if (firstLoad || previousToken != preferences.apiToken.trim()) {
+                        uiState = uiState.copy(v2Selections = emptyMap(), v2Drafts = emptyMap(),
+                            v2Conflicts = emptyMap(), v2Busy = emptySet(), v2Queued = emptyMap())
+                        val mine = curationActionStore.snapshot().filter { it.accountKey == curationAccountKey() }
+                        uiState = uiState.copy(v2Queued = mine.groupingBy { it.linkId }.eachCount(),
+                            v2Conflicts = mine.mapNotNull { a -> a.conflictRevision?.let { a.linkId to it } }.toMap())
                         refreshLinks()
+                        pumpV2Actions()
                     }
                     maybeStartAutomaticUploadRetry()
                     if (firstLoad && restoredQuery.isNotBlank()) {
@@ -1263,10 +1250,3 @@ internal class CairnLinksViewModelFactory(
 }
 
 /** One queued logical curation action with its stable operation identity. */
-internal data class PendingV2Action(
-    val id: Int,
-    val field: String,
-    val term: String,
-    val action: String,
-    val operationKey: String,
-)
