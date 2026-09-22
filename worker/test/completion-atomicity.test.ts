@@ -7,7 +7,7 @@ beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST
 
 async function request(path: string, body: unknown, db = env.DB, token = "internal") {
   return worker.fetch(new Request(`https://test.example/api/${path}`, {
-    method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method: "POST", headers: { "X-Cairn-Classification-Budget": "1", Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify(body)
   }), { DB: db, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 }

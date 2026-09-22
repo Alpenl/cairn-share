@@ -1,3 +1,4 @@
+import { classificationBudgetRoute } from "./classification-budget";
 import { readSelectionSnapshot } from "./selection-state";
 import { extensionBudgetRoute } from "./extension-budget";
 import { rerankCacheRoute } from "./rerank-cache";
@@ -37,6 +38,8 @@ async function sha256Hex(value: string): Promise<string> {
 // Internal v2 API. Every route requires the enricher token (enforced by the
 // caller); management-only mutations are additionally documented as such.
 export async function domainRoute(request: Request, env: Env, path: string): Promise<Response> {
+  const classificationBudget = await classificationBudgetRoute(request, env, path);
+  if (classificationBudget) return classificationBudget;
   const cache = await rerankCacheRoute(request, env, path);
   if (cache) return cache;
   const reservation = await extensionBudgetRoute(request, env, path);

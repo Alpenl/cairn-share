@@ -10,7 +10,7 @@ beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST
 
 async function request(path: string, body?: unknown, method = "POST", token = "internal"): Promise<Response> {
   return worker.fetch(new Request(`https://test.example/api/${path}`, {
-    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method, headers: { "X-Cairn-Classification-Budget": "1", Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 }
@@ -37,7 +37,7 @@ it("applies every migration and exposes the v2 tables", async () => {
   }
 });
 
-it("seeds a legacy target so an old consumer keeps working after migration", async () => {
+it("keeps the seeded legacy target readable after migration", async () => {
   const target = await (await request("enrichment/classifications/target", undefined, "GET")).json() as { target: { generation: number; protocol: string } };
   expect(target.target.generation).toBe(0);
   expect(target.target.protocol).toBe("legacy");

@@ -1,3 +1,4 @@
+import { CLASSIFICATION_LIMITS, classificationBudgetAvailable, classificationWindow, validClassificationLimits } from "./classification-budget";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { record, taxonomy, validateClassification } from "./curation";
@@ -13,6 +14,7 @@ const text = (v: unknown, max: number): v is string => typeof v === "string" && 
 // duplicate completion, and those need different recovery. Each code maps to
 // exactly one class and one HTTP status.
 export type ClassificationErrorCode =
+  | "budget_exhausted"
   | "capability_mismatch"
   | "target_changed"
   | "input_changed"
@@ -30,6 +32,7 @@ export type ClassificationErrorCode =
   | "invalid_json";
 
 const ERROR_STATUS: Record<ClassificationErrorCode, number> = {
+  budget_exhausted: 429,
   capability_mismatch: 409,
   target_changed: 409,
   input_changed: 409,
@@ -288,7 +291,9 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     fromQuery.taxonomy_versions = csv("taxonomy_versions");
     fromQuery.policy_versions = csv("policy_versions");
     fromQuery.models = csv("models");
-    return reply({ target, supported: supports(fromQuery, target) });
+    const response = reply({ target, supported: request.headers.get("X-Cairn-Classification-Budget") === "1" && supports(fromQuery, target) });
+    response.headers.set("X-Cairn-Classification-Budget", "1");
+    return response;
   }
   if (path === "/api/enrichment/classifications/target" && request.method === "POST") {
     // Management-only target switch. Guarded by the enricher token in index.ts;
@@ -341,9 +346,13 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     // The consumer declares capabilities; it never defines the target. A
     // mismatch is a component-level condition and must not drain the queue or
     // burn attempts.
-    if (!supports(body as Capabilities, target)) {
+    if (request.headers.get("X-Cairn-Classification-Budget") !== "1" || !supports(body as Capabilities, target)) {
       return fail("capability_mismatch", { target_generation: target.generation, protocol: target.protocol });
     }
+    const budgetLimits = body.budget_limits ?? CLASSIFICATION_LIMITS;
+    if (!validClassificationLimits(budgetLimits)) return fail("invalid_classification_config");
+    if (!await classificationBudgetAvailable(env, budgetLimits)) return fail("budget_exhausted");
+    const budgetWindow = classificationWindow();
     const token = crypto.randomUUID();
     const until = new Date(Date.now() + 15 * 60_000).toISOString();
     await env.DB.prepare(`UPDATE classification_jobs SET status='exhausted', lease_token=NULL, lease_until=NULL,
@@ -385,6 +394,8 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         AND content_revision=(SELECT content_revision FROM links WHERE id=classification_jobs.link_id)),'')
       WHERE link_id=(SELECT j.link_id FROM classification_jobs j JOIN links l ON l.id=j.link_id
         WHERE COALESCE(l.original_text,'')<>'' AND l.curation_status<>'drop'
+        AND (SELECT COUNT(*) FROM budget_ledger b WHERE b.scope='classification_item' AND b.link_id=j.link_id AND b.created_at>=? AND b.created_at<?) < ?
+        AND (SELECT COALESCE(SUM(json_extract(b.units,'$.tokens')),0) FROM budget_ledger b WHERE b.scope='classification_item' AND b.link_id=j.link_id AND b.created_at>=? AND b.created_at<?)+65536 <= ?
         AND (?=1 OR EXISTS (SELECT 1 FROM evidence_snapshots s
           WHERE s.link_id=l.id AND s.content_revision=l.content_revision AND s.completeness<>'empty'
           AND EXISTS (SELECT 1 FROM json_each(s.payload,'$.blocks') b
@@ -395,11 +406,15 @@ export async function classificationRoute(request: Request, env: Env, path: stri
             OR (j.status='processing' AND j.lease_until<=?))))
         ORDER BY COALESCE(j.updated_at,''), j.link_id LIMIT 1)
       AND (SELECT generation FROM classification_target_state WHERE id=1)=?
+      AND (SELECT COUNT(*) FROM budget_ledger b WHERE b.scope='classification_global' AND b.created_at>=? AND b.created_at<?) < ?
+      AND (SELECT COALESCE(SUM(json_extract(b.units,'$.tokens')),0) FROM budget_ledger b WHERE b.scope='classification_global' AND b.created_at>=? AND b.created_at<?)+65536 <= ?
       RETURNING link_id AS id, revision, input_revision, attempts AS attempt, lease_token, lease_until,
                 target_generation, spec_id, content_revision, evidence_snapshot_id, evidence_hash`)
       .bind(target.generation, token, until,
         target.generation, target.spec_id, boundTaxonomy, boundPolicy, boundModel, now,
-        isLegacy ? 1 : 0, now, target.generation, now, now, target.generation)
+        budgetWindow.start, budgetWindow.end, budgetLimits.max_calls_per_item, budgetWindow.start, budgetWindow.end, budgetLimits.max_tokens_per_item,
+        isLegacy ? 1 : 0, now, target.generation, now, now, target.generation,
+        budgetWindow.start, budgetWindow.end, budgetLimits.max_calls_total, budgetWindow.start, budgetWindow.end, budgetLimits.max_tokens)
       .first<{ id: number; revision: number; content_revision: number; evidence_snapshot_id: number | null; evidence_hash: string }>();
     if (!job) return new Response(null, { status: 204, headers });
     const source = await env.DB.prepare(`SELECT l.url,l.note,l.original_text,l.related_links,

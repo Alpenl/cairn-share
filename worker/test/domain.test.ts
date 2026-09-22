@@ -12,14 +12,14 @@ beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST
 
 async function request(path: string, body?: unknown, method = "POST", token = "internal"): Promise<Response> {
   return worker.fetch(new Request(`https://test.example/api/${path}`, {
-    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method, headers: { "X-Cairn-Classification-Budget": "1", Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 }
 
 async function createLink(): Promise<number> {
   const response = await worker.fetch(new Request("https://test.example/api/links", {
-    method: "POST", headers: { Authorization: "Bearer app", "Content-Type": "application/json" },
+    method: "POST", headers: { "X-Cairn-Classification-Budget": "1", Authorization: "Bearer app", "Content-Type": "application/json" },
     body: JSON.stringify({ url: "https://x.com/a/status/1" })
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
   return (await response.json() as { id: number }).id;
