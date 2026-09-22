@@ -201,3 +201,17 @@ it('real decision and override writes invalidate filter caches while retaining l
     await read(query,expected);
   }
 },15_000);
+
+it('confirms explicitly negotiated filters without changing old shapes or sharing their cache entry',async()=>{
+  await fixture();
+  for(const [route,token] of [['links','app'],['enrichment/jobs','internal']]) {
+    const old=await request(`${route}?topics=eng`,undefined,token);
+    expect(await old.json()).not.toHaveProperty('filter_contract_version');
+    const confirmed=await request(`${route}?topics=eng&filter_contract_version=1`,undefined,token);
+    expect(confirmed.status).toBe(200);
+    expect(await confirmed.json()).toHaveProperty('filter_contract_version',1);
+    if(route==='links') expect(confirmed.headers.get('X-Cairn-Cache')).toBe('MISS');
+    for(const value of ['', '2', '1&filter_contract_version=1'])
+      expect((await request(`${route}?topics=eng&filter_contract_version=${value}`,undefined,token)).status).toBe(400);
+  }
+});

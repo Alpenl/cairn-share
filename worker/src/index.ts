@@ -507,7 +507,8 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
     const rows = result.results ?? [];
     const items = rows.slice(0, limit);
     const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
-    return { items: items.map((row) => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row)), next_before_id: next };
+    return { items: items.map((row) => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row)), next_before_id: next,
+      ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {}) };
   });
 }
 
@@ -763,7 +764,8 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   return json({
     items: items.map((row) => ({ ...mapEnrichmentListItem(row), ...(summary ? { content_loaded: false } : {}) })),
     next_before_id: next,
-    counts: mapEnrichmentCounts(countRow)
+    counts: mapEnrichmentCounts(countRow),
+    ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {})
   });
 }
 

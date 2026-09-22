@@ -75,9 +75,11 @@ automatic AS (
 SELECT field,term FROM effective`;
 
 const dimensions = ["topics", "content_functions", "carriers", "affordances"] as const;
-export const SELECTION_FILTER_KEYS = ["topic", "form", "use", ...dimensions, "entity_state"];
+export const SELECTION_FILTER_KEYS = ["filter_contract_version", "topic", "form", "use", ...dimensions, "entity_state"];
 
 export function selectionFilters(params: URLSearchParams): { clauses: string[]; bindings: string[] } | null {
+  if (params.has("filter_contract_version") &&
+      (params.getAll("filter_contract_version").length !== 1 || params.get("filter_contract_version") !== "1")) return null;
   const groups: Array<{ field: string; terms: string[] }> = [];
   for (const key of ["topic", "form", "use", ...dimensions] as const) {
     if (!params.has(key)) continue;
