@@ -99,4 +99,25 @@ The existing App selection endpoint accepts `include_state=1`; default response 
 
 `state.fields` separates automatic lifecycle/candidates from effective per-term origin and active override controls. Only explicit confirmed human records carry confirmed=true; reset removes the relevant source according to the same existing action fold. Legacy unknown remains unconfirmed. `state.entities` uses its own snapshot/revision/hash, not classification freshness. Source completeness and actual decision input/answer coverage are separate; partial input stays visible even when the original source archive is complete. The App shows unsynchronized fields as pending and exports them without confirmed provenance. Metadata is read-only and exposes no internal management permissions.
 
-This change does not certify the full B07 matrix. In particular, the pre-existing set_empty followed by per-term reset behavior still needs coordinated Go/Worker/Android correction; whole-field reset tests do not prove that branch. Full old/new/flag-off compatibility, evidence block navigation and remaining account/search races stay on the original acceptance checklist.
+This change does not certify the full B07 matrix. Full old/new/flag-off compatibility, evidence block navigation and remaining account/search races stay on the original acceptance checklist.
+
+## Individual reset after explicit empty (2026-09-22)
+
+Go and Worker clear the explicit-empty bit when a term reset follows set_empty,
+while retaining the automatic-value barrier and admitting only that term. The
+restored value remains unconfirmed automatic input. A reset of an absent term
+also ends explicit empty; it does not invent a value. Whole-field reset still
+removes the entire barrier.
+
+Migration 0024 aligns entity search with this fold, including historical singular
+field aliases and revision/id ordering. It repairs only existing cache fields
+affected by the old empty bit, including captured legacy-empty barriers. It
+preserves canonical histories, personal/content revisions and unrelated cached
+values; curation projection writes advance their epoch to bypass legacy capture.
+The migration is tested against 95 historical records and has not run in
+production. The App's real offline reset and process recovery are exercised
+against Worker/D1, in addition to 33 shared Go/Worker action vectors.
+
+The current v2 filter helper is not wired into the list routes. Legacy filters
+still use the bounded v1 projection; fourth-topic and hidden-dimension filtering
+remain original-scope work, separate from this repair.
