@@ -6,7 +6,7 @@ import { taxonomyV2 } from "./taxonomy-v2";
 import { storedClassification, taxonomy } from "./curation";
 import {
   canonicalJSON, contentHash, effectiveView, EMPTY_AUTOMATIC, normalizeField, objectivePayload,
-  semanticSpecHash, snapshotCompleteness, validOverride, validQuestionSpec, validSnapshot, validAssessment,
+  semanticSpecHash, snapshotCompleteness, objectiveUseAllowed, validOverride, validQuestionSpec, validSnapshot, validAssessment,
   type AutomaticView, type EvidenceSnapshot, type EffectiveView, type Override, type OverrideAction,
   type OverrideField, type QuestionSpec
 } from "./domain";
@@ -723,6 +723,7 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
 }
 
 function normalizeAutomatic(value: Record<string, unknown>): AutomaticView | null {
+  if (!objectiveUseAllowed(value)) return null;
   if (value.assessment !== undefined && !validAssessment(value.assessment)) return null;
   const list = (entry: unknown): string[] | null =>
     Array.isArray(entry) && entry.every((item) => typeof item === "string") ? entry as string[] : null;

@@ -339,3 +339,27 @@ it("keeps the target read and claim guard atomic under concurrent claims", async
   const rows = await env.DB.prepare("SELECT lease_token FROM classification_jobs WHERE link_id=?").bind(id).all<any>();
   expect(rows.results.filter((r) => r.lease_token === leases[0].lease_token).length).toBe(1);
 });
+
+it("objective classification rejects personal opposition without side effects", async () => {
+ const {id}=await setup(); const job=await claim(); const body=completion(job);
+ body.result.classification.use="contra";
+ const before=await env.DB.prepare("SELECT classification,curation,personal_revision FROM links WHERE id=?").bind(id).first();
+ expect((await request(`enrichment/classifications/${id}/complete`,body)).status).toBe(400);
+ expect(await env.DB.prepare("SELECT classification,curation,personal_revision FROM links WHERE id=?").bind(id).first()).toEqual(before);
+ expect(await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first("status")).toBe("processing");
+ expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM classification_runs WHERE link_id=?").bind(id).first("n")).toBe(0);
+ expect((await request(`enrichment/classifications/${id}/complete`,completion(job))).status).toBe(200);
+});
+
+it("objective guard preserves explicit human opposition and historical readable values", async () => {
+ const {id}=await setup();
+ const manual={topics:["eng"],form:"case",use:"contra"};
+ expect((await request(`enrichment/jobs/${id}/curation`,{why:"explicit human choice",classification:manual},"PATCH")).status).toBe(200);
+ const job=await claim();
+ expect((await request(`enrichment/classifications/${id}/complete`,completion(job))).status).toBe(200);
+ const row=await env.DB.prepare("SELECT curation,classification FROM links WHERE id=?").bind(id).first<any>();
+ expect(JSON.parse(row.curation)).toEqual(manual);
+ expect(JSON.parse(row.classification).use).toBe("try");
+ const effective=await (await request(`v2/links/${id}/effective`,undefined,"GET")).json() as any;
+ expect(effective.effective.use).toBe("contra");
+});

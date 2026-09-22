@@ -44,9 +44,13 @@ export function validateSelection(value: unknown, stored = false): Selection | n
   return { topics: value.topics, form: value.form, use: value.use };
 }
 
+// Reserved legacy stance: retain for explicit human selection and historical
+// reading, never accept it as a newly generated objective classification.
+export function personalUse(value: unknown): boolean { return value === "contra"; }
+
 export function validateClassification(value: unknown, stored = false): Classification | null {
   const selection = validateSelection(value, stored);
-  if (selection === null || !record(value) || typeof value.why_suggestion !== "string" ||
+  if (selection === null || (!stored && personalUse(selection.use)) || !record(value) || typeof value.why_suggestion !== "string" ||
     Array.from(value.why_suggestion).length > 200 || !stringArray(value.entities, 10, 80) ||
     typeof value.uncertainty !== "boolean" || typeof value.taxonomy_version !== "string" ||
     value.taxonomy_version.length > 64 || (!stored && value.taxonomy_version !== taxonomy.version) ||

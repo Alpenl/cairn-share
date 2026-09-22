@@ -2,7 +2,7 @@
 // overrides. Everything here is shared by the Worker route handlers and the
 // cross-language golden vectors, so the canonicalisation rules live in one
 // place and Go can be checked against the same bytes.
-import { record, taxonomy } from "./curation";
+import { personalUse, record, taxonomy } from "./curation";
 import { validV2Term } from "./taxonomy-v2";
 
 export const CONTENT_HASH_ALGORITHM = "sha256";
@@ -329,6 +329,17 @@ export function validAssessment(value: unknown): value is Assessment {
         typeof decision.probability === "number" && Number.isFinite(decision.probability) &&
         decision.probability >= 0 && decision.probability <= 1;
     });
+}
+
+// Validate only new automatic writes. Historical records remain unchanged and
+// readable; explicit human overrides are governed by their separate contract.
+export function objectiveUseAllowed(value: Record<string, unknown>): boolean {
+  if (personalUse(value.use)) return false;
+  if (value.assessment === undefined) return true;
+  if (!validAssessment(value.assessment)) return false;
+  return !value.assessment.decisions.some(decision =>
+    normalizeField(decision.dimension) === "use" && decision.verdict === "accepted" &&
+    [decision.value, decision.term_id, decision.candidate].some(personalUse));
 }
 
 export function effectiveOrigins(view: EffectiveView, overrides: Override[], automaticOrigin: "automatic" | "legacy_unknown") {

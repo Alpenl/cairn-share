@@ -1,7 +1,7 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { taxonomy, type Classification } from "../src/curation";
+import { storedClassification, validateClassification, taxonomy, type Classification } from "../src/curation";
 
 const token = "curation-test-token";
 const appToken = "curation-app-token";
@@ -168,4 +168,12 @@ describe("bookmark curation", () => {
     await request(`/api/enrichment/jobs/${id}/curation`, "PATCH", { curation_status: "inbox" });
     expect((await request("/api/enrichment/jobs/claim", "POST")).status).toBe(200);
   });
+});
+
+it("personal use stays readable as historical data while new model writes reject it",()=>{
+ const old=classification({use:"contra"});
+ expect(validateClassification(old)).toBeNull();
+ expect(validateClassification(old,true)?.use).toBe("contra");
+ expect(storedClassification(JSON.stringify(old),null)?.use).toBe("contra");
+ expect(storedClassification(JSON.stringify(classification()),JSON.stringify({topics:[],form:"",use:"contra"}))?.use).toBe("contra");
 });

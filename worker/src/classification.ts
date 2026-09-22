@@ -1,7 +1,7 @@
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { record, taxonomy, validateClassification } from "./curation";
-import { validAssessment, type AutomaticView } from "./domain";
+import { objectiveUseAllowed, validAssessment, type AutomaticView } from "./domain";
 import { decisionInsertStatement, rebuildProjection, runInsertStatement, type WriteGuard } from "./domain-routes";
 
 const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
@@ -161,7 +161,7 @@ async function idempotent<T extends { id: number }>(
 // stores it as the automatic baseline and re-applies the stored human
 // overrides deterministically (F07).
 function automaticView(value: unknown): AutomaticView | null {
-  if (!record(value)) return null;
+  if (!record(value) || !objectiveUseAllowed(value)) return null;
   const list = (entry: unknown, max: number): string[] | null => {
     if (entry === undefined) return [];
     if (!Array.isArray(entry) || entry.length > max) return null;

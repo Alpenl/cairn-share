@@ -231,3 +231,12 @@ it("R3-12: migration preserves known legacy references without inventing a compl
   const refs = await env.DB.prepare("SELECT run_id FROM classification_decision_runs ORDER BY decision_id").all();
   expect(refs.results.map(row => row.run_id)).toEqual(ids);
 });
+
+it.each(["value","assessment"])("objective replay rejects personal opposition in %s before writing",async(where)=>{
+ const {id,body}=await setup();
+ const automatic=where==="value"?{...body.automatic,use:"contra"}:{...body.automatic,assessment:{version:1,decisions:[{dimension:"use",value:"contra",candidate:"contra",verdict:"accepted",probability:.99,reason:"unsafe old objective decision"}],incomplete:[]}};
+ expect((await call(`v2/links/${id}/decisions`,{...body,automatic})).status).toBe(400);
+ expect(await count("classification_decisions")).toBe(0);expect(await count("classification_decision_runs")).toBe(0);
+ expect(await count("current_projections")).toBe(0);
+ expect((await call(`v2/links/${id}/decisions`,body)).status).toBe(200);
+});
