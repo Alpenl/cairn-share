@@ -77,7 +77,7 @@ describe("App enrichment integration", () => {
     expect(stillOld.enrichment).not.toHaveProperty("cache_identity");
     // Reading aids can change independently of source bytes, with identical dates.
     const bodyRevision = next.enrichment.cache_identity.body_revision;
-    await env.DB.prepare("UPDATE links SET translated_text='new translation', related_links='[]', images='[]' WHERE id=?").bind(id).run();
+    await env.DB.prepare("UPDATE links SET translated_text='new translation', images='[]' WHERE id=?").bind(id).run();
     const translated = await (await request(oldDetail + "&include_cache_identity=1", "PATCH", { learned: true })).json() as any;
     expect(translated.enrichment.cache_identity.content_revision).toBe(original + 1);
     expect(translated.enrichment.cache_identity.body_revision).toBe(bodyRevision + 1);

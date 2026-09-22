@@ -1,3 +1,4 @@
+import { pruneEntityCache } from "./entity-cache";
 import { pruneRerankCache } from "./rerank-cache";
 // Durable R2 deletion after the D1 transaction. All work is bounded per tick.
 // Retained numeric tombstones also cover a Worker dying during a late R2 put.
@@ -26,6 +27,7 @@ export async function cleanupDeletedImages(env: PrivacyEnv, id: number, now = Da
 
 export async function maintainPrivacy(env: PrivacyEnv, now = Date.now()): Promise<void> {
   await pruneRerankCache(env);
+  await pruneEntityCache(env);
   const due = await env.DB.prepare("SELECT link_id FROM privacy_deletions WHERE next_cleanup_at<=? AND NOT EXISTS (SELECT 1 FROM links WHERE id=privacy_deletions.link_id) ORDER BY next_cleanup_at,link_id LIMIT 20")
     .bind(new Date(now).toISOString()).all<{link_id:number}>();
   for (const row of due.results) await cleanupDeletedImages(env, row.link_id, now);

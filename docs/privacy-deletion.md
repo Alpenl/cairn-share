@@ -42,3 +42,16 @@ The internal rerank cache stores the exact private provider request and answer d
 Entries have a fixed 24-hour lifetime from claim, including pending and failed entries; hits never extend it and unknown outcomes are not re-granted within that window. Reads reject expiry immediately. Claim and the existing five-minute privacy Cron each prune at most 100 expired entries; claim also atomically removes its own expired key before allocation. The cache has a deployment cap of 200 entries. Physical purge can lag during missed invocations or an outage; the lifetime is not a physical-purge SLA. An old cache writer cannot complete after a canonical revision change or deletion. Migration 0027 also advances personal revisions for note/why/curation status edits and body revisions for title/summary/status/URL edits; same-value writes do not advance them.
 
 Apply 0027 before deploying the new Worker. On rollback keep the migration and compatible cache maintenance, disable reranking before reverting the consumer, and do not claim that an older enabled consumer preserves result deduplication. No destructive down migration or production migration was performed for this change.
+
+
+## 0028 实体判断缓存
+
+`entity_cache` 私有保存实际模型请求、候选与精确原文位置、原始 Noul 判断和绑定快照身份。
+仅 enricher token 可访问；收藏或证据快照删除通过外键级联清除整条记录。全表删除测试
+实际填充该表后核对清零，匿名全局预算不退回。
+
+从首次 claim 固定 24 小时，命中不续期；200 项上限、请求及隐私 Cron 每次最多清理
+100 条，当前过期 key 在 claim 事务中单独删除。过期即拒读，物理删除时间受停机影响；
+不把缓存期限扩展宣称为历史 run/evidence 的保留策略。旧消费者回退前关闭实体扩展，
+保留兼容 Worker/迁移与清理任务。0028 还补来源链接单独变化时的内容版本失效，
+保护旧实体状态及异步写回；同值来源与人工备注不会额外推进该版本。未执行生产迁移。
