@@ -839,10 +839,16 @@ it("returns the independent automatic baseline with the effective App selection"
     { field, term, action, operation_key: `baseline-${revision}`, expected_revision: revision }, "POST", "app");
   expect((await post("topics", "", "set_empty", 0)).status).toBe(200);
   expect((await post("topics", "eng", "accept", 1)).status).toBe(200);
-  const read = async () => (await request(`bookmarks/${id}/v2-selection`, undefined, "GET", "app")).json() as Promise<{
+  const read = async () => (await request(`bookmarks/${id}/v2-selection?include_automatic=1`, undefined, "GET", "app")).json() as Promise<{
     revision: number; selection: { topics: string[] }; automatic: { topics: string[]; form: string }
   }>;
   const before = await read();
+  // Strict old readers never opted in to the new response field.
+  for (const path of [`bookmarks/${id}/v2-selection`, `v2/links/${id}/selection`]) {
+    const old = await (await request(path, undefined, "GET", path.startsWith("v2/") ? "internal" : "app")).json() as Record<string, unknown>;
+    expect(old).not.toHaveProperty("automatic");
+    expect(old.selection).toEqual(before.selection);
+  }
   expect(before.selection.topics).toEqual(["eng"]);
   expect(before.automatic).toEqual({ topics: ["llm"], content_functions: [], carriers: [], affordances: [], form: "method", use: "try" });
   expect((await post("topics", "", "reset", 2)).status).toBe(200);

@@ -54,7 +54,7 @@ class CurationWorkerRecoveryTest {
     }
 
     private fun control(mode: String, key: String = "") = http("/__test/control", JSONObject().put("mode", mode).put("key", key))
-    private fun remote(id: Int) = http("/__test/direct/api/bookmarks/$id/v2-selection")
+    private fun remote(id: Int) = http("/__test/direct/api/bookmarks/$id/v2-selection?include_automatic=1")
 
     private suspend fun start(): CairnLinksViewModel = withContext(Dispatchers.Main) {
         CairnLinksViewModel(

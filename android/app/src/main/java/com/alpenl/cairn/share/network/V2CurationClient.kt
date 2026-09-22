@@ -65,7 +65,7 @@ internal class V2CurationClient(
     }
 
     fun loadSelection(id: Int, apiToken: String): V2Result<MultidimensionalSelection> {
-        val connection = endpoint("/api/bookmarks/$id/v2-selection").openConnection() as HttpURLConnection
+        val connection = endpoint("/api/bookmarks/$id/v2-selection?include_automatic=1").openConnection() as HttpURLConnection
         return try {
             configure(connection, "GET", apiToken)
             when (val status = connection.responseCode) {
