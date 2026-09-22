@@ -548,31 +548,37 @@ export function runInsertStatement(env: Env, run: {
 export function decisionInsertStatement(env: Env, decision: {
   linkId: number; runOperationKey: string; contentRevision: number; policyVersion: string; policy: unknown;
   automatic: AutomaticView; operationKey: string; createdAt: string; payloadHash: string;
+  runIDs?: number[]; personalRevision?: number;
 }, guard: WriteGuard): D1PreparedStatement {
   // The run is appended in the same batch, so its id is resolved by the
   // operation key rather than by a pre-read that a concurrent writer could
   // invalidate; the same guard proves the run actually landed.
   return env.DB.prepare(
-    `INSERT INTO classification_decisions(link_id, run_id, content_revision, policy_version, policy, automatic, operation_key, created_at, payload_hash)
-     SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ? FROM classification_runs r WHERE r.operation_key = ? AND ${guard.sql}
-     RETURNING id`
+    `INSERT INTO classification_decisions(link_id, run_id, content_revision, policy_version, policy, automatic, operation_key, created_at, payload_hash,
+       run_ids, run_references_complete, expected_personal_revision, payload_version)
+     SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, json_array(r.id)), 1, ?, 1
+     FROM classification_runs r WHERE r.operation_key = ? AND ${guard.sql}
+     ON CONFLICT(operation_key) DO NOTHING RETURNING id`
   ).bind(decision.linkId, decision.contentRevision, decision.policyVersion,
     canonicalJSON(decision.policy), canonicalJSON(decision.automatic), decision.operationKey,
-    decision.createdAt, decision.payloadHash, decision.runOperationKey, ...guard.bindings);
+    decision.createdAt, decision.payloadHash, decision.runIDs ? JSON.stringify(decision.runIDs) : null,
+    decision.personalRevision ?? null, decision.runOperationKey, ...guard.bindings);
 }
 
 // --- Decisions --------------------------------------------------------------
 
 async function latestDecision(env: Env, id: number): Promise<Response> {
   const row = await env.DB.prepare(
-    `SELECT d.id, d.run_id, d.content_revision, d.policy_version, d.policy, d.automatic, d.created_at,
+    `SELECT d.id, d.run_id, COALESCE(d.run_ids, json_array(d.run_id)) AS run_ids, d.run_references_complete,
+            d.expected_personal_revision, d.content_revision, d.policy_version, d.policy, d.automatic, d.created_at,
             r.spec_id, r.spec_hash, r.requested_model, r.resolved_model, r.coverage
      FROM classification_decisions d JOIN classification_runs r ON r.id = d.run_id
      WHERE d.link_id = ? ORDER BY d.id DESC LIMIT 1`).bind(id)
     .first<Record<string, unknown>>();
   if (!row) return fail("not_found", 404);
   return reply({
-    ...row, policy: parseJSON(String(row.policy), {}), automatic: parseJSON(String(row.automatic), EMPTY_AUTOMATIC)
+    ...row, run_ids: parseJSON(String(row.run_ids), []), run_references_complete: row.run_references_complete === 1,
+    policy: parseJSON(String(row.policy), {}), automatic: parseJSON(String(row.automatic), EMPTY_AUTOMATIC)
   });
 }
 
@@ -581,85 +587,133 @@ async function latestDecision(env: Env, id: number): Promise<Response> {
 // re-derives the effective view from the stored overrides itself and writes the
 // decision under the same in-transaction guard as the rest of the domain
 // (R2-01/R2-02/R2-12). A caller-supplied `effective` is never trusted.
+interface DecisionRun {
+  id: number; content_revision: number; spec_id: string; spec_hash: string; requested_model: string;
+  resolved_model: string; coverage: string; status: string; operation_key: string; target_generation: number;
+  evidence_snapshot_id: number | null; source_hash: string | null; raw_judgments: string | null;
+}
+
 async function submitDecision(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
-  const runIDs = body.run_ids;
-  if (!Array.isArray(runIDs) || runIDs.length === 0 || !runIDs.every((value) => Number.isSafeInteger(value))) {
+  if (!Array.isArray(body.run_ids) || body.run_ids.length === 0 || body.run_ids.length > 64 ||
+      !body.run_ids.every((value) => Number.isSafeInteger(value) && value > 0) ||
+      new Set(body.run_ids).size !== body.run_ids.length || !text(body.policy_version, 100) ||
+      typeof body.automatic !== "object" || body.automatic === null || Array.isArray(body.automatic)) {
     return fail("invalid_decision");
   }
-  if (!text(body.policy_version, 100) || typeof body.automatic !== "object" || body.automatic === null) {
-    return fail("invalid_decision");
+  for (const field of ["expected_revision", "content_revision"] as const) {
+    if (body[field] !== undefined && (!Number.isSafeInteger(body[field]) || Number(body[field]) < 0)) return fail("invalid_decision");
   }
+  for (const [field, max] of [["spec_id", 64], ["spec_hash", 128], ["requested_model", 200], ["resolved_model", 200], ["operation_key", 200]] as const) {
+    if (body[field] !== undefined && !text(body[field], max)) return fail("invalid_decision");
+  }
+  const runIDs = [...body.run_ids].sort((a, b) => a - b) as number[];
   const automatic = normalizeAutomatic(body.automatic as Record<string, unknown>);
   if (!automatic) return fail("invalid_automatic");
+  const operationKey = text(body.operation_key, 200) ? body.operation_key : `decision-${id}-${runIDs.join("-")}-${body.policy_version}`;
+  const legacyPayload = {
+    link_id: id, run_ids: runIDs, policy_version: body.policy_version, policy: body.policy ?? {},
+    automatic, spec_id: body.spec_id ?? null, requested_model: body.requested_model ?? null
+  };
+  const payloadHash = await sha256Hex(canonicalJSON({ ...legacyPayload,
+    spec_hash: body.spec_hash ?? null, resolved_model: body.resolved_model ?? null,
+    content_revision: body.content_revision ?? null, expected_revision: body.expected_revision ?? null
+  }));
+  // Confirm a successful logical operation BEFORE testing mutable current state.
+  // The acknowledgement describes its stored decision; effective is today's view.
+  const existingResponse = async (): Promise<Response | null> => {
+    const row = await env.DB.prepare(`SELECT id,link_id,payload_hash,payload_version,run_id,run_ids,
+      run_references_complete,expected_personal_revision,policy_version FROM classification_decisions WHERE operation_key=?`)
+      .bind(operationKey).first<{ id: number; link_id: number; payload_hash: string; payload_version: number;
+        run_id: number; run_ids: string | null; run_references_complete: number; expected_personal_revision: number | null; policy_version: string }>();
+    if (!row) return null;
+    const hash = row.payload_version === 0 ? await sha256Hex(canonicalJSON(legacyPayload)) : payloadHash;
+    if (row.link_id !== id || row.payload_hash !== hash) return fail("operation_conflict", 409);
+    const view = await computeEffective(env, id);
+    return reply({ id, run_ids: parseJSON(row.run_ids ?? JSON.stringify([row.run_id]), []),
+      run_references_complete: row.run_references_complete === 1, revision: row.expected_personal_revision,
+      policy_version: row.policy_version, decision_id: row.id, effective: view.view, replayed: true });
+  };
+  const existing = await existingResponse();
+  if (existing) return existing;
   const link = await env.DB.prepare(`SELECT content_revision, personal_revision FROM links WHERE id = ?`).bind(id)
     .first<{ content_revision: number; personal_revision: number }>();
   if (!link) return fail("not_found", 404);
-  // The caller's expected revision is validated on every path, including a new
-  // operation, not only when the key already exists.
-  if (body.expected_revision !== undefined && Number(body.expected_revision) !== link.personal_revision) {
+  if (body.expected_revision !== undefined && body.expected_revision !== link.personal_revision) {
     return fail("revision_conflict", 409, { revision: link.personal_revision });
   }
-  // Every referenced run must exist, belong to this link, match the requested
-  // spec/model and still correspond to the current content revision.
-  const runs = await env.DB.prepare(
-    `SELECT id, content_revision, spec_id, spec_hash, requested_model, resolved_model, coverage, status, operation_key, target_generation
-     FROM classification_runs WHERE link_id = ? AND id IN (${runIDs.map(() => "?").join(",")})`
-  ).bind(id, ...runIDs).all<{ id: number; content_revision: number; spec_id: string; spec_hash: string; requested_model: string; resolved_model: string; coverage: string; status: string; operation_key: string; target_generation: number }>();
+  if (body.content_revision !== undefined && body.content_revision !== link.content_revision) return fail("run_stale", 409);
+  const runs = await env.DB.prepare(`SELECT id,content_revision,spec_id,spec_hash,requested_model,resolved_model,
+    coverage,status,operation_key,target_generation,evidence_snapshot_id,source_hash,raw_judgments
+    FROM classification_runs WHERE link_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY id`)
+    .bind(id, JSON.stringify(runIDs)).all<DecisionRun>();
   if (runs.results.length !== runIDs.length) return fail("unknown_run", 409, { found: runs.results.map((run) => run.id) });
   for (const run of runs.results) {
     if (run.status !== "succeeded") return fail("run_not_succeeded", 409, { run_id: run.id, status: run.status });
+    if (run.coverage !== "complete") return fail("run_incomplete", 409, { run_id: run.id });
     if (run.content_revision !== link.content_revision) return fail("run_stale", 409, { run_id: run.id, content_revision: link.content_revision });
-    if (text(body.spec_id, 64) && body.spec_id !== run.spec_id) return fail("run_spec_mismatch", 409, { run_id: run.id });
-    if (text(body.spec_hash, 128) && body.spec_hash !== run.spec_hash) return fail("run_spec_mismatch", 409, { run_id: run.id });
-    if (text(body.requested_model, 200) && body.requested_model !== run.requested_model) return fail("run_model_mismatch", 409, { run_id: run.id });
+    if ((body.spec_id !== undefined && body.spec_id !== run.spec_id) || (body.spec_hash !== undefined && body.spec_hash !== run.spec_hash)) {
+      return fail("run_spec_mismatch", 409, { run_id: run.id });
+    }
+    if (!run.resolved_model || (body.resolved_model !== undefined && body.resolved_model !== run.resolved_model) ||
+        (body.requested_model !== undefined && body.requested_model !== run.requested_model)) return fail("run_model_mismatch", 409, { run_id: run.id });
   }
-  // All referenced runs must describe the same input identity: a decision may
-  // not silently mix runs from different specs, models or revisions.
-  const identity = new Set(runs.results.map((run) => `${run.spec_id}|${run.spec_hash}|${run.requested_model}|${run.content_revision}`));
-  if (identity.size > 1) return fail("run_identity_mismatch", 409, { identities: [...identity] });
-  const operationKey = text(body.operation_key, 200) ? body.operation_key : `decision-${id}-${runIDs.join("-")}-${body.policy_version}`;
-  // The logical payload identity: same key, same link and same payload replays;
-  // anything else is a conflict.
-  const payloadHash = await sha256Hex(canonicalJSON({
-    link_id: id, run_ids: [...runIDs].sort((a, b) => a - b), policy_version: body.policy_version,
-    policy: body.policy ?? {}, automatic, spec_id: body.spec_id ?? null, requested_model: body.requested_model ?? null
-  }));
-  const existing = await env.DB.prepare(`SELECT id, link_id, payload_hash FROM classification_decisions WHERE operation_key = ?`)
-    .bind(operationKey).first<{ id: number; link_id: number; payload_hash: string }>();
-  if (existing) {
-    if (existing.link_id !== id || existing.payload_hash !== payloadHash) return fail("operation_conflict", 409);
-    const view = await computeEffective(env, id);
-    return reply({ id, run_ids: runIDs, policy_version: body.policy_version, decision_id: existing.id, effective: view.view, replayed: true });
-  }
-  const now = new Date().toISOString();
-  const primaryRun = runs.results[0];
-  // The guard repeats the run validity and the current target pointer inside the
-  // transaction, so a change between the checks above and the commit cannot
-  // write a decision that no longer describes the current state.
-  const guard: WriteGuard = {
-    sql: `EXISTS (SELECT 1 FROM classification_runs r WHERE r.id=? AND r.link_id=? AND r.status='succeeded'
-        AND r.content_revision=(SELECT content_revision FROM links WHERE id=?)
-        AND r.spec_id=? AND r.spec_hash=? AND r.requested_model=?
-        AND r.target_generation=(SELECT generation FROM classification_target_state WHERE id=1))`,
-    bindings: [primaryRun.id, id, id, primaryRun.spec_id, primaryRun.spec_hash, primaryRun.requested_model]
+  const primary = runs.results[0];
+  const wireHash = (run: DecisionRun): string | null => {
+    const raw = parseJSON(run.raw_judgments ?? "null", null) as Record<string, unknown> | null;
+    return raw?.metadata_version === 1 && text(raw.evidence_hash, 64) ? raw.evidence_hash : null;
   };
-  const statements = [
-    decisionInsertStatement(env, {
-      linkId: id, runOperationKey: primaryRun.operation_key ?? "", contentRevision: link.content_revision,
-      policyVersion: body.policy_version, policy: body.policy ?? {}, automatic,
-      operationKey, createdAt: now, payloadHash
-    }, guard)
-  ];
-  const decision = await env.DB.batch(statements);
-  if (!decision[0].results.length) {
+  const identity = (run: DecisionRun) => canonicalJSON([run.spec_id, run.spec_hash, run.resolved_model,
+    run.content_revision, run.target_generation, run.source_hash, wireHash(run)]);
+  if (runs.results.some((run) => identity(run) !== identity(primary))) return fail("run_identity_mismatch", 409);
+  // Old single-run policy replays remain possible with honest unknown provenance.
+  // Combining unknown input identities cannot prove that the material was the same.
+  if (runIDs.length > 1 && (!primary.source_hash || !wireHash(primary) || runs.results.some((run) => !run.evidence_snapshot_id))) {
+    return fail("run_identity_unknown", 409);
+  }
+  // Pin every row read above, not only its primary ID. json_each keeps the SQL
+  // variable count bounded even for the maximum 64 references. Stored snapshot
+  // and actual bounded wire identities are distinct and both remain checked.
+  const pinned = runs.results.map((run) => ({ id: run.id, spec_id: run.spec_id, spec_hash: run.spec_hash,
+    requested_model: run.requested_model, resolved_model: run.resolved_model, target_generation: run.target_generation,
+    source_hash: run.source_hash, evidence_snapshot_id: run.evidence_snapshot_id, wire_hash: wireHash(run) }));
+  const guard: WriteGuard = {
+    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND content_revision=? AND personal_revision=?)
+      AND (SELECT COUNT(*) FROM classification_runs cr JOIN json_each(?) p ON cr.id=json_extract(p.value,'$.id')
+        WHERE cr.link_id=? AND cr.content_revision=? AND cr.status='succeeded' AND cr.coverage='complete'
+          AND cr.spec_id=json_extract(p.value,'$.spec_id') AND cr.spec_hash=json_extract(p.value,'$.spec_hash')
+          AND cr.requested_model=json_extract(p.value,'$.requested_model') AND cr.resolved_model=json_extract(p.value,'$.resolved_model')
+          AND cr.target_generation=json_extract(p.value,'$.target_generation')
+          AND cr.target_generation=(SELECT generation FROM classification_target_state WHERE id=1)
+          AND EXISTS (SELECT 1 FROM classification_targets ct WHERE ct.generation=cr.target_generation
+            AND (ct.protocol='legacy' OR (ct.spec_id=cr.spec_id AND ct.spec_hash=cr.spec_hash)))
+          AND cr.source_hash IS json_extract(p.value,'$.source_hash')
+          AND cr.evidence_snapshot_id IS json_extract(p.value,'$.evidence_snapshot_id')
+          AND (CASE WHEN json_extract(cr.raw_judgments,'$.metadata_version')=1
+            THEN json_extract(cr.raw_judgments,'$.evidence_hash') END) IS json_extract(p.value,'$.wire_hash')
+          AND ((cr.evidence_snapshot_id IS NULL AND cr.source_hash IS NULL) OR EXISTS (
+            SELECT 1 FROM evidence_snapshots es WHERE es.id=cr.evidence_snapshot_id AND es.link_id=cr.link_id
+              AND es.content_revision=cr.content_revision AND es.content_hash=cr.source_hash)))=?`,
+    bindings: [id, link.content_revision, link.personal_revision, JSON.stringify(pinned), id, link.content_revision, runIDs.length]
+  };
+  const result = await env.DB.batch([decisionInsertStatement(env, {
+    linkId: id, runOperationKey: primary.operation_key, contentRevision: link.content_revision,
+    policyVersion: body.policy_version, policy: body.policy ?? {}, automatic, runIDs, personalRevision: link.personal_revision,
+    operationKey, createdAt: new Date().toISOString(), payloadHash
+  }, guard)]);
+  if (!result[0].results.length) {
+    const concurrent = await existingResponse();
+    if (concurrent) return concurrent;
+    const current = await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id).first<{ personal_revision: number }>();
+    if (current && current.personal_revision !== link.personal_revision) return fail("revision_conflict", 409, { revision: current.personal_revision });
     return fail("run_stale", 409, { content_revision: link.content_revision });
   }
-  const decisionID = Number((decision[0].results[0] as { id?: number } | undefined)?.id ?? 0);
+  const decisionID = Number((result[0].results[0] as { id: number }).id);
   await persistEffective(env, id, link.personal_revision);
   const view = await computeEffective(env, id);
-  return reply({ id, run_ids: runIDs, policy_version: body.policy_version, decision_id: decisionID, effective: view.view, replayed: false });
+  return reply({ id, run_ids: runIDs, run_references_complete: true, revision: link.personal_revision,
+    policy_version: body.policy_version, decision_id: decisionID, effective: view.view, replayed: false });
 }
 
 function normalizeAutomatic(value: Record<string, unknown>): AutomaticView | null {
@@ -950,10 +1004,10 @@ async function legacyCurationOverrides(env: Env, id: number): Promise<Override[]
 // computeEffective derives the single effective view from the latest decision
 // (or the legacy stored selection) plus the override log. It never trusts a
 // stored projection or a caller-supplied effective object.
-export async function computeEffective(env: Env, id: number): Promise<{ view: EffectiveView; projected: boolean; stale: boolean; contentRevision: number }> {
+export async function computeEffective(env: Env, id: number): Promise<{ view: EffectiveView; automatic: AutomaticView; decisionId: number; projected: boolean; stale: boolean; contentRevision: number }> {
   const decision = await env.DB.prepare(
-    `SELECT content_revision, automatic FROM classification_decisions WHERE link_id = ? ORDER BY id DESC LIMIT 1`
-  ).bind(id).first<{ content_revision: number; automatic: string }>();
+    `SELECT id, content_revision, automatic FROM classification_decisions WHERE link_id = ? ORDER BY id DESC LIMIT 1`
+  ).bind(id).first<{ id: number; content_revision: number; automatic: string }>();
   const overrides = await loadOverrides(env, id);
   const legacy = await legacyCurationOverrides(env, id);
   const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
@@ -966,14 +1020,14 @@ export async function computeEffective(env: Env, id: number): Promise<{ view: Ef
     const automatic = parseJSON(decision.automatic, EMPTY_AUTOMATIC) as AutomaticView;
     automatic.entities = entities;
     return {
-      view: effectiveView(automatic, layered), projected: true,
+      view: effectiveView(automatic, layered), automatic, decisionId: decision.id, projected: true,
       stale: link !== null && decision.content_revision !== link.content_revision,
       contentRevision: link?.content_revision ?? decision.content_revision
     };
   }
   const automatic = await classificationAutomatic(env, id);
   automatic.entities = entities;
-  return { view: effectiveView(automatic, layered), projected: false, stale: false, contentRevision: link?.content_revision ?? 0 };
+  return { view: effectiveView(automatic, layered), automatic, decisionId: 0, projected: false, stale: false, contentRevision: link?.content_revision ?? 0 };
 }
 
 // persistEffective writes the query projections (current_projections and
@@ -983,57 +1037,65 @@ export async function computeEffective(env: Env, id: number): Promise<{ view: Ef
 // projectionStatements builds the guarded projection writes. They are exported
 // so an atomic completion can commit the run, the decision and the projection
 // in one transaction (F05/F10) instead of rebuilding after the fact.
-export function projectionStatements(env: Env, id: number, personalRevision: number, view: EffectiveView, projected: boolean, contentRevision: number, stale = false): D1PreparedStatement[] {
+export function projectionStatements(env: Env, id: number, personalRevision: number, view: EffectiveView, projected: boolean, contentRevision: number, stale = false, decisionId = 0): D1PreparedStatement[] {
   const now = new Date().toISOString();
-  const guard = `SELECT 1 FROM links WHERE id = ? AND personal_revision = ?`;
+  const guard = projectionGuard(id, personalRevision, contentRevision, decisionId);
   return [
     env.DB.prepare(
       `INSERT INTO current_projections(link_id, content_revision, effective, updated_at)
-       SELECT ?, ?, ?, ? WHERE EXISTS (${guard})
+       SELECT ?, ?, ?, ? WHERE ${guard.sql}
        ON CONFLICT(link_id) DO UPDATE SET content_revision=excluded.content_revision,
-         effective=excluded.effective, updated_at=excluded.updated_at`
-    ).bind(id, contentRevision, canonicalJSON({ ...view, projected, stale }), now, id, personalRevision),
+         effective=excluded.effective, updated_at=excluded.updated_at RETURNING link_id`
+    ).bind(id, contentRevision, canonicalJSON({ ...view, projected, stale }), now, ...guard.bindings),
     env.DB.prepare(
       `INSERT INTO link_selections_v2(link_id, taxonomy_version, definition_version, topics, content_functions, carriers, affordances, form, use, provenance, revised_at)
-       SELECT ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${guard})
+       SELECT ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}
        ON CONFLICT(link_id) DO UPDATE SET topics=excluded.topics, content_functions=excluded.content_functions,
          carriers=excluded.carriers, affordances=excluded.affordances, form=excluded.form, use=excluded.use,
          provenance=excluded.provenance, revised_at=excluded.revised_at`
     ).bind(id, taxonomyV2().version, JSON.stringify(view.topics), JSON.stringify(view.content_functions),
       JSON.stringify(view.carriers), JSON.stringify(view.affordances), view.form, view.use,
       canonicalJSON({ source: projected ? "decision" : "legacy", overrides: view.reviewed, revision: view.revision }),
-      now, id, personalRevision)
+      now, ...guard.bindings)
   ];
 }
 
+function projectionGuard(id: number, personalRevision: number, contentRevision: number, decisionId: number): WriteGuard {
+  return { sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=?)
+      AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?`,
+    bindings: [id, personalRevision, contentRevision, id, decisionId] };
+}
+
 async function persistEffective(env: Env, id: number, personalRevision: number): Promise<void> {
-  const { view, projected, stale, contentRevision } = await computeEffective(env, id);
-  const statements = projectionStatements(env, id, personalRevision, view, projected, contentRevision, stale);
-  if (projected) {
-    const automatic = await automaticOf(env, id);
-    const row = await env.DB.prepare("SELECT classification FROM links WHERE id=?").bind(id).first<{ classification: string | null }>();
-    const prior = storedClassification(row?.classification ?? null, null);
-    const generated = {
-      why_suggestion: "", entities: [], uncertainty: false, taxonomy_version: taxonomy.version, discarded_tags: [],
-      ...prior, topics: automatic.topics.slice(0, 3), form: automatic.form, use: automatic.use
-    };
-    // A policy decision can change the AI proposal without creating another
-    // run. Keep the v1 AI projection current in its own column; using curation
-    // for this would falsely tell old clients that a human confirmed it.
-    statements.push(env.DB.prepare("UPDATE links SET classification=? WHERE id=? AND personal_revision=?")
-      .bind(canonicalJSON(generated), id, personalRevision));
+  // A superseded computation never overwrites newer caches. If another writer
+  // wins after our read, recompute from the current source of truth, boundedly.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      const current = await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id).first<{ personal_revision: number }>();
+      if (!current) return;
+      personalRevision = current.personal_revision;
+    }
+    const { view, automatic, decisionId, projected, stale, contentRevision } = await computeEffective(env, id);
+    const guard = projectionGuard(id, personalRevision, contentRevision, decisionId);
+    const statements = projectionStatements(env, id, personalRevision, view, projected, contentRevision, stale, decisionId);
+    if (projected) {
+      const row = await env.DB.prepare("SELECT classification FROM links WHERE id=?").bind(id).first<{ classification: string | null }>();
+      const prior = storedClassification(row?.classification ?? null, null);
+      const generated = {
+        why_suggestion: "", entities: [], uncertainty: false, taxonomy_version: taxonomy.version, discarded_tags: [],
+        ...prior, topics: automatic.topics.slice(0, 3), form: automatic.form, use: automatic.use
+      };
+      statements.push(env.DB.prepare(`UPDATE links SET classification=? WHERE id=? AND ${guard.sql}`)
+        .bind(canonicalJSON(generated), id, ...guard.bindings));
+    }
+    // Human projection stays separate from the AI suggestion. This cache write
+    // is marked so compatibility triggers never turn it into human input.
+    const humanCuration = view.reviewed ? canonicalJSON({ topics: view.topics.slice(0, 3), form: view.form, use: view.use }) : null;
+    statements.push(env.DB.prepare(`UPDATE links SET curation=?,curation_projection_epoch=curation_projection_epoch+1
+      WHERE id=? AND ${guard.sql}`).bind(humanCuration, id, ...guard.bindings));
+    const result = await env.DB.batch(statements);
+    if (result[0].results.length) return;
   }
-  // links.curation is the v1 human projection. Old clients and the new view must
-  // read the same effective result, so the derived v1 values are written here
-  // (the AI suggestion in links.classification is never overwritten). The
-  // existence of active overrides determines review state, not a comparison
-  // between three displayed topics and the full automatic topic set.
-  const topicsProjection = view.topics.slice(0, 3);
-  const humanCuration = view.reviewed ? canonicalJSON({ topics: topicsProjection, form: view.form, use: view.use }) : null;
-  statements.push(env.DB.prepare(
-    `UPDATE links SET curation = ?, curation_projection_epoch=curation_projection_epoch+1 WHERE id = ? AND personal_revision = ?`
-  ).bind(humanCuration, id, personalRevision));
-  await env.DB.batch(statements);
 }
 
 async function currentTaxonomyVersion(): Promise<string> {

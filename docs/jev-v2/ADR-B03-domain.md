@@ -64,3 +64,16 @@ is implemented here and the vectors are asserted in `test/domain.test.ts`.
 - Migration is additive; `0009` is unchanged.
 - Deleting a link cascades through every domain table.
 - `current_projections` is derived and may be rebuilt at any time.
+
+
+## 2026-09-22 R3-12: decision references and concurrency
+
+Migration 0021 adds `run_ids`, `run_references_complete`, `expected_personal_revision`, and payload identity version to the decision row. `classification_decision_runs` retains a foreign-key-protected reference to every run, populated in the same insert transaction. A normal classification completion records its singleton; an explicit policy replay records its sorted complete set (1–64 unique positive IDs). Historical decisions only recorded their primary run: migration retains that known singleton with `run_references_complete=false`, without claiming discarded references can be recovered. An older executable can still write its primary-only shape after migration; those rows remain uncertified.
+
+For a new replay, every run must be succeeded/complete and match the current content revision and target generation. All runs must share immutable spec, actual resolved model, source identity and bounded wire identity. Different request aliases can be compatible when the recorded concrete model is the same; a shared alias does not make different resolved models compatible. A legacy singleton with unknown source metadata can still be re-decided, but multiple unknown input identities cannot be certified as one input. Every claimed snapshot must belong to the same bookmark and match that run's revision and source hash.
+
+The final transaction checks the personal revision, content revision, target and **every** referenced run, using bounded JSON membership instead of one SQL placeholder per field per run. Failed guards insert neither the decision nor its references. An explicit `expected_revision` mismatch reports `revision_conflict`; a race against the implicitly captured revision is also rejected. The immutable operation hash binds the supplied spec/hash/models/content/CAS fields, run set, policy and automatic result. Identical successful operations are confirmed before checking mutable current state, including after later human edits or source/target changes. Changed logical payloads conflict. Historical version-0 receipts retain their old hash semantics and report unknown historical revision/reference completeness.
+
+GET decisions returns the complete known `run_ids` and its completeness flag alongside the compatibility `run_id`. A replay acknowledgement identifies the stored decision and its accepted revision; its `effective` field is the current human-resolved view, not a fabricated historical UI snapshot. Exact concurrent submissions create one decision. No model run or source record is created by a pure policy replay.
+
+Cache rebuilding pins personal revision, content revision and latest decision ID for all projection writes. A superseded computation cannot overwrite a newer cache; a missed guard re-reads current state with at most three attempts. The automatic input used for v1 projection comes from the same computation as the effective view. References prevent retention from deleting a secondary input run; deleting the bookmark cascades its decisions and references along with the existing private history.
