@@ -65,7 +65,7 @@ export interface V2Selection {
 // the new dimensions are purely additive.
 const v2: Taxonomy = {
   ...(taxonomy as unknown as Taxonomy),
-  definition_version: 1,
+  definition_version: 2,
   content_functions: [
     { id: "method", label: "方法", active: true, aliases: ["方法论", "流程"], description: "可复用的步骤或方法论。", includes: ["如何做", "步骤"], excludes: ["只给结论"] },
     { id: "tool", label: "工具", active: true, aliases: ["产品", "软件"], description: "具体的工具、产品或库。", includes: ["开源项目", "插件"], excludes: ["纯观点"] },
@@ -74,10 +74,10 @@ const v2: Taxonomy = {
     { id: "opinion", label: "观点", active: true, aliases: ["评论", "论证"], description: "主张、判断、评论或论证。", includes: ["我认为"], excludes: ["纯事实通报"] },
   ],
   carriers: [
-    { id: "single", label: "单帖", active: true, aliases: ["单条"], description: "单个帖子，没有作者续帖。", includes: ["一条推文"], excludes: ["长串"] },
-    { id: "author_continuation", label: "作者续帖", active: true, aliases: ["串推", "thread"], description: "同一作者的多条续帖。", includes: ["1/n"], excludes: ["他人评论"] },
-    { id: "external_article", label: "外链长文", active: true, aliases: ["文章", "博客"], description: "指向外部文章的长文载体。", includes: ["链接到博客"], excludes: ["站内内容"] },
-    { id: "unknown", label: "未知", active: true, aliases: [], description: "结构无法从证据确认。", includes: [], excludes: [] },
+    { id: "single", label: "单帖", active: true, aliases: ["单条"], description: "当前可观察的来源是原帖，没有已提供的同作者关联续帖正文，也没有已提供的关联外部文章正文。仅描述当前材料，不声称来源已抓全。", includes: ["只有原帖正文", "原帖加引用或他人评论", "原帖含普通链接但没有外链文章正文"], excludes: ["已提供同作者关联续帖正文", "已提供原帖所链接的外部文章正文", "没有可观察的来源正文"] },
+    { id: "author_continuation", label: "作者续帖", active: true, aliases: ["串推", "thread"], description: "已提供原帖与同一作者的关联续帖正文；同时有外链文章正文时，仍优先选择作者续帖。", includes: ["原帖和已确认同作者的后续帖子", "同作者续帖加关联外链正文"], excludes: ["只有他人评论或引用", "只有 1/n 字样但未提供续帖正文", "作者或续帖关系无法确认"] },
+    { id: "external_article", label: "外链长文", active: true, aliases: ["文章", "博客"], description: "已提供原帖所链接的外部文章正文，且没有已提供的同作者关联续帖正文；即使也有原帖，仍选择外链长文。", includes: ["原帖加其链接的博客正文", "已确认来自关联外链的文章正文"], excludes: ["已提供同作者关联续帖正文", "只有 URL 或网页标题而没有文章正文", "只有站内引用或他人评论"] },
+    { id: "unknown", label: "未知", active: true, aliases: [], description: "缺少可判断的来源正文，或材料的作者、关联关系不足以确认载体结构。不是有充分证据但不属于这些载体的其他结构。", includes: ["只有未展开的链接且没有正文", "无法确认内容之间的来源关系"], excludes: ["可明确确认单帖、作者续帖或关联外链正文", "结构可确认但不属于本词表的独立视频、书籍等"] },
   ],
   affordances: [
     { id: "quote", label: "可引用", active: true, aliases: ["引用"], description: "适合引用其中的观点或结论。", includes: ["金句"], excludes: [] },
