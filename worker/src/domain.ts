@@ -182,6 +182,9 @@ export interface Override {
 interface FieldState {
   action: Map<string, OverrideAction>;
   order: string[];
+  // Single-valued fields replay actual actions: collapsing to the latest action
+  // per term loses A -> B -> A and can revive A after rejecting the chosen B.
+  history: Array<Pick<Override, "term" | "action">>;
   empty: boolean;
   /** set_empty suppresses automatic values until a per-tag reset re-admits one. */
   clearedAutomatic: boolean;
@@ -189,17 +192,19 @@ interface FieldState {
 }
 
 function newFieldState(): FieldState {
-  return { action: new Map(), order: [], empty: false, clearedAutomatic: false, readmit: new Set() };
+  return { action: new Map(), order: [], history: [], empty: false, clearedAutomatic: false, readmit: new Set() };
 }
 
 function applyOverride(state: FieldState, override: Override): void {
   switch (override.action) {
     case "accept":
+      state.history.push({ term: override.term, action: override.action });
       if (!state.action.has(override.term)) state.order.push(override.term);
       state.action.set(override.term, "accept");
       state.empty = false;
       break;
     case "reject":
+      state.history.push({ term: override.term, action: override.action });
       if (!state.action.has(override.term)) state.order.push(override.term);
       state.action.set(override.term, "reject");
       state.empty = false;
@@ -207,6 +212,7 @@ function applyOverride(state: FieldState, override: Override): void {
     case "set_empty":
       state.action = new Map();
       state.order = [];
+      state.history = [];
       state.empty = true;
       state.clearedAutomatic = true;
       state.readmit = new Set();
@@ -215,6 +221,7 @@ function applyOverride(state: FieldState, override: Override): void {
       if (override.term === "") {
         state.action = new Map();
         state.order = [];
+        state.history = [];
         state.empty = false;
         state.clearedAutomatic = false;
         state.readmit = new Set();
@@ -223,6 +230,7 @@ function applyOverride(state: FieldState, override: Override): void {
         // back to the automatic value.
         state.action.delete(override.term);
         state.order = state.order.filter((term) => term !== override.term);
+        state.history = state.history.filter((entry) => entry.term !== override.term);
         if (state.clearedAutomatic) state.readmit.add(override.term);
       }
       break;
@@ -257,8 +265,7 @@ export function resolveMulti(automatic: string[], state: FieldState): string[] {
 export function resolveSingle(automatic: string, state: FieldState): string {
   if (state.empty) return "";
   let current = state.clearedAutomatic && !state.readmit.has(automatic) ? "" : automatic;
-  for (const term of state.order) {
-    const action = state.action.get(term);
+  for (const { term, action } of state.history) {
     if (action === "accept") current = term;
     else if (action === "reject" && current === term) current = "";
   }

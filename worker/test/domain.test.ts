@@ -87,6 +87,34 @@ function pick(view: ReturnType<typeof effectiveView>) {
 
 // --- Internal v2 API --------------------------------------------------------
 
+it.each([
+  ["form", "method", "case"],
+  ["use", "try", "quote"],
+  ["carriers", "single", "external_article"]
+])("persists %s choices in action order across independent reads", async (field, first, second) => {
+  const id = await createLink();
+  const actions = [
+    { term: first, action: "accept", expected: first },
+    { term: second, action: "accept", expected: second },
+    { term: first, action: "accept", expected: first },
+    { term: first, action: "reject", expected: "" },
+    { term: second, action: "accept", expected: second }
+  ];
+  for (const [index, entry] of actions.entries()) {
+    const response = await request(`v2/links/${id}/overrides`, {
+      field, term: entry.term, action: entry.action,
+      operation_key: `${field}-${index}`, expected_revision: index
+    });
+    expect(response.status).toBe(200);
+    const effective = await request(`v2/links/${id}/selection`, undefined, "GET");
+    const body = await effective.json() as { selection: Record<string, string | string[]> };
+    expect(body.selection[field]).toEqual(field === "carriers" ? (entry.expected ? [entry.expected] : []) : entry.expected);
+  }
+  const stored = await env.DB.prepare("SELECT term, action FROM curation_overrides WHERE link_id = ? ORDER BY id")
+    .bind(id).all<{ term: string; action: string }>();
+  expect(stored.results).toEqual(actions.map(({ term, action }) => ({ term, action })));
+});
+
 it("stores an evidence snapshot and reuses the revision for identical bytes", async () => {
   const id = await createLink();
   const first = await request(`v2/links/${id}/evidence`, { snapshot: snapshot() });
