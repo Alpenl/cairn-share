@@ -14,7 +14,7 @@ Authenticated responses now use `Cache-Control: private, no-store`; internal gen
 
 ## Rollout and recovery (not executed here)
 
-1. Back up D1 and record the installed migration version; apply new migration 0026 before deploying this Worker. Do not edit older published migrations.
+1. Back up D1 and record the installed migration version; apply migrations through 0027 before deploying this Worker. Do not edit older published migrations.
 2. Deploy the compatible Worker with its Cron trigger and existing D1/R2 bindings. Check scheduled invocation success and the due count: `SELECT COUNT(*) FROM privacy_deletions WHERE next_cleanup_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now')`. Investigate a growing backlog; do not drop receipts to make the count disappear.
 3. A failed user deletion may be safely retried with the same ID. No new model call or source retrieval is needed. A live link must never be removed merely because its age or image key resembles an orphan.
 4. On application rollback keep migration 0026 and a compatible maintenance worker running. Older DELETE SQL still creates receipts via the database trigger, but an older image-serving executable lacks the new existence check; do not claim equivalent privacy guarantees for that rollback. No destructive down migration.
@@ -33,3 +33,12 @@ The shared queue mutex serializes deletion against in-flight curation acknowledg
 The bounded decoded-image memory cache uses the account fingerprint, not the raw token, as its key. Confirmation evicts the matching account/link images and permanently rejects late writes for that pair in the running process; persisted confirmations restore that boundary on restart. Composables observe invalidation and drop their remembered bitmap too. Other accounts and bookmark IDs remain separate.
 
 The UI distinguishes “收藏已移除，附件正在后台清理” from full deletion confirmation. Server Cron owns attachment cleanup after that response; Android does not manufacture a physical-purge confirmation. These guards apply to this app's managed views and action store; exported files, system screenshots or previously cached data owned by other applications are outside its erase capability.
+
+
+## Private rerank cache (0027)
+
+The internal rerank cache stores the exact private provider request and answer distributions, with hashes for filter scope and rubric and versioned candidate references. It contains no provider credentials. Enricher credentials are required; public/App readers cannot access it. Deleting **any** referenced bookmark removes the entire shared cache entry and all its candidate references in the same D1 transaction. Anonymous global budget consumption is retained.
+
+Entries have a fixed 24-hour lifetime from claim, including pending and failed entries; hits never extend it and unknown outcomes are not re-granted within that window. Reads reject expiry immediately. Claim and the existing five-minute privacy Cron each prune at most 100 expired entries; claim also atomically removes its own expired key before allocation. The cache has a deployment cap of 200 entries. Physical purge can lag during missed invocations or an outage; the lifetime is not a physical-purge SLA. An old cache writer cannot complete after a canonical revision change or deletion. Migration 0027 also advances personal revisions for note/why/curation status edits and body revisions for title/summary/status/URL edits; same-value writes do not advance them.
+
+Apply 0027 before deploying the new Worker. On rollback keep the migration and compatible cache maintenance, disable reranking before reverting the consumer, and do not claim that an older enabled consumer preserves result deduplication. No destructive down migration or production migration was performed for this change.

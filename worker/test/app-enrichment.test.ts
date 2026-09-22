@@ -93,7 +93,9 @@ describe("App enrichment integration", () => {
     expect(edited.enrichment.cache_identity.content_revision).toBe(stored!.content_revision);
     expect(edited.enrichment.cache_identity.body_revision).toBe(stored!.app_body_revision);
     expect(edited.enrichment.cache_identity.content_revision).toBeGreaterThan(original + 1);
-    expect(edited.enrichment.cache_identity.body_revision).toBe(bodyRevision + 2);
+    // URL/summary invalidation (0027) and clearing the large body (0023)
+    // each advance the monotonic revision; the response must reflect both.
+    expect(edited.enrichment.cache_identity.body_revision).toBe(bodyRevision + 3);
     expect(edited.enrichment.translated_text).toBeNull();
   });
 

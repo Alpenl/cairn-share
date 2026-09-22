@@ -739,11 +739,12 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
     bindings.push(status);
   }
   const summary = url.searchParams.get("view") === "summary";
+  const withIdentity = url.searchParams.get("include_cache_identity") === "1";
 
   const pageSize = limit + 1;
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const listStatement = env.DB.prepare(
-    `SELECT id, url, note, created_at, ${ENRICHMENT_COLUMNS}, ${contentColumns(summary)}
+    `SELECT id, url, note, created_at, ${ENRICHMENT_COLUMNS}, ${contentColumns(summary)} ${cacheIdentityColumns(withIdentity)}
        FROM links
       ${where}
       ORDER BY id DESC
@@ -768,7 +769,7 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   const items = rows.slice(0, limit);
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
   return json({
-    items: items.map((row) => ({ ...mapEnrichmentListItem(row), ...(summary ? { content_loaded: false } : {}) })),
+    items: items.map((row) => ({ ...mapEnrichmentListItem(row, withIdentity), ...(summary ? { content_loaded: false } : {}) })),
     next_before_id: next,
     counts: mapEnrichmentCounts(countRow),
     ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {})
@@ -1685,7 +1686,7 @@ function mapEnrichmentJob(row: EnrichmentJobRow): Record<string, unknown> {
   };
 }
 
-function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> {
+function mapEnrichmentListItem(row: EnrichmentListRow, withIdentity = false): Record<string, unknown> {
   const processable = row.processable === 1;
   return {
     id: row.id,
@@ -1711,7 +1712,11 @@ function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> 
     model: row.enrichment_model,
     error: row.enrichment_error,
     updated_at: row.enrichment_updated_at,
-    enriched_at: row.enriched_at
+    enriched_at: row.enriched_at,
+    ...(withIdentity ? {cache_identity: {
+      schema_version:1, content_revision:row.content_revision, body_revision:row.app_body_revision,
+      personal_revision:row.personal_revision, latest_decision_id:row.cache_decision_id, latest_entity_revision:row.cache_entity_revision
+    }} : {})
   };
 }
 
