@@ -10,7 +10,7 @@ import urllib.parse
 import uuid
 
 upstream = urllib.parse.urlsplit(sys.argv[1])
-state = {"mode": "online", "key": "", "requests": [], "web_writes": 0}
+state = {"mode": "online", "key": "", "requests": [], "selection_reads": [], "web_writes": 0}
 lock = threading.Lock()
 
 
@@ -82,6 +82,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             status, result = forward("POST", path, json.dumps(web).encode(), headers)
             assert status == 200, (status, result)
         status, result = forward(self.command, path, body or None, headers)
+        if not direct and self.command == "GET" and urllib.parse.urlsplit(path).path.endswith("/v2-selection"):
+            # Record only route/status, never credentials or response bodies.
+            # UI messages can be replaced by concurrent list refresh failures.
+            with lock:
+                state["selection_reads"].append({"path": urllib.parse.urlsplit(path).path, "status": status})
         if mutation and mode == "lose_first":
             assert status == 200, (status, result)
             return self.drop()

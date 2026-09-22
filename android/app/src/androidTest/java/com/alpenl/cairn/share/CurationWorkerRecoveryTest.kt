@@ -256,8 +256,17 @@ class CurationWorkerRecoveryTest {
         }
         waitFor { withContext(Dispatchers.Main) { model.uiState.preferences.apiToken == collidingToken && model.uiState.v2Queued.isEmpty() } }
         control("online")
+        val readsBefore = http("/__test/control").getJSONArray("selection_reads").length()
         withContext(Dispatchers.Main) { model.flushV2Queue(); model.recoverLegacyV2Actions(id) }
-        waitFor { withContext(Dispatchers.Main) { model.uiState.message?.text?.contains("无法确认当前收藏") == true } }
+        // Check the actual recovery authorization result. Concurrent list 401s
+        // may replace a transient snackbar before the polling coroutine sees it.
+        waitFor {
+            val reads = http("/__test/control").getJSONArray("selection_reads")
+            (readsBefore until reads.length()).any { index ->
+                val read = reads.getJSONObject(index)
+                read.getString("path") == "/api/bookmarks/$id/v2-selection" && read.getInt("status") == 401
+            }
+        }
         assertEquals(before, http("/__test/control").getJSONArray("requests").length())
         assertEquals(actions, store.snapshot())
         assertEquals(0L, remote(other).getLong("revision"))
