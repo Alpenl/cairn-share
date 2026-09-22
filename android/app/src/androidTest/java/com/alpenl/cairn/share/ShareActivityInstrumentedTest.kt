@@ -356,6 +356,7 @@ class ShareActivityInstrumentedTest {
 
     private fun startLibraryServer(uploadResponseCode: Int = 201): String {
         val mockWebServer = MockWebServer()
+        val deleted = java.util.concurrent.atomic.AtomicBoolean(false)
         mockWebServer.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path.orEmpty()
@@ -366,10 +367,14 @@ class ShareActivityInstrumentedTest {
                         MockResponse().setResponseCode(401).setBody("""{"error":"invalid_token"}""")
                     request.method == "POST" && path == "/api/links" ->
                         if (uploadResponseCode == 201) queuedUploadResponse() else MockResponse().setResponseCode(uploadResponseCode)
-                    request.method == "GET" && endpoint == "/api/links/1" -> updatedLinkResponse()
-                    request.method == "GET" && path.startsWith("/api/links") -> linksResponse(path)
+                    request.method == "GET" && endpoint == "/api/links/1" ->
+                        if (deleted.get()) MockResponse().setResponseCode(404) else updatedLinkResponse()
+                    request.method == "GET" && path.startsWith("/api/links") -> linksResponse(path, deleted.get())
                     request.method == "PATCH" && endpoint == "/api/links/1" -> updatedLinkResponse()
-                    request.method == "DELETE" && path == "/api/links/1" -> MockResponse().setResponseCode(204)
+                    request.method == "DELETE" && path == "/api/links/1" -> {
+                        deleted.set(true)
+                        MockResponse().setResponseCode(204)
+                    }
                     else -> MockResponse().setResponseCode(404).setBody("""{"error":"not_found"}""")
                 }
             }
@@ -429,7 +434,7 @@ class ShareActivityInstrumentedTest {
                 """.trimIndent(),
             )
 
-    private fun linksResponse(path: String): MockResponse {
+    private fun linksResponse(path: String, deleted: Boolean = false): MockResponse {
         val body = if (path.contains("learned=all")) {
             """
                 {
@@ -471,7 +476,14 @@ class ShareActivityInstrumentedTest {
                 }
             """.trimIndent()
         }
-        return MockResponse().setResponseCode(200).setBody(body)
+        val payload = JSONObject(body)
+        if (deleted) {
+            val items = payload.getJSONArray("items")
+            for (index in items.length() - 1 downTo 0) {
+                if (items.getJSONObject(index).getInt("id") == 1) items.remove(index)
+            }
+        }
+        return MockResponse().setResponseCode(200).setBody(payload.toString())
     }
 
     private fun updatedLinkResponse(): MockResponse =
