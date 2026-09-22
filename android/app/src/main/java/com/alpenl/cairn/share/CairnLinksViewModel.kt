@@ -31,10 +31,13 @@ import com.alpenl.cairn.share.network.UpdateApiClient
 import com.alpenl.cairn.share.network.UpdateCheckResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -67,6 +70,7 @@ internal data class CairnLinksUiState(
     val manualAdd: ManualAddState = ManualAddState(),
     val preferences: SharePreferences = SharePreferences(),
     val preferencesLoaded: Boolean = false,
+    val apiTokenSaveError: String = "",
     val pendingUploads: List<PendingUpload> = emptyList(),
     val pendingUploadsLoaded: Boolean = false,
     val uploadBusyIds: Set<String> = emptySet(),
@@ -169,6 +173,7 @@ internal class CairnLinksViewModel(
 
     private var messageId = 0L
     private var searchJob: Job? = null
+    private var searchGeneration = 0L
     private var refreshJob: Job? = null
     private var pendingUploadsRetryJob: Job? = null
     private var retryPendingUploadsAgain = false
@@ -176,6 +181,11 @@ internal class CairnLinksViewModel(
     private var loadedPreferencesOnce = false
     private var lastObservedToken = ""
     private var activeAccountToken: String? = null
+    private var tokenIntent = 0L
+    private var pendingTokenIntent: Long? = null
+    private var minimumTokenRevision = 0L
+    private val tokenWrites = Mutex()
+    private val tokenWriteSignals = MutableStateFlow(0L)
     private val accountEditDrafts = mutableMapOf<String, EditDraft>()
     private val accountAddDrafts = mutableMapOf<String, ManualAddState>()
     private val selectionRequests = mutableMapOf<Int, Long>()
@@ -224,6 +234,7 @@ internal class CairnLinksViewModel(
             if (uiState.manualAdd.visible) accountAddDrafts[key] = uiState.manualAdd.copy(submitting = false)
         }
         activeAccountToken = token
+        searchGeneration += 1
         refreshJob?.cancel()
         searchJob?.cancel()
         selectionRequests.clear()
@@ -340,6 +351,7 @@ internal class CairnLinksViewModel(
                                         val accepted = v2Repository.applyLocal(selection, selection.automatic, pending.field, pending.term, pending.action)
                                         uiState = uiState.copy(v2Selections = uiState.v2Selections + (pending.linkId to accepted.copy(revision = result.revision)))
                                     }
+                                    refreshSearchAfterMutation()
                                     if (!remaining) {
                                         uiState = uiState.copy(v2Drafts = uiState.v2Drafts - pending.linkId,
                                             v2Conflicts = uiState.v2Conflicts - pending.linkId,
@@ -550,6 +562,7 @@ internal class CairnLinksViewModel(
     }
 
     fun setSearchQuery(value: String) {
+        searchGeneration += 1
         searchJob?.cancel()
         val query = value.trim()
         viewModelScope.launch { settingsStore.setLastSearchQuery(value) }
@@ -575,6 +588,14 @@ internal class CairnLinksViewModel(
             delay(250)
             loadSearchPage(query = query, beforeId = null, append = false)
         }
+    }
+
+    // A confirmed mutation can change query/filter membership, even for a row
+    // outside the current main list or page. Read a fresh first page instead of
+    // merging stale membership or continuing its cursor. Debounce coalesces a
+    // burst of confirmed actions; old requests cannot publish into this search.
+    private fun refreshSearchAfterMutation() {
+        if (uiState.searchQuery.isNotBlank()) setSearchQuery(uiState.searchQuery)
     }
 
     fun loadMoreSearchResults() {
@@ -667,6 +688,7 @@ internal class CairnLinksViewModel(
                         busyIds = uiState.busyIds - id,
                         message = nextMessage("已保存整理。"),
                     )
+                    refreshSearchAfterMutation()
                     if (id in uiState.v2Selections || id in uiState.v2Drafts) loadV2Selection(id, force = true)
                     onSuccess()
                 }
@@ -795,6 +817,7 @@ internal class CairnLinksViewModel(
                         editDraft = null,
                         message = nextMessage("已保存修改。"),
                     )
+                    refreshSearchAfterMutation()
                     onSuccess()
                 }
                 LinkMutationResult.Deleted -> Unit
@@ -844,6 +867,7 @@ internal class CairnLinksViewModel(
                         busyIds = uiState.busyIds - linkId,
                         message = message,
                     )
+                    refreshSearchAfterMutation()
                 }
                 LinkMutationResult.Deleted -> Unit
                 is LinkMutationResult.Failed -> {
@@ -877,6 +901,7 @@ internal class CairnLinksViewModel(
                         editDraft = uiState.editDraft?.takeUnless { it.id == linkId },
                         message = nextMessage("已删除链接。"),
                     )
+                    refreshSearchAfterMutation()
                     onSuccess()
                 }
                 is LinkMutationResult.Updated -> Unit
@@ -914,6 +939,7 @@ internal class CairnLinksViewModel(
                         success += 1
                         uiState = uiState.copy(links = uiState.links.upsert(result.link),
                             searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it })
+                        refreshSearchAfterMutation()
                     }
                     LinkMutationResult.Deleted -> Unit
                     is LinkMutationResult.Failed -> failed += 1
@@ -945,13 +971,38 @@ internal class CairnLinksViewModel(
 
     fun setApiToken(value: String) {
         val token = value.trim()
+        val intent = ++tokenIntent
+        pendingTokenIntent = intent
         refreshJob?.cancel()
         searchJob?.cancel()
         // The settings UI updates optimistically, before DataStore emits. Never
         // expose the previous account's selection to actions in that interval.
         activateAccount(token)
-        uiState = uiState.copy(preferences = uiState.preferences.copy(apiToken = token), loading = false, taxonomy = null, taxonomyLoading = false)
-        viewModelScope.launch { settingsStore.setApiToken(token) }
+        uiState = uiState.copy(preferences = uiState.preferences.copy(apiToken = token), loading = false, taxonomy = null, taxonomyLoading = false, message = null, apiTokenSaveError = "")
+        viewModelScope.launch {
+            try {
+                tokenWrites.withLock {
+                    // Skip superseded settings still waiting to be written. A
+                    // write already in progress finishes before the newest one.
+                    if (intent != tokenIntent) return@withLock
+                    val revision = settingsStore.setApiToken(token)
+                    if (intent == tokenIntent) {
+                        minimumTokenRevision = maxOf(minimumTokenRevision, revision)
+                        pendingTokenIntent = null
+                        uiState = uiState.copy(preferences = uiState.preferences.copy(apiTokenRevision = revision))
+                        // Reconsider the latest stored value: a newer external
+                        // write may have arrived while our acknowledgment was
+                        // pending, and need not emit again afterward.
+                        tokenWriteSignals.value += 1
+                    }
+                }
+            } catch (error: java.io.IOException) {
+                if (intent == tokenIntent) uiState = uiState.copy(
+                    apiTokenSaveError = "Token 保存失败，请重试。",
+                    message = nextMessage("Token 保存失败，请重试。"),
+                )
+            }
+        }
         refreshLinks()
         if (token.isNotBlank()) startPendingUploadRetry(showSummary = true)
     }
@@ -1076,7 +1127,18 @@ internal class CairnLinksViewModel(
         viewModelScope.launch {
             settingsStore.preferences
                 .catch { emit(SharePreferences()) }
-                .collect { preferences ->
+                .combine(tokenWriteSignals) { stored, _ -> stored }
+                .collect { stored ->
+                    // DataStore commits and Flow delivery are different events.
+                    // A buffered old token may arrive after a newer setting has
+                    // committed. Apply unrelated preferences but retain the
+                    // latest local account until its revision is observed.
+                    val acceptToken = pendingTokenIntent == null && stored.apiTokenRevision >= minimumTokenRevision
+                    val preferences = if (acceptToken) stored else stored.copy(
+                        apiToken = uiState.preferences.apiToken,
+                        apiTokenRevision = uiState.preferences.apiTokenRevision,
+                    )
+                    if (acceptToken) minimumTokenRevision = maxOf(minimumTokenRevision, stored.apiTokenRevision)
                     val firstLoad = !loadedPreferencesOnce
                     activateAccount(preferences.apiToken.trim())
                     // Compare persisted emissions, not the optimistic settings UI.
@@ -1207,8 +1269,11 @@ internal class CairnLinksViewModel(
         when (result) {
             is LinkCreateResult.Created -> {
                 runCatching { pendingUploadStore.remove(pending.id) }
-                if (isCurrentAccount(generation)) uiState = uiState.copy(links = uiState.links.upsert(result.link),
-                    searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it })
+                if (isCurrentAccount(generation)) {
+                    uiState = uiState.copy(links = uiState.links.upsert(result.link),
+                        searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it })
+                    refreshSearchAfterMutation()
+                }
             }
             is LinkCreateResult.Failed -> {
                 runCatching { pendingUploadStore.recordFailure(pending.id, result.kind) }
@@ -1219,6 +1284,7 @@ internal class CairnLinksViewModel(
     }
 
     private suspend fun loadSearchPage(query: String, beforeId: Int?, append: Boolean) {
+        val search = searchGeneration
         val generation = uiState.accountGeneration
         val apiToken = currentApiToken()
         val filters = uiState.bookmarkFilters
@@ -1235,7 +1301,7 @@ internal class CairnLinksViewModel(
             searchStatusText = if (append) "正在加载更多..." else "正在搜索...",
         )
         val result = withContext(Dispatchers.IO) { repository.listPage(LinkFilter.All, query, apiToken, beforeId, filters) }
-        if (!isCurrentAccount(generation) || uiState.searchQuery.trim() != query || uiState.bookmarkFilters != filters) return
+        if (search != searchGeneration || !isCurrentAccount(generation) || uiState.searchQuery.trim() != query || uiState.bookmarkFilters != filters) return
         when (result) {
             is LinkPageResult.Loaded -> {
                 if (uiState.searchQuery.trim() != query || uiState.bookmarkFilters != filters || apiToken != currentApiToken()) return

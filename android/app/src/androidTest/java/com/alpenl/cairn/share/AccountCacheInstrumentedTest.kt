@@ -1,11 +1,19 @@
 package com.alpenl.cairn.share
 
 import androidx.lifecycle.ViewModelStore
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.preferencesDataStoreFile
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.alpenl.cairn.share.network.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onEach
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -50,8 +58,8 @@ class AccountCacheInstrumentedTest {
         server.shutdown()
     }
 
-    private suspend fun start(): CairnLinksViewModel = withContext(Dispatchers.Main) {
-        CairnLinksViewModel(LinksApiClient(base, 20_000, 20_000), UpdateApiClient("$base/latest"), settings,
+    private suspend fun start(preferences: SharePreferencesStore = settings): CairnLinksViewModel = withContext(Dispatchers.Main) {
+        CairnLinksViewModel(LinksApiClient(base, 20_000, 20_000), UpdateApiClient("$base/latest"), preferences,
             PendingUploadStore(context), ApiDebugClient(base, 20_000, 20_000),
             V2CurationRepository(V2ClientTransport(V2CurationClient(base, 20_000, 20_000))), actions,
             base, "$base/latest", "test", 1).also { models.put("cache", it) }
@@ -89,6 +97,155 @@ class AccountCacheInstrumentedTest {
         fun value(t: String) = JSONObject().put("topics", JSONArray().put(t)).put("content_functions", JSONArray())
             .put("carriers", JSONArray()).put("affordances", JSONArray()).put("form", "").put("use", "")
         return json(JSONObject().put("revision", revision).put("selection", value(topic)).put("automatic", value(automatic)))
+    }
+
+    @Test fun delayedPersistedTokenCannotReactivateTheAccountAfterANewerSetting() = runBlocking<Unit> {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val file = context.preferencesDataStoreFile("credential-race-${System.nanoTime()}")
+        val delegate = PreferenceDataStoreFactory.create(scope = scope, produceFile = { file })
+        val entered = CompletableDeferred<Unit>()
+        val deliver = CompletableDeferred<Unit>()
+        val restored = CompletableDeferred<Unit>()
+        val holdAck = AtomicReference(false)
+        val ackEntered = CompletableDeferred<Unit>()
+        val ackRelease = CompletableDeferred<Unit>()
+        val newerObserved = CompletableDeferred<Unit>()
+        val tokenKey = stringPreferencesKey("api_token")
+        val events = java.util.Collections.synchronizedList(mutableListOf<String>())
+        suspend fun step(label: String, block: suspend () -> Unit) {
+            try { withTimeout(5_000) { block() } }
+            catch (error: TimeoutCancellationException) { throw AssertionError("$label: $events", error) }
+        }
+        val delayed = object : DataStore<Preferences> {
+            override val data = delegate.data.onEach { value ->
+                if (value[tokenKey] == tokenB) {
+                    events.add("observed B")
+                    entered.complete(Unit)
+                    deliver.await()
+                    if (holdAck.get()) newerObserved.complete(Unit)
+                } else if (value[tokenKey] == tokenA && entered.isCompleted) restored.complete(Unit)
+            }
+            override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+                events.add("write started")
+                val result = delegate.updateData { old -> transform(old).also { events.add("transform ${if (it[tokenKey] == tokenA) "A" else "B"}") } }
+                events.add("write returned ${if (result[tokenKey] == tokenA) "A" else "B"}")
+                if (holdAck.get() && result[tokenKey] == tokenA) {
+                    ackEntered.complete(Unit)
+                    ackRelease.await()
+                }
+                return result
+            }
+        }
+        try {
+            // Old installations have a token but no revision key.
+            delegate.edit { it[tokenKey] = tokenA }
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest) = when (request.requestUrl!!.encodedPath) {
+                    "/api/links" -> page(if (request.getHeader("Authorization") == "Bearer $tokenB") "B" else "A")
+                    "/api/taxonomy" -> taxonomy("v1")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            val model = start(SharePreferencesStore(delayed))
+            awaitState(model) { it.links.size == 4 && !it.loading }
+            withContext(Dispatchers.Main) { assertEquals(0L, model.uiState.preferences.apiTokenRevision) }
+            withContext(Dispatchers.Main) { model.setApiToken(tokenB) }
+            step("old B notification must be captured") { entered.await() }
+            val expectedGeneration = withContext(Dispatchers.Main) {
+                model.setApiToken(tokenA)
+                model.uiState.accountGeneration
+            }
+            step("new A must be committed while B notification is delayed") {
+                while (delegate.data.first()[tokenKey] != tokenA) delay(25)
+            }
+            deliver.complete(Unit)
+            step("the ordered A notification must follow B") { restored.await() }
+            awaitState(model) { it.preferences.apiToken == tokenA && it.links.size == 4 && !it.loading }
+            withContext(Dispatchers.Main) {
+                assertEquals("old persisted B must not create two extra account sessions", expectedGeneration, model.uiState.accountGeneration)
+                assertTrue(model.uiState.links.all { it.note == "A" })
+            }
+            val revisionKey = longPreferencesKey("api_token_revision")
+            val previousRevision = delegate.data.first()[revisionKey]!!
+            val rapidGeneration = withContext(Dispatchers.Main) {
+                model.setApiToken(tokenB)
+                model.setApiToken(tokenA)
+                model.setApiToken(tokenB)
+                model.setApiToken(tokenA)
+                model.uiState.accountGeneration
+            }
+            step("the newest rapid setting must be persisted") {
+                while (delegate.data.first().let { (it[revisionKey] ?: 0) <= previousRevision || it[tokenKey] != tokenA }) delay(25)
+            }
+            awaitState(model) { it.preferences.apiTokenRevision > previousRevision && !it.loading }
+            withContext(Dispatchers.Main) { assertEquals(rapidGeneration, model.uiState.accountGeneration) }
+            // A newer external setting can arrive after our write commits but
+            // before its acknowledgment reaches the ViewModel. Do not lose it
+            // while the local write is still considered pending.
+            holdAck.set(true)
+            withContext(Dispatchers.Main) { model.setApiToken(tokenA) }
+            step("the local write must commit before its acknowledgment") { ackEntered.await() }
+            SharePreferencesStore(delegate).setApiToken(tokenB)
+            step("the newer external write must be observed before the old acknowledgment") { newerObserved.await() }
+            withContext(Dispatchers.Main) { assertEquals(tokenA, model.uiState.preferences.apiToken) }
+            ackRelease.complete(Unit)
+            awaitState(model) { it.preferences.apiToken == tokenB && it.links.all { row -> row.note == "B" } && it.links.size == 4 && !it.loading }
+            withContext(Dispatchers.Main) { assertEquals(rapidGeneration + 1, model.uiState.accountGeneration) }
+        } finally {
+            deliver.complete(Unit)
+            ackRelease.complete(Unit)
+            withContext(Dispatchers.Main) { models.clear() }
+            scope.coroutineContext[Job]!!.cancelAndJoin()
+            file.delete()
+        }
+    }
+
+    @Test fun failedCredentialPersistenceKeepsTheChosenSessionAndRetrySurvivesRestart() = runBlocking<Unit> {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val file = context.preferencesDataStoreFile("credential-failure-${System.nanoTime()}")
+        val delegate = PreferenceDataStoreFactory.create(scope = scope, produceFile = { file })
+        val tokenKey = stringPreferencesKey("api_token")
+        val fail = AtomicReference(true)
+        val storage = object : DataStore<Preferences> {
+            override val data = delegate.data
+            override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+                if (fail.get()) throw java.io.IOException("synthetic persistence failure")
+                return delegate.updateData(transform)
+            }
+        }
+        try {
+            delegate.edit { it[tokenKey] = tokenA }
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest) = when (request.requestUrl!!.encodedPath) {
+                    "/api/links" -> page(if (request.getHeader("Authorization") == "Bearer $tokenB") "B" else "A")
+                    "/api/taxonomy" -> taxonomy("v1")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+            val model = start(SharePreferencesStore(storage))
+            awaitState(model) { it.links.size == 4 && !it.loading }
+            withContext(Dispatchers.Main) { model.setApiToken(tokenB) }
+            awaitState(model) { it.apiTokenSaveError == "Token 保存失败，请重试。" && !it.loading }
+            assertEquals(tokenA, delegate.data.first()[tokenKey])
+            SharePreferencesStore(delegate).setCloseAfterSave(false)
+            awaitState(model) { !it.preferences.closeAfterSave }
+            withContext(Dispatchers.Main) {
+                assertEquals(tokenB, model.uiState.preferences.apiToken)
+                assertEquals("Token 保存失败，请重试。", model.uiState.apiTokenSaveError)
+                assertTrue(model.uiState.links.all { it.note == "B" })
+            }
+            fail.set(false)
+            withContext(Dispatchers.Main) { model.setApiToken(tokenB) }
+            awaitState(model) { it.preferences.apiTokenRevision > 0 && it.apiTokenSaveError.isEmpty() && !it.loading }
+            assertEquals(tokenB, delegate.data.first()[tokenKey])
+            withContext(Dispatchers.Main) { models.clear() }
+            val restoredModel = start(SharePreferencesStore(storage))
+            awaitState(restoredModel) { it.preferences.apiToken == tokenB && it.links.size == 4 && !it.loading }
+        } finally {
+            withContext(Dispatchers.Main) { models.clear() }
+            scope.coroutineContext[Job]!!.cancelAndJoin()
+            file.delete()
+        }
     }
 
     @Test fun returningToSameAccountCannotPublishOldDetailSelectionTaxonomyOrDebug() = runBlocking<Unit> {
@@ -214,6 +371,129 @@ class AccountCacheInstrumentedTest {
             assertTrue(model.uiState.busyIds.isEmpty())
             assertEquals(0, callbacks.get())
             assertFalse(model.uiState.message?.text?.contains("已删除") == true)
+        }
+    }
+
+    @Test fun lateSearchCannotUndoAnEditInTheSameAccount() = runBlocking<Unit> {
+        val entered = CountDownLatch(1)
+        val searches = AtomicInteger()
+        val confirmed = AtomicReference(false)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> if (request.requestUrl!!.queryParameter("q") == "match" && searches.incrementAndGet() == 2) {
+                    entered.countDown()
+                    if (!release.await(20, TimeUnit.SECONDS)) MockResponse().setResponseCode(503) else page("before edit")
+                } else page(if (confirmed.get()) "confirmed edit" else "before edit")
+                "/api/taxonomy" -> taxonomy("v1")
+                "/api/links/1" -> { confirmed.set(true); json(link(1, "confirmed edit", true)) }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val model = start()
+        awaitState(model) { it.links.size == 4 && !it.loading }
+        withContext(Dispatchers.Main) { model.setSearchQuery("match") }
+        awaitState(model) { it.searchResults.size == 4 && !it.searchLoading }
+        withContext(Dispatchers.Main) { model.setSearchQuery("match") }
+        assertTrue(entered.await(10, TimeUnit.SECONDS))
+        withContext(Dispatchers.Main) {
+            model.beginEdit(model.uiState.links.first { it.id == 1 })
+            model.setEditNote("confirmed edit")
+            model.saveEdit {}
+        }
+        awaitState(model) { it.links.first { l -> l.id == 1 }.note == "confirmed edit" }
+        release.countDown()
+        awaitState(model) { !it.searchLoading }
+        withContext(Dispatchers.Main) {
+            assertEquals("confirmed edit", model.uiState.links.first { it.id == 1 }.note)
+            assertEquals("confirmed edit", model.uiState.searchResults.first { it.id == 1 }.note)
+        }
+        assertEquals("one replacement search reads confirmed server state", 3, searches.get())
+    }
+
+    @Test fun lateSearchCannotRestoreADeletedResultOutsideTheMainList() = runBlocking<Unit> {
+        val entered = CountDownLatch(1)
+        val searches = AtomicInteger()
+        val deleted = AtomicReference(false)
+        fun matches() = json(JSONObject().put("items", JSONArray().put(link(8, "search only"))).put("next_before_id", 8))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> if (request.requestUrl!!.queryParameter("q") == "match") {
+                    val attempt = searches.incrementAndGet()
+                    if (attempt == 2) {
+                        val stale = matches()
+                        entered.countDown()
+                        if (!release.await(20, TimeUnit.SECONDS)) MockResponse().setResponseCode(503) else stale
+                    } else if (deleted.get()) json(JSONObject().put("items", JSONArray()).put("next_before_id", JSONObject.NULL)) else matches()
+                } else page("main")
+                "/api/links/8" -> { assertEquals("DELETE", request.method); deleted.set(true); MockResponse().setResponseCode(204) }
+                "/api/taxonomy" -> taxonomy("v1")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val model = start()
+        awaitState(model) { it.links.size == 4 && !it.loading }
+        withContext(Dispatchers.Main) { model.setSearchQuery("match") }
+        awaitState(model) { it.searchResults.map { row -> row.id } == listOf(8) && !it.searchLoading }
+        withContext(Dispatchers.Main) { model.setSearchQuery("match") }
+        assertTrue(entered.await(10, TimeUnit.SECONDS))
+        val removed = AtomicInteger()
+        withContext(Dispatchers.Main) { model.deleteLink(8) { removed.incrementAndGet() } }
+        awaitState(model) { removed.get() == 1 }
+        release.countDown()
+        awaitState(model) { !it.searchLoading }
+        withContext(Dispatchers.Main) {
+            assertTrue(model.uiState.searchResults.isEmpty())
+            assertNull(model.uiState.searchNextBeforeId)
+            assertTrue(model.uiState.links.none { it.id == 8 })
+        }
+        assertEquals(3, searches.get())
+    }
+
+    @Test fun editDuringPaginationRestartsMembershipAndDiscardsTheOldCursor() = runBlocking<Unit> {
+        val entered = CountDownLatch(1)
+        val pages = AtomicInteger()
+        val changed = AtomicReference(false)
+        fun result(ids: List<Int>, cursor: Int?) = json(JSONObject().put("items", JSONArray(ids.map { link(it, "match") }))
+            .put("next_before_id", cursor ?: JSONObject.NULL))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> if (request.requestUrl!!.queryParameter("q") == "match") {
+                    if (request.requestUrl!!.queryParameter("before_id") != null) {
+                        if (pages.incrementAndGet() == 1) {
+                            val stale = result(listOf(2, 1), null)
+                            entered.countDown()
+                            if (!release.await(20, TimeUnit.SECONDS)) MockResponse().setResponseCode(503) else stale
+                        } else result(if (changed.get()) listOf(1) else listOf(2, 1), null)
+                    } else result(listOf(4, 3), 3)
+                } else page("match")
+                "/api/links/2" -> { changed.set(true); json(link(2, "no longer relevant", true)) }
+                "/api/taxonomy" -> taxonomy("v1")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val model = start()
+        awaitState(model) { it.links.size == 4 && !it.loading }
+        withContext(Dispatchers.Main) { model.setSearchQuery("match") }
+        awaitState(model) { it.searchResults.size == 2 && !it.searchLoading }
+        withContext(Dispatchers.Main) { model.loadMoreSearchResults() }
+        assertTrue(entered.await(10, TimeUnit.SECONDS))
+        withContext(Dispatchers.Main) {
+            model.beginEdit(model.uiState.links.first { it.id == 2 })
+            model.setEditNote("no longer relevant")
+            model.saveEdit {}
+        }
+        awaitState(model) { it.links.first { row -> row.id == 2 }.note == "no longer relevant" }
+        release.countDown()
+        awaitState(model) { !it.searchLoading }
+        withContext(Dispatchers.Main) {
+            assertEquals(listOf(4, 3), model.uiState.searchResults.map { it.id })
+            assertEquals(3, model.uiState.searchNextBeforeId)
+            model.loadMoreSearchResults()
+        }
+        awaitState(model) { !it.searchLoading }
+        withContext(Dispatchers.Main) {
+            assertEquals(listOf(4, 3, 1), model.uiState.searchResults.map { it.id })
+            assertNull(model.uiState.searchNextBeforeId)
         }
     }
 

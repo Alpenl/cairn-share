@@ -382,6 +382,35 @@ class CurationWorkerRecoveryTest {
         }
     }
 
+    @Test fun confirmedCurationRefreshesRealFilteredSearch() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        store.clear()
+        SharePreferencesStore(context).setApiToken(token)
+        control("online")
+        val id = InstrumentationRegistry.getArguments().getString("cairnTermResetID")!!.toInt()
+        val model = start()
+        waitFor { withContext(Dispatchers.Main) { model.uiState.preferencesLoaded } }
+        withContext(Dispatchers.Main) {
+            model.loadV2Selection(id)
+            model.setBookmarkFilters(BookmarkFilters(topic = "llm"))
+            model.setSearchQuery("android-term-reset")
+        }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Selections.containsKey(id) && model.uiState.searchResults.map { it.id } == listOf(id) && !model.uiState.searchLoading } }
+        control("writes_offline")
+        withContext(Dispatchers.Main) { model.applyV2Action(id, "topics", "", "set_empty") }
+        waitFor { store.snapshot().size == 1 && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() } }
+        withContext(Dispatchers.Main) {
+            assertEquals(listOf(id), model.uiState.searchResults.map { it.id })
+            assertTrue(model.uiState.v2Drafts[id]!!.topics.isEmpty())
+        }
+        control("online")
+        withContext(Dispatchers.Main) { model.flushV2Queue() }
+        waitFor { store.snapshot().isEmpty() && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() && !model.uiState.searchLoading && model.uiState.searchResults.isEmpty() } }
+        assertEquals(3L, remote(id).getLong("revision"))
+        assertEquals(0, remote(id).getJSONObject("selection").getJSONArray("topics").length())
+        withContext(Dispatchers.Main) { models.clear() }
+    }
+
     @Test fun restoreAutomaticDraftAfterProcessDeath() = runBlocking<Unit> {
         assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
         val id = store.snapshot().single().linkId

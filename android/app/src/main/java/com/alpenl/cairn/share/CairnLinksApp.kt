@@ -624,7 +624,7 @@ private fun SettingsScreen(
         SettingsRow(
             icon = Icons.Default.Check,
             title = "访问 Token",
-            subtitle = apiTokenSubtitle(state.preferences.apiToken),
+            subtitle = state.apiTokenSaveError.ifBlank { apiTokenSubtitle(state.preferences.apiToken) },
             onClick = {
                 tokenDraft = state.preferences.apiToken
                 tokenDialogOpen = true
