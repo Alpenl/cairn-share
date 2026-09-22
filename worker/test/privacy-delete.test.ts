@@ -110,7 +110,9 @@ it("bounds each deletion request and continues a large prefix on retry", async (
   expect((await env.ENRICHMENT_IMAGES.list({prefix:`enrichment/${id}/`})).objects.length).toBeGreaterThan(0);
   expect((await request(`links/${id}`,"DELETE")).status).toBe(204);
   expect((await env.ENRICHMENT_IMAGES.list({prefix:`enrichment/${id}/`})).objects).toHaveLength(0);
-});
+// Includes 405 real R2 fixture writes under parallel test load. The assertions
+// above check bounded deletion/retry semantics, not a 5-second latency SLA.
+}, 15000);
 
 it("atomically deletes populated private tables, references, budgets and cached visibility", async () => {
   const id=await create();

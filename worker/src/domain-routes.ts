@@ -1,4 +1,5 @@
 import { readSelectionSnapshot } from "./selection-state";
+import { extensionBudgetRoute } from "./extension-budget";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
@@ -35,6 +36,8 @@ async function sha256Hex(value: string): Promise<string> {
 // Internal v2 API. Every route requires the enricher token (enforced by the
 // caller); management-only mutations are additionally documented as such.
 export async function domainRoute(request: Request, env: Env, path: string): Promise<Response> {
+  const reservation = await extensionBudgetRoute(request, env, path);
+  if (reservation) return reservation;
   const execution = await evidenceExecutionRoute(request, env, path);
   if (execution) return execution;
   // --- Evidence snapshots -------------------------------------------------
