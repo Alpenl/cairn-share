@@ -56,7 +56,7 @@ for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConfl
     -e cairnWorkerUrl http://127.0.0.1:18978 -e cairnBaselineID "$baseline_id" \
     com.alpenl.cairn.share.test/androidx.test.runner.AndroidJUnitRunner | tee "$work/$phase.log"
   # am instrument can exit zero on a failed test; require the actual JUnit result.
-  rg -q '^OK \(1 test\)' "$work/$phase.log"
+  grep -Eq '^OK \(1 test\)' "$work/$phase.log"
 done
 curl -fsS "http://127.0.0.1:$proxy_port/__test/control" > "$work/transport-history.json"
 echo "PASS: seven phases ran in separate Android processes against actual authenticated Worker/D1"

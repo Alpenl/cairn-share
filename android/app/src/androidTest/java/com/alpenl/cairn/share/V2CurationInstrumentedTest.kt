@@ -216,7 +216,13 @@ class V2CurationInstrumentedTest {
             assertNull(received.get())
             runBlocking { SharePreferencesStore(context).setApiToken(token) }
             compose.waitUntil(20_000) {
-                runCatching { compose.onNodeWithTag("v2_legacy_review").assertExists(); true }.getOrDefault(false)
+                // Switching accounts temporarily removes this LazyColumn item.
+                // Its restored position can be outside the composed viewport.
+                runCatching {
+                    compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_legacy_review"))
+                    compose.onNodeWithTag("v2_legacy_review").assertIsDisplayed()
+                    true
+                }.getOrDefault(false)
             }
             compose.onNodeWithTag("v2_legacy_review").performClick()
             compose.onNodeWithTag("v2_legacy_confirm").performClick()
