@@ -114,6 +114,15 @@ for (const protocol of ["legacy", "v2"] as const) {
     // Let the stale lease expire; the work remains recoverable for a fresh consumer.
     await env.DB.prepare("UPDATE classification_jobs SET lease_until='2000-01-01' WHERE link_id=?").bind(id).run();
     const nextCaps = change === "target" && protocol === "v2" ? { ...caps, policy_versions: ["r3-next"] } : caps;
+    if (change === "content" && protocol === "v2") {
+      // A new content revision must wait for its own checkpoint. Identical
+      // objective bytes may be registered at the newer source revision.
+      expect((await request("enrichment/classifications/claim", nextCaps)).status).toBe(204);
+      expect((await request(`v2/links/${id}/evidence`, { snapshot: {
+        blocks: [{ id: "primary", role: "primary", text: "synthetic source" }],
+        retrieval: "manual", fetched_at: "2026-09-22T00:00:00Z", truncation: { truncated: false }
+      } })).status).toBe(200);
+    }
     const next = await request("enrichment/classifications/claim", nextCaps);
     expect(next.status).toBe(200);
     expect((await next.json() as { lease_token: string }).lease_token).not.toBe(job.lease_token);

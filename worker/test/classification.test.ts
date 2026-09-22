@@ -20,10 +20,56 @@ async function setup() {
   const source = { original_text: "A guide to evaluating LLMs", original_language: "en", context_text: "A related comment",
     related_links: [], image_urls: [], model: "grok-test" };
   expect((await request(`enrichment/jobs/${id}/source`, { lease_token, source })).status).toBe(200);
+  expect((await request(`v2/links/${id}/evidence`, { snapshot: {
+    blocks: [{ id: "primary", role: "primary", text: source.original_text }],
+    fetched_at: "2026-09-22T00:00:00Z", retrieval: "manual", truncation: { truncated: false }
+  } })).status).toBe(200);
   return { id, lease_token, source };
 }
 
 const settings = { taxonomy_version: taxonomy.version, policy_version: "jev-tags-v1", model: "jev-latest" };
+
+it.each(["primary", "context"])("R3-02: delayed %s snapshot does not claim or burn attempts", async (changedField) => {
+  const { id, lease_token, source } = await setup();
+  expect((await switchTarget(v2Target)).status).toBe(200);
+  const prior = await env.DB.prepare("SELECT id,content_revision FROM evidence_snapshots WHERE link_id=?").bind(id)
+    .first<{ id: number; content_revision: number }>();
+  const changed = changedField === "primary" ? { ...source, original_text: "new source awaiting its snapshot" }
+    : { ...source, context_text: "new context awaiting its snapshot" };
+  expect((await request(`enrichment/jobs/${id}/source`, { lease_token, source: changed })).status).toBe(200);
+  for (let poll = 0; poll < 8; poll++) {
+    expect((await request("enrichment/classifications/claim", v2Caps)).status).toBe(204);
+  }
+  const waiting = await env.DB.prepare("SELECT status,attempts,lease_token FROM classification_jobs WHERE link_id=?").bind(id).first();
+  expect(waiting).toEqual({ status: "pending", attempts: 0, lease_token: null });
+  expect((await request(`v2/links/${id}/evidence`, { snapshot: {
+    blocks: [{ id: "primary", role: "primary", text: changed.original_text },
+      { id: "context", role: "legacy_unknown", text: changed.context_text }],
+    fetched_at: "2026-09-22T00:00:00Z", retrieval: "manual", truncation: { truncated: false }
+  } })).status).toBe(200);
+  const claimed = await request("enrichment/classifications/claim", v2Caps);
+  expect(claimed.status).toBe(200);
+  const job = await claimed.json() as { content_revision: number; evidence_snapshot_id: number; evidence_hash: string; original_text: string };
+  const bound = await env.DB.prepare("SELECT content_revision,content_hash FROM evidence_snapshots WHERE id=?").bind(job.evidence_snapshot_id)
+    .first<{ content_revision: number; content_hash: string }>();
+  expect(job.content_revision).toBe(bound!.content_revision);
+  expect(job.content_revision).toBeGreaterThan(prior!.content_revision);
+  expect(job.evidence_snapshot_id).not.toBe(prior!.id);
+  expect(job.evidence_hash).toBe(bound!.content_hash);
+  expect(job.original_text).toBe(changed.original_text);
+});
+
+it("R3-02: a snapshot with the current revision but another primary cannot be claimed", async () => {
+  const { id } = await setup();
+  expect((await switchTarget(v2Target)).status).toBe(200);
+  expect((await request(`v2/links/${id}/evidence`, { snapshot: {
+    blocks: [{ id: "primary", role: "primary", text: "unrelated primary text" }],
+    fetched_at: "2026-09-22T00:00:00Z", retrieval: "manual", truncation: { truncated: false }
+  } })).status).toBe(200);
+  expect((await request("enrichment/classifications/claim", v2Caps)).status).toBe(204);
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+});
+
 async function claim() {
   const response = await request("enrichment/classifications/claim", settings);
   expect(response.status).toBe(200);

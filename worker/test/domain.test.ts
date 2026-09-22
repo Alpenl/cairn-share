@@ -346,6 +346,7 @@ it("completes a v2 classification into runs, decision and the unified selection 
   const id = await createLink();
   const { default: taxonomy } = await import("../src/taxonomy.json");
   await env.DB.prepare("UPDATE links SET original_text = 'A guide to evaluating LLMs' WHERE id = ?").bind(id).run();
+  await request(`v2/links/${id}/evidence`, { snapshot: snapshot({ blocks: [{ id: "b1", role: "primary", text: "A guide to evaluating LLMs" }] }) });
   // Activate an authoritative v2 target for this consumer.
   const target = await request("enrichment/classifications/target", {
     spec_id: "classify-v1", spec_hash: await storedSpecHash(), taxonomy_version: taxonomy.version,
@@ -546,6 +547,7 @@ it("R2-01: a failed completion guard leaves no success run, decision or operatio
   const id = await createLink();
   const { default: taxonomy } = await import("../src/taxonomy.json");
   await env.DB.prepare("UPDATE links SET original_text = 'source body' WHERE id = ?").bind(id).run();
+  await request(`v2/links/${id}/evidence`, { snapshot: snapshot({ blocks: [{ id: "b1", role: "primary", text: "source body" }] }) });
   await request("enrichment/classifications/target", {
     spec_id: "classify-v1", spec_hash: await storedSpecHash(), taxonomy_version: taxonomy.version,
     policy_version: "jev-policy-v2", requested_model: "jev-latest", protocol: "v2"
@@ -591,6 +593,8 @@ it("R2-02: the claim binds the evidence identity and the run records it", async 
   const id = await createLink();
   const { default: taxonomy } = await import("../src/taxonomy.json");
   await env.DB.prepare("UPDATE links SET original_text = 'source body' WHERE id = ?").bind(id).run();
+  const evidence = snapshot({ blocks: [{ id: "b1", role: "primary", text: "source body" }] });
+  await request(`v2/links/${id}/evidence`, { snapshot: evidence });
   await request("enrichment/classifications/target", {
     spec_id: "classify-v1", spec_hash: await storedSpecHash(), taxonomy_version: taxonomy.version,
     policy_version: "jev-policy-v2", requested_model: "jev-latest", protocol: "v2"
@@ -600,8 +604,8 @@ it("R2-02: the claim binds the evidence identity and the run records it", async 
     content_revision: number; evidence_hash: string; evidence_snapshot_id: number | null; lease_token: string; revision: number;
   };
   expect(job.content_revision).toBe(2); // create (1) + source update (2)
-  expect(job.evidence_hash).toBe("");
-  expect(job.evidence_snapshot_id).toBeNull();
+  expect(job.evidence_hash).toBe(await contentHash(evidence));
+  expect(job.evidence_snapshot_id).toBeGreaterThan(0);
   const link = await env.DB.prepare("SELECT content_revision FROM links WHERE id = ?").bind(id).first<{ content_revision: number }>();
   expect(job.content_revision).toBe(link!.content_revision);
   // A completion that echoes a different content revision is rejected as input

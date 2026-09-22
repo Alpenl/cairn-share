@@ -368,19 +368,24 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     const boundModel = isLegacy ? String(body.model) : target.requested_model;
     const boundTaxonomy = isLegacy ? taxonomy.version : target.taxonomy_version;
     // The lease binds the exact evidence identity the inference will see: the
-    // content revision and the latest snapshot id/hash. A completion can then
-    // never re-stamp an old inference with a newer revision (R2-02).
+    // content revision and its matching snapshot id/hash. A completion can then
+    // never re-stamp an old inference with a newer revision (R2-02). A v2 job
+    // waits without consuming attempts until its current source is checkpointed.
     const job = await env.DB.prepare(`UPDATE classification_jobs SET status='processing',
       attempts=CASE WHEN target_generation<>? THEN 1 ELSE attempts+1 END,
       lease_token=?, lease_until=?, next_retry_at=NULL, error=NULL,
       target_generation=?, spec_id=?, taxonomy_version=?, policy_version=?, requested_model=?, updated_at=?,
       content_revision=(SELECT content_revision FROM links WHERE id=classification_jobs.link_id),
       evidence_snapshot_id=(SELECT id FROM evidence_snapshots WHERE link_id=classification_jobs.link_id
-        ORDER BY content_revision DESC, id DESC LIMIT 1),
+        AND content_revision=(SELECT content_revision FROM links WHERE id=classification_jobs.link_id)),
       evidence_hash=COALESCE((SELECT content_hash FROM evidence_snapshots WHERE link_id=classification_jobs.link_id
-        ORDER BY content_revision DESC, id DESC LIMIT 1),'')
+        AND content_revision=(SELECT content_revision FROM links WHERE id=classification_jobs.link_id)),'')
       WHERE link_id=(SELECT j.link_id FROM classification_jobs j JOIN links l ON l.id=j.link_id
         WHERE COALESCE(l.original_text,'')<>'' AND l.curation_status<>'drop'
+        AND (?=1 OR EXISTS (SELECT 1 FROM evidence_snapshots s
+          WHERE s.link_id=l.id AND s.content_revision=l.content_revision AND s.completeness<>'empty'
+          AND EXISTS (SELECT 1 FROM json_each(s.payload,'$.blocks') b
+            WHERE json_extract(b.value,'$.role')='primary' AND json_extract(b.value,'$.text')=l.original_text)))
         AND (j.status<>'processing' OR j.lease_until<=?)
         AND (j.target_generation<>?
           OR (j.attempts<5 AND (j.status='pending' OR (j.status='failed' AND j.next_retry_at<=?)
@@ -391,7 +396,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
                 target_generation, spec_id, content_revision, evidence_snapshot_id, evidence_hash`)
       .bind(target.generation, token, until,
         target.generation, target.spec_id, boundTaxonomy, boundPolicy, boundModel, now,
-        now, target.generation, now, now, target.generation)
+        isLegacy ? 1 : 0, now, target.generation, now, now, target.generation)
       .first<{ id: number; revision: number; content_revision: number; evidence_snapshot_id: number | null; evidence_hash: string }>();
     if (!job) return new Response(null, { status: 204, headers });
     const source = await env.DB.prepare(`SELECT l.url,l.note,l.original_text,l.related_links,

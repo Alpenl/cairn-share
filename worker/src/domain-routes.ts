@@ -309,7 +309,7 @@ async function saveSnapshot(request: Request, env: Env, id: number): Promise<Res
   const existing = await env.DB.prepare(
     `SELECT content_revision, content_hash FROM evidence_snapshots WHERE link_id = ? ORDER BY content_revision DESC LIMIT 1`
   ).bind(id).first<{ content_revision: number; content_hash: string }>();
-  if (existing && existing.content_hash === hash) {
+  if (existing && existing.content_hash === hash && existing.content_revision === link.content_revision) {
     return reply({ id, content_revision: existing.content_revision, content_hash: hash, unchanged: true });
   }
   // The source-save trigger may already have advanced the link revision for
