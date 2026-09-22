@@ -803,6 +803,10 @@ class AccountCacheInstrumentedTest {
         }
         val own = accountKeyFor(base, tokenA)
         val other = accountKeyFor(base, tokenB)
+        val deletedImage="enrichment/99/${"c".repeat(64)}.png"
+        val pixels=android.graphics.Bitmap.createBitmap(1,1,android.graphics.Bitmap.Config.ARGB_8888)
+        assertNotNull(BookmarkImageCache.put(own,deletedImage,pixels))
+        assertNotNull(BookmarkImageCache.put(other,deletedImage,pixels))
         actions.enqueue(QueuedCurationAction(99,"delete-own","topics","llm","accept",0,own))
         actions.enqueue(QueuedCurationAction(99,"keep-other","topics","eng","accept",0,other))
         val model = start()
@@ -820,6 +824,9 @@ class AccountCacheInstrumentedTest {
             assertFalse(model.uiState.detailLoads.containsKey(99))
         }
         assertEquals(listOf("keep-other"), actions.snapshot().map { it.operationKey })
+        assertNull(BookmarkImageCache.get(own,deletedImage))
+        assertNull(BookmarkImageCache.put(own,deletedImage,pixels))
+        assertNotNull(BookmarkImageCache.get(other,deletedImage))
         // A recreated store must retain the deletion boundary for late enqueuers.
         CurationActionStore(context).enqueue(QueuedCurationAction(99,"late-own","topics","llm","accept",0,own))
         assertEquals(listOf("keep-other"), actions.snapshot().map { it.operationKey })
@@ -908,6 +915,19 @@ class AccountCacheInstrumentedTest {
         assertEquals(listOf("b-keep"),actions.snapshot().map{it.operationKey})
         if (returnToA) awaitState(model){it.links.none{row->row.id==1}}
         else withContext(Dispatchers.Main){assertTrue(model.uiState.links.any{it.id==1 && it.note=="B"})}
+    }
+
+
+    @Test fun deletionPurgesDecodedImagesAndRejectsLateDownloadsOnlyForTheirOwner() = runBlocking<Unit> {
+        val a=accountKeyFor(base,tokenA);val b=accountKeyFor(base,tokenB)
+        val key="enrichment/99/${"a".repeat(64)}.png"
+        val other="enrichment/100/${"b".repeat(64)}.png"
+        val bitmap=android.graphics.Bitmap.createBitmap(1,1,android.graphics.Bitmap.Config.ARGB_8888)
+        assertNotNull(BookmarkImageCache.put(a,key,bitmap));assertNotNull(BookmarkImageCache.put(a,other,bitmap))
+        assertNotNull(BookmarkImageCache.put(b,key,bitmap))
+        withContext(Dispatchers.Main){BookmarkImageCache.forget(a,99)}
+        assertNull(BookmarkImageCache.get(a,key));assertNull(BookmarkImageCache.put(a,key,bitmap))
+        assertNotNull(BookmarkImageCache.get(a,other));assertNotNull(BookmarkImageCache.get(b,key))
     }
 
 }

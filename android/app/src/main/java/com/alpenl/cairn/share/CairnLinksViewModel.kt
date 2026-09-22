@@ -985,6 +985,7 @@ internal class CairnLinksViewModel(
     }
 
     private fun forgetDeletedLink(id: Int) {
+        BookmarkImageCache.forget(curationAccountKey(), id)
         deletedLinks = deletedLinks + id
         pendingDeletions = pendingDeletions - id
         selectionRequests[id] = (selectionRequests[id] ?: 0) + 1
@@ -1020,6 +1021,7 @@ internal class CairnLinksViewModel(
                     val result = withContext(Dispatchers.IO) { repository.delete(linkId, apiToken) }
                     if (result == LinkMutationResult.Deleted || result == LinkMutationResult.DeletionPending) {
                         curationActionStore.confirmDeletion(account, linkId)
+                        BookmarkImageCache.forget(account, linkId)
                         if (accountEditDrafts[account]?.id == linkId) accountEditDrafts.remove(account)
                         if (!isCurrentAccount(generation) || account != curationAccountKey()) return@withLock
                         forgetDeletedLink(linkId)

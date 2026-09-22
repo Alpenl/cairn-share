@@ -187,21 +187,46 @@ internal fun TermSelector(label: String, value: String, terms: List<TaxonomyTerm
     }
 }
 
-// Bound decoded pixels as well as response bytes. Including the token in the
-// cache key prevents reuse across credential sessions.
-private val imageCache = object : LruCache<String, Bitmap>(12 * 1024 * 1024) {
-    override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
+// Only account fingerprints are retained; raw credentials are never cache keys.
+internal object BookmarkImageCache {
+    private data class Key(val account: String, val image: String)
+    private val cache = object : LruCache<Key, Bitmap>(12 * 1024 * 1024) {
+        override fun sizeOf(key: Key, value: Bitmap): Int = value.allocationByteCount
+    }
+    private val deleted = mutableSetOf<Pair<String, Int>>()
+    var revision by mutableStateOf(0L)
+        private set
+
+    private fun linkId(key: String): Int? = key.split('/').let {
+        if (it.size == 3 && it[0] == "enrichment") it[1].toIntOrNull() else null
+    }
+    @Synchronized fun isDeleted(account: String, key: String): Boolean = account to linkId(key) in deleted
+    @Synchronized fun get(account: String, key: String): Bitmap? =
+        if (isDeleted(account, key)) null else cache.get(Key(account, key))
+    @Synchronized fun put(account: String, key: String, bitmap: Bitmap): Bitmap? {
+        if (isDeleted(account, key)) return null
+        cache.put(Key(account, key), bitmap)
+        return bitmap
+    }
+    @Synchronized fun forget(account: String, id: Int) {
+        if (!deleted.add(account to id)) return
+        for (key in cache.snapshot().keys) if (key.account == account && linkId(key.image) == id) cache.remove(key)
+        revision += 1
+    }
 }
 
 @Composable
 internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String) {
-    val cacheKey = "$baseUrl|$apiToken|$imageKey"
+    val account = accountKeyFor(baseUrl, apiToken)
+    val cacheKey = "$account|$imageKey"
+    val cacheRevision = BookmarkImageCache.revision
+    if (BookmarkImageCache.isDeleted(account, imageKey)) return
     var retry by remember(imageKey) { mutableStateOf(0) }
     var loading by remember(cacheKey) { mutableStateOf(true) }
-    var bitmap by remember(cacheKey) { mutableStateOf(imageCache.get(cacheKey)) }
-    LaunchedEffect(cacheKey, retry) {
+    var bitmap by remember(cacheKey, cacheRevision) { mutableStateOf(BookmarkImageCache.get(account, imageKey)) }
+    LaunchedEffect(cacheKey, cacheRevision, retry) {
         loading = true
-        bitmap = imageCache.get(cacheKey) ?: withContext(Dispatchers.IO) {
+        bitmap = BookmarkImageCache.get(account, imageKey) ?: withContext(Dispatchers.IO) {
             val bytes = LinksApiClient(baseUrl).image(imageKey, apiToken) ?: return@withContext null
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
@@ -210,7 +235,7 @@ internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String) 
             while (maxOf(bounds.outWidth, bounds.outHeight) / options.inSampleSize.coerceAtLeast(1) > 2048) {
                 options.inSampleSize = options.inSampleSize.coerceAtLeast(1) * 2
             }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.also { imageCache.put(cacheKey, it) }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.let { BookmarkImageCache.put(account, imageKey, it) }
         }
         loading = false
     }
