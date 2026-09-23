@@ -11,13 +11,29 @@ internal data class BookmarkFilters(
     val source: String = "",
     val uncertain: Boolean = false,
     val recentDays: Int = 0,
+    // v2 dimensions. Same-dimension values are OR-ed, cross-dimension AND-ed,
+    // matching the Worker's frozen query contract.
+    val contentFunctions: List<String> = emptyList(),
+    val carriers: List<String> = emptyList(),
+    val affordances: List<String> = emptyList(),
+    val entityState: String = "",
+    val topics: List<String> = emptyList(),
 ) {
+    fun needsEffectiveFilterContract(): Boolean = topic.isNotEmpty() || topics.isNotEmpty() ||
+        form.isNotEmpty() || use.isNotEmpty() || contentFunctions.isNotEmpty() ||
+        carriers.isNotEmpty() || affordances.isNotEmpty() || entityState.isNotEmpty()
+
     fun parameters(now: Instant = Instant.now()): Map<String, String> = buildMap {
         put("curation_status", curationStatus)
         put("topic", topic)
+        if (topics.isNotEmpty()) put("topics", topics.joinToString(","))
         put("form", form)
         put("use", use)
         put("source", source)
+        if (contentFunctions.isNotEmpty()) put("content_functions", contentFunctions.joinToString(","))
+        if (carriers.isNotEmpty()) put("carriers", carriers.joinToString(","))
+        if (affordances.isNotEmpty()) put("affordances", affordances.joinToString(","))
+        if (entityState.isNotEmpty()) put("entity_state", entityState)
         if (uncertain) put("uncertain", "true")
         if (recentDays > 0) put("since", now.minus(recentDays.toLong(), ChronoUnit.DAYS).toString())
     }.filterValues { it.isNotEmpty() }
@@ -26,9 +42,13 @@ internal data class BookmarkFilters(
         val data = link.enrichment
         val labels = data?.classification
         return (curationStatus.isBlank() || (data?.curationStatus?.apiValue ?: "inbox") == curationStatus) &&
-            (topic.isBlank() || topic in labels?.topics.orEmpty()) &&
+            ((topics + listOf(topic).filter { it.isNotBlank() }).let { requested -> requested.isEmpty() || requested.any { it in labels?.topics.orEmpty() } }) &&
             (form.isBlank() || labels?.form == form) && (use.isBlank() || labels?.use == use) &&
             (source.isBlank() || data?.source == source) &&
+            (contentFunctions.isEmpty() || contentFunctions.any { it in labels?.contentFunctions.orEmpty() }) &&
+            (carriers.isEmpty() || carriers.any { it in labels?.carriers.orEmpty() }) &&
+            (affordances.isEmpty() || affordances.any { it in labels?.affordances.orEmpty() }) &&
+            (entityState.isBlank() || data?.entityState in entityState.split(',')) &&
             (!uncertain || (data?.classificationReviewed != true && labels?.uncertainty != false)) &&
             (recentDays <= 0 || runCatching { !Instant.parse(link.createdAt).isBefore(now.minus(recentDays.toLong(), ChronoUnit.DAYS)) }.getOrDefault(false))
     }

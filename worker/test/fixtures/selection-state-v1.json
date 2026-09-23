@@ -1,0 +1,153 @@
+{
+  "id": 1,
+  "revision": 0,
+  "selection": {
+    "topics": [
+      "llm"
+    ],
+    "content_functions": [],
+    "carriers": [],
+    "affordances": [],
+    "form": "",
+    "use": ""
+  },
+  "automatic": {
+    "topics": [
+      "llm"
+    ],
+    "content_functions": [],
+    "carriers": [],
+    "affordances": [],
+    "form": "",
+    "use": ""
+  },
+  "state": {
+    "version": 1,
+    "personal_revision": 0,
+    "content_revision": 1,
+    "decision_id": 1,
+    "decision_content_revision": 1,
+    "policy_version": "jev-policy-v2",
+    "classification_queue": null,
+    "evidence": null,
+    "fields": {
+      "topics": {
+        "values": [
+          {
+            "term": "llm",
+            "origin": "automatic",
+            "confirmed": false,
+            "revision": null
+          }
+        ],
+        "empty": null,
+        "cleared_automatic": null,
+        "actions": [],
+        "status": "completed_nonempty",
+        "assessment_available": true,
+        "incomplete": false,
+        "candidates": [
+          {
+            "dimension": "topics",
+            "term_id": "llm",
+            "verdict": "accepted",
+            "probability": 0.9,
+            "reason": "above bound"
+          },
+          {
+            "dimension": "topics",
+            "term_id": "eval",
+            "verdict": "abstained",
+            "probability": 0.5,
+            "reason": "between bounds"
+          },
+          {
+            "dimension": "topics",
+            "term_id": "design",
+            "verdict": "rejected",
+            "probability": 0,
+            "reason": "below bound"
+          }
+        ]
+      },
+      "content_functions": {
+        "values": [],
+        "empty": null,
+        "cleared_automatic": null,
+        "actions": [],
+        "status": "unknown",
+        "assessment_available": true,
+        "incomplete": false,
+        "candidates": []
+      },
+      "carriers": {
+        "values": [],
+        "empty": null,
+        "cleared_automatic": null,
+        "actions": [],
+        "status": "unknown",
+        "assessment_available": true,
+        "incomplete": false,
+        "candidates": []
+      },
+      "affordances": {
+        "values": [],
+        "empty": null,
+        "cleared_automatic": null,
+        "actions": [],
+        "status": "not_run",
+        "assessment_available": true,
+        "incomplete": true,
+        "candidates": []
+      },
+      "form": {
+        "values": [],
+        "empty": null,
+        "cleared_automatic": null,
+        "actions": [],
+        "status": "abstained",
+        "assessment_available": true,
+        "incomplete": false,
+        "candidates": [
+          {
+            "dimension": "form",
+            "candidate": "method",
+            "verdict": "abstained",
+            "probability": 0.5,
+            "reason": "below bound"
+          }
+        ]
+      },
+      "use": {
+        "values": [],
+        "empty": null,
+        "cleared_automatic": null,
+        "actions": [],
+        "status": "completed_empty",
+        "assessment_available": true,
+        "incomplete": false,
+        "candidates": [
+          {
+            "dimension": "use",
+            "candidate": "none",
+            "verdict": "accepted",
+            "probability": 0.9,
+            "reason": "explicit none"
+          }
+        ]
+      }
+    },
+    "entities": {
+      "values": [],
+      "empty": null,
+      "cleared_automatic": null,
+      "actions": [],
+      "status": "not_run",
+      "recorded_state": "not_run",
+      "content_revision": null,
+      "evidence_snapshot_id": null,
+      "revision": 0,
+      "automatic": []
+    }
+  }
+}

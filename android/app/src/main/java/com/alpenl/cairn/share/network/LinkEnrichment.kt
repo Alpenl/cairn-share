@@ -17,7 +17,67 @@ internal data class BookmarkClassification(
     val whySuggestion: String = "",
     val entities: List<String> = emptyList(),
     val uncertainty: Boolean = true,
+    // v2 dimensions. An older Worker simply does not return them, so they stay
+    // empty rather than being treated as an explicit empty selection.
+    val contentFunctions: List<String> = emptyList(),
+    val carriers: List<String> = emptyList(),
+    val affordances: List<String> = emptyList(),
+    // True when the payload carried v2 fields at all. It lets the UI degrade to
+    // read-only instead of presenting a v1 projection as if it were complete.
+    val multiDimensional: Boolean = false,
 )
+
+// FieldStatus distinguishes a not-run field from a failed one and from a legal
+// empty result, so an empty value is never shown as an error.
+internal enum class FieldStatus(val apiValue: String) {
+    Accepted("accepted"),
+    Rejected("rejected"),
+    Abstained("abstained"),
+    NotRun("not_run"),
+    NotApplicable("not_applicable"),
+    Stale("stale"),
+}
+
+// FieldOverride is one explicit field/tag-level human action.
+internal data class FieldOverride(
+    val field: String,
+    val term: String = "",
+    val action: String,
+    val operationKey: String,
+    val expectedRevision: Long? = null,
+) {
+    fun encode(): String = JSONObject().apply {
+        put("field", field)
+        if (term.isNotEmpty()) put("term", term)
+        put("action", action)
+        put("operation_key", operationKey)
+        expectedRevision?.let { put("expected_revision", it) }
+    }.toString()
+}
+
+internal data class EnrichmentCacheIdentity(
+    val schemaVersion: Int,
+    val representation: String,
+    val contentRevision: Long,
+    val personalRevision: Long,
+    val bodyRevision: Long,
+    // Canonical invalidation markers; not provenance of the legacy projection.
+    val latestDecisionId: Long,
+    val latestEntityRevision: Long,
+)
+
+private fun decodeCacheIdentity(json: JSONObject?): EnrichmentCacheIdentity? {
+    if (json == null) return null
+    val representation = json.optString("representation")
+    if (json.opt("schema_version") != 1 || representation !in setOf("enrichment_summary", "enrichment_detail")) return null
+    fun revision(key: String): Long? {
+        val value = json.opt(key) as? Number ?: return null
+        return value.toLong().takeIf { it >= 0 && it.toDouble() == value.toDouble() }
+    }
+    return EnrichmentCacheIdentity(1, representation, revision("content_revision") ?: return null,
+        revision("personal_revision") ?: return null, revision("body_revision") ?: return null,
+        revision("latest_decision_id") ?: return null, revision("latest_entity_revision") ?: return null)
+}
 
 internal data class LinkEnrichment(
     val status: String = "pending",
@@ -33,16 +93,32 @@ internal data class LinkEnrichment(
     val classificationReviewed: Boolean = false,
     val why: String = "",
     val curationStatus: CurationStatus = CurationStatus.Inbox,
+    // Entity extraction lifecycle. A not-run field is not the same as a failed
+    // one and neither is the same as a legal empty result.
+    val entityState: String = "not_run",
     val contentLoaded: Boolean = false,
     val updatedAt: String = "",
+    val cacheIdentity: EnrichmentCacheIdentity? = null,
+    val cacheIdentityPresent: Boolean = false,
 )
 
-internal data class TaxonomyTerm(val id: String, val label: String, val active: Boolean)
+internal data class TaxonomyTerm(
+    val id: String,
+    val label: String,
+    val active: Boolean,
+    val deprecated: Boolean = false,
+    val description: String = "",
+)
 
 internal data class BookmarkTaxonomy(
     val topics: List<TaxonomyTerm>,
     val forms: List<TaxonomyTerm>,
     val uses: List<TaxonomyTerm>,
+    // v2 dimensions. Missing dimensions are empty, not an error.
+    val contentFunctions: List<TaxonomyTerm> = emptyList(),
+    val carriers: List<TaxonomyTerm> = emptyList(),
+    val affordances: List<TaxonomyTerm> = emptyList(),
+    val multiDimensional: Boolean = false,
 )
 
 internal sealed interface TaxonomyResult {
@@ -87,19 +163,38 @@ internal fun decodeEnrichment(json: JSONObject): LinkEnrichment = LinkEnrichment
             topics = it.optJSONArray("topics").strings(), form = it.text("form"), use = it.text("use"),
             whySuggestion = it.text("why_suggestion"), entities = it.optJSONArray("entities").strings(),
             uncertainty = it.optBoolean("uncertainty", true),
+            contentFunctions = it.optJSONArray("content_functions").strings(),
+            carriers = it.optJSONArray("carriers").strings(),
+            affordances = it.optJSONArray("affordances").strings(),
+            multiDimensional = it.has("content_functions") || it.has("carriers") || it.has("affordances"),
         )
     },
     classificationReviewed = json.optBoolean("classification_reviewed", false),
     why = json.text("why"),
     curationStatus = CurationStatus.entries.firstOrNull { it.apiValue == json.text("curation_status") } ?: CurationStatus.Inbox,
+    entityState = json.text("entity_state").ifBlank { "not_run" },
     contentLoaded = json.optBoolean("content_loaded", false),
     updatedAt = json.text("updated_at"),
+    cacheIdentity = decodeCacheIdentity(json.optJSONObject("cache_identity")),
+    cacheIdentityPresent = json.has("cache_identity"),
 )
 
 internal fun SavedLink.retainLoadedContent(previous: SavedLink?): SavedLink {
     val fresh = enrichment ?: return this
     val loaded = previous?.enrichment ?: return this
-    if (fresh.contentLoaded || !loaded.contentLoaded || url != previous.url || note != previous.note ||
+    val freshIdentity = fresh.cacheIdentity
+    val loadedIdentity = loaded.cacheIdentity
+    // A new server supplies explicit representation and material revision. On
+    // older servers only a nonempty equal timestamp can justify body reuse.
+    val sameMaterial = if (freshIdentity != null && loadedIdentity != null) {
+        freshIdentity.schemaVersion == loadedIdentity.schemaVersion &&
+            freshIdentity.representation == "enrichment_summary" &&
+            loadedIdentity.representation in setOf("enrichment_summary", "enrichment_detail") &&
+            freshIdentity.contentRevision == loadedIdentity.contentRevision &&
+            freshIdentity.bodyRevision == loadedIdentity.bodyRevision
+    } else freshIdentity == null && loadedIdentity == null && !fresh.cacheIdentityPresent &&
+        !loaded.cacheIdentityPresent && fresh.updatedAt.isNotBlank()
+    if (!sameMaterial || fresh.contentLoaded || !loaded.contentLoaded || url != previous.url || note != previous.note ||
         fresh.updatedAt != loaded.updatedAt || fresh.status != loaded.status) return this
     return copy(enrichment = fresh.copy(
         originalText = loaded.originalText, translatedText = loaded.translatedText,
@@ -108,12 +203,20 @@ internal fun SavedLink.retainLoadedContent(previous: SavedLink?): SavedLink {
 }
 
 internal fun decodeTaxonomy(json: JSONObject): BookmarkTaxonomy {
-    fun terms(key: String): List<TaxonomyTerm> = json.getJSONArray(key).let { items ->
+    fun terms(key: String): List<TaxonomyTerm> = json.optJSONArray(key)?.let { items ->
         List(items.length()) { index -> items.getJSONObject(index).let {
-            TaxonomyTerm(it.getString("id"), it.getString("label"), it.optBoolean("active", false))
+            TaxonomyTerm(
+                it.getString("id"), it.getString("label"), it.optBoolean("active", false),
+                deprecated = it.optBoolean("deprecated", false),
+                description = it.optString("description"),
+            )
         } }
-    }
-    return BookmarkTaxonomy(terms("topics"), terms("forms"), terms("uses"))
+    }.orEmpty()
+    return BookmarkTaxonomy(
+        terms("topics"), terms("forms"), terms("uses"),
+        contentFunctions = terms("content_functions"), carriers = terms("carriers"), affordances = terms("affordances"),
+        multiDimensional = json.has("content_functions") || json.has("carriers") || json.has("affordances"),
+    )
 }
 
 private fun JSONObject.text(key: String): String = if (isNull(key)) "" else optString(key)

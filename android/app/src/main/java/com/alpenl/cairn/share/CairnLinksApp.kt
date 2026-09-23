@@ -225,6 +225,8 @@ internal fun CairnLinksApp(
                     state = state,
                     onFilterChange = viewModel::setFilter,
                     onBookmarkFiltersChange = viewModel::setBookmarkFilters,
+                    onLoadMore = viewModel::loadMoreLibraryResults,
+                    onRetryFilters = viewModel::retryLibraryFilters,
                     onOpenSearch = { navController.navigate(Routes.Search) },
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
@@ -283,6 +285,13 @@ internal fun CairnLinksApp(
                     onToggleLearned = viewModel::toggleLearned,
                     onLoadTaxonomy = viewModel::loadTaxonomy,
                     onSaveCuration = { update, onSuccess -> viewModel.saveCuration(id, update, onSuccess) },
+                    onLoadV2 = viewModel::loadV2Selection,
+                    onLoadV2Taxonomy = viewModel::loadV2Taxonomy,
+                    onV2Action = { field, term, action -> viewModel.applyV2Action(id, field, term, action) },
+                    onV2Reapply = { viewModel.reapplyV2Draft(id) },
+                    onV2Discard = { viewModel.discardV2Draft(id) },
+                    onFlushV2 = viewModel::flushV2Queue,
+                    onRecoverLegacyV2 = { viewModel.recoverLegacyV2Actions(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken)) },
                     onDelete = { viewModel.deleteLink(id) { navController.popBackStack() } },
                 )
             }
@@ -495,15 +504,19 @@ private fun LibraryScreen(
     state: CairnLinksUiState,
     onFilterChange: (LinkFilter) -> Unit,
     onBookmarkFiltersChange: (BookmarkFilters) -> Unit,
+    onLoadMore: () -> Unit,
+    onRetryFilters: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
     val stats = remember(state.links, java.time.LocalDate.now()) { state.stats() }
-    val items = remember(state.links, state.filter, state.bookmarkFilters) { state.visibleLibraryLinks() }
+    val items = remember(state.links, state.libraryResults, state.filter, state.bookmarkFilters) { state.visibleLibraryLinks() }
+    val querying = state.usesLibraryQuery()
+    val loading = if (querying) state.libraryLoading else state.loading
     ScreenColumn {
         AppHeader(
             title = "链接库",
-            subtitle = "${if (state.loading) "已加载 " else ""}${stats.total} 条收藏 · ${stats.pending} 条待读",
+            subtitle = "已加载 ${stats.total} 条收藏 · ${stats.pending} 条待读",
             actions = {
                 HeaderIconButton(
                     icon = Icons.Default.Search,
@@ -519,13 +532,20 @@ private fun LibraryScreen(
             enabled = true,
             onFilterChange = onFilterChange,
         )
-        BookmarkFilterPanel(state.bookmarkFilters, state.taxonomy, onBookmarkFiltersChange)
+        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange)
+        if (querying) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(state.libraryStatusText, Modifier.weight(1f).testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onRetryFilters, enabled = !state.libraryLoading, modifier = Modifier.testTag("retry_library_filters")) { Text("重新筛选") }
+        }
         LinkList(
             items = items,
-            loading = state.loading,
-            emptyText = libraryEmptyText(state),
+            loading = loading && items.isEmpty(),
+            emptyText = if (querying) state.libraryStatusText.ifBlank { "正在筛选..." } else libraryEmptyText(state),
             onOpenLinkDetail = onOpenLinkDetail,
-            refreshing = state.loading && items.isNotEmpty(),
+            refreshing = !querying && state.loading && items.isNotEmpty(),
+            hasMore = querying && state.libraryNextBeforeId != null,
+            loadingMore = querying && loading && items.isNotEmpty(),
+            onLoadMore = onLoadMore,
         )
     }
 }
@@ -547,14 +567,18 @@ private fun SearchScreen(
             onValueChange = onSearchQueryChange,
             enabled = true,
         )
-        BookmarkFilterPanel(state.bookmarkFilters, state.taxonomy, onBookmarkFiltersChange)
+        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange)
+        if (state.searchQuery.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(state.searchStatusText, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = { onSearchQueryChange(state.searchQuery) }, enabled = !state.searchLoading) { Text("重新搜索") }
+        }
         LinkList(
             items = results,
             loading = state.searchLoading && results.isEmpty(),
             emptyText = when {
                 state.searchQuery.isBlank() -> "搜索标题、正文、摘要、收藏原因或链接。"
                 state.searchLoading -> "正在搜索..."
-                else -> "没有匹配的链接。"
+                else -> state.searchStatusText.ifBlank { "没有匹配的链接。" }
             },
             onOpenLinkDetail = onOpenLinkDetail,
             hasMore = state.searchNextBeforeId != null,
@@ -617,7 +641,7 @@ private fun SettingsScreen(
         SettingsRow(
             icon = Icons.Default.Check,
             title = "访问 Token",
-            subtitle = apiTokenSubtitle(state.preferences.apiToken),
+            subtitle = state.apiTokenSaveError.ifBlank { apiTokenSubtitle(state.preferences.apiToken) },
             onClick = {
                 tokenDraft = state.preferences.apiToken
                 tokenDialogOpen = true
@@ -874,6 +898,13 @@ private fun DetailScreen(
     onToggleLearned: (SavedLink) -> Unit,
     onLoadTaxonomy: () -> Unit,
     onSaveCuration: (CurationUpdate, () -> Unit) -> Unit,
+    onLoadV2: (Int, Boolean) -> Unit,
+    onLoadV2Taxonomy: () -> Unit,
+    onV2Action: (String, String, String) -> Unit,
+    onV2Reapply: () -> Unit,
+    onV2Discard: () -> Unit,
+    onFlushV2: () -> Unit,
+    onRecoverLegacyV2: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val link = state.links.firstOrNull { it.id == id }
@@ -883,7 +914,12 @@ private fun DetailScreen(
     val enrichment = link?.enrichment
     val readingText = if (showOriginal || enrichment?.translatedText.isNullOrBlank()) enrichment?.originalText.orEmpty() else enrichment?.translatedText.orEmpty()
     val paragraphs = remember(readingText) { readingText.split(Regex("\\n+")).map { it.trim() }.filter { it.isNotEmpty() } }
-    LaunchedEffect(id) { onEnsureLink(id) }
+    LaunchedEffect(id, state.accountGeneration, link?.enrichment?.cacheIdentity,
+        link?.enrichment?.updatedAt, link?.enrichment?.status, link?.url, link?.note) {
+        onEnsureLink(id)
+        onLoadV2(id, true)
+        onLoadV2Taxonomy()
+    }
 
     ScreenColumn {
         DetailTopBar(
@@ -909,6 +945,11 @@ private fun DetailScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         LinkDetailContent(link, id in state.busyIds, onOpenExternal, onCopy, onToggleLearned)
                     }
+                }
+                val legacyActions = state.v2LegacyActions[id].orEmpty()
+                if (legacyActions.isNotEmpty()) item(key = "legacy_curation") {
+                    LegacyCurationRecoveryNotice(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken),
+                        legacyActions, onRecoverLegacyV2)
                 }
                 if (loadState == DetailLoadState.Loading) item(key = "loading") { LoadingState("正在加载归档内容...") }
                 if (loadState == DetailLoadState.Failed) item(key = "retry") {
@@ -945,6 +986,30 @@ private fun DetailScreen(
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Text(enrichment.statusLabel(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             BookmarkCuration(id, enrichment, state.taxonomy, id in state.busyIds, onLoadTaxonomy, onSaveCuration)
+                            MultidimensionalCurationSection(
+                                linkId = id,
+                                taxonomy = state.v2Taxonomy ?: state.taxonomy,
+                                selection = state.v2Selections[id],
+                                draft = state.v2Drafts[id],
+                                conflictRevision = state.v2Conflicts[id],
+                                busy = id in state.v2Busy,
+                                queuedCount = state.v2Queued[id] ?: 0,
+                                available = state.v2Available,
+                                onLoadTaxonomy = onLoadV2Taxonomy,
+                                onAction = onV2Action,
+                                onReapply = onV2Reapply,
+                                onDiscard = onV2Discard,
+                                onFlush = onFlushV2,
+                                onExport = {
+                                    onCopy(
+                                        v2ExportMarkdown(
+                                            link = link,
+                                            selection = state.v2Drafts[id] ?: state.v2Selections[id],
+                                            taxonomy = state.taxonomy,
+                                        ),
+                                    )
+                                },
+                            )
                             LinkDetailSecondary(link)
                         }
                     }
