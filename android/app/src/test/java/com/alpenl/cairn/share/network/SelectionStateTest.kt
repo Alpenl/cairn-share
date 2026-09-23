@@ -7,6 +7,7 @@ import org.junit.Test
 class SelectionStateTest {
     private val client = V2CurationClient("https://unused.invalid")
     private fun fixture() = JSONObject(javaClass.classLoader!!.getResource("selection-state-v1.json")!!.readText())
+    private fun entityFixture() = JSONObject(javaClass.classLoader!!.getResource("entity-observations-v1.json")!!.readText())
     private fun decode(json: JSONObject): MultidimensionalSelection =
         (client.decodeSelection(json) as V2Result.Loaded).value
 
@@ -72,5 +73,72 @@ class SelectionStateTest {
         assertEquals(setOf("topics"), pending.pendingFields)
         assertEquals(listOf("llm", "eng"), pending.topics)
         assertEquals("automatic", pending.state!!.fields.getValue("topics").values.single().origin)
+    }
+
+    @Test fun `shared entity fixture retains both same-name identities and unknown occurrence`() {
+        val state = decode(entityFixture()).state!!
+        assertEquals(listOf("acme-a", "acme-b", null), state.entityObservations!!.map { it.canonicalId })
+        assertEquals(listOf("a", "b", "c"), state.entityObservations.map { it.blockId })
+        assertTrue(state.entityObservations.all { it.effective })
+        assertEquals("身份未确定", state.entityObservations.last().identityLabel)
+        assertEquals("Acme（项目，acme-a）", state.entityObservations.first().identityLabel)
+        assertEquals(listOf("https://example.com/a"), state.entityObservations.first().identifiers)
+        assertNull(decode(fixture()).state!!.entityObservations)
+    }
+
+    @Test fun `unsupported malformed or inconsistent entity metadata cannot invent a provenance result`() {
+        val mutations: List<(JSONObject) -> Unit> = listOf(
+            { it.put("observations_version", 2) },
+            { it.put("evidence_snapshot_id", 0) },
+            { it.getJSONArray("observations").getJSONObject(0).put("decision", "made-up") },
+            { it.getJSONArray("observations").getJSONObject(0).getJSONObject("candidate").put("start", 0.5) },
+            { it.getJSONArray("observations").getJSONObject(0).getJSONObject("candidate").put("end", 8) },
+            { it.getJSONArray("observations").getJSONObject(0).put("canonical_id", "") },
+            { it.getJSONArray("observations").getJSONObject(0).getJSONArray("canonical_evidence").getJSONObject(0).put("identifier", "javascript:alert(1)") },
+            { it.getJSONArray("observations").getJSONObject(0).getJSONArray("canonical_evidence").getJSONObject(0).put("block_id", "other") },
+            { it.getJSONArray("observations").getJSONObject(0).put("effective", "true") },
+            { it.getJSONArray("observations").put(it.getJSONArray("observations").getJSONObject(0)) },
+        )
+        for (mutate in mutations) {
+            val json = entityFixture()
+            mutate(json.getJSONObject("state").getJSONObject("entities"))
+            val selection = decode(json)
+            assertEquals(listOf("llm"), selection.topics)
+            assertNotNull(selection.state)
+            assertNull(selection.state!!.entityObservations)
+        }
+    }
+
+    @Test fun `stale or human-excluded observations remain inspectable but never enter export`() {
+        val link = LinkJson.decodeLink(JSONObject("""{"id":1,"url":"https://example.com","note":"","created_at":"now","learned":false}"""))
+        val current = decode(entityFixture())
+        val exported = com.alpenl.cairn.share.v2ExportMarkdown(link, current, null)
+        assertTrue(exported.contains("acme-a"))
+        assertTrue(exported.contains("acme-b"))
+        for (mode in listOf("stale", "human", "source_mismatch")) {
+            val json = entityFixture()
+            val entity = json.getJSONObject("state").getJSONObject("entities")
+            when (mode) {
+                "stale" -> entity.put("status", "stale")
+                "human" -> entity.put("values", org.json.JSONArray())
+                else -> entity.put("content_revision", 0)
+            }
+            // Even inconsistent effective=true is downgraded using the bound state.
+            val selection = decode(json)
+            assertEquals(3, selection.state!!.entityObservations!!.size)
+            assertTrue(selection.state.entityObservations.all { !it.effective })
+            assertFalse(com.alpenl.cairn.share.v2ExportMarkdown(link, selection, null).contains("acme-a"))
+        }
+        val empty = entityFixture()
+        val entity = empty.getJSONObject("state").getJSONObject("entities")
+        entity.put("status", "completed_empty").put("values", org.json.JSONArray())
+        for ((i, decision) in listOf("none", "unknown", "incidental").withIndex()) {
+            entity.getJSONArray("observations").getJSONObject(i).put("decision", decision)
+                .put("canonical_state", if (decision == "none") "none" else "unknown")
+                .put("canonical_id", JSONObject.NULL).put("canonical_label", JSONObject.NULL).put("canonical_kind", JSONObject.NULL)
+                .put("canonical_evidence", org.json.JSONArray()).put("effective", false)
+        }
+        assertEquals(listOf("不适用", "证据不足，暂不判断", "仅顺带提及"), decode(empty).state!!.entityObservations!!.map { it.decisionLabel })
+        assertEquals("已完成，暂无相关实体建议", decode(empty).state!!.entityStatusLabel)
     }
 }

@@ -35,7 +35,11 @@ internal data class SelectionState(
     val entities: SelectionFieldState?,
     val evidencePartial: Boolean?,
     val answersPartial: Boolean = false,
-)
+    val entityObservations: List<EntityObservation>? = null,
+) {
+    val entityStatusLabel: String get() = if (entities?.status == "completed_empty") "已完成，暂无相关实体建议"
+        else entities?.label ?: "运行状态未知"
+}
 
 internal fun JSONObject.nonnegativeRevision(key: String): Long? {
     val value = opt(key) as? Number ?: return null
@@ -79,5 +83,8 @@ internal fun decodeSelectionState(json: JSONObject?, revision: Long): SelectionS
             else -> null
         }
     }
-    return SelectionState(contentRevision, decoded, field(json.optJSONObject("entities")), partial, json.opt("decision_answers_partial") == true)
+    val entityJson = json.optJSONObject("entities")
+    val entities = field(entityJson)
+    return SelectionState(contentRevision, decoded, entities, partial, json.opt("decision_answers_partial") == true,
+        decodeEntityObservations(entityJson, contentRevision, entities))
 }

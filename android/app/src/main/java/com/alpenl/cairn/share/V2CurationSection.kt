@@ -29,6 +29,7 @@ import com.alpenl.cairn.share.network.BookmarkTaxonomy
 import com.alpenl.cairn.share.network.MultidimensionalSelection
 import com.alpenl.cairn.share.network.SavedLink
 import com.alpenl.cairn.share.network.SelectionFieldState
+import com.alpenl.cairn.share.network.EntityObservation
 
 /**
  * The multidimensional curation section (B07).
@@ -103,14 +104,48 @@ internal fun MultidimensionalCurationSection(
         DimensionRow("用途", "use", taxonomy.uses.map { it.id to it.label }, listOf(effective.use).filter { it.isNotEmpty() }, busy, onAction,
             singleValue = true, state = effective.state?.fields?.get("use"), pending = "use" in effective.pendingFields, known = "use" !in effective.unknownResetFields)
         val entities = effective.state?.entities
-        Text("实体：${entities?.label ?: "运行状态未知"}", modifier = Modifier.testTag("v2_entities_status"), style = MaterialTheme.typography.bodySmall)
+        Text("实体：${effective.state?.entityStatusLabel ?: "运行状态未知"}", modifier = Modifier.testTag("v2_entities_status"), style = MaterialTheme.typography.bodySmall)
         entities?.values?.forEach { Text("${it.term} · ${it.label}", style = MaterialTheme.typography.bodySmall) }
+        EntityJudgmentDetails(effective.state?.entityObservations)
         if (effective.state?.evidencePartial == true) Text("来源证据不完整，建议仅基于已取得的内容。", modifier = Modifier.testTag("v2_evidence_partial"), style = MaterialTheme.typography.bodySmall)
         if (effective.state?.answersPartial == true) Text("部分分类问题尚无结果。", style = MaterialTheme.typography.bodySmall)
         Row {
             TextButton(onClick = onExport, modifier = Modifier.testTag("v2_export")) { Text("复制多维整理") }
         }
     }
+}
+
+@Composable
+private fun EntityJudgmentDetails(observations: List<EntityObservation>?) {
+    if (observations.isNullOrEmpty()) {
+        Text(if (observations == null) "实体判断依据不可用" else "当前没有可展示的实体判断记录", style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    var expanded by remember(observations) { mutableStateOf(false) }
+    TextButton(onClick = { expanded = true }, modifier = Modifier.testTag("v2_entities_observations")) {
+        Text("查看实体判断依据（${observations.size}）")
+    }
+    if (expanded) AlertDialog(
+        onDismissRequest = { expanded = false },
+        title = { Text("实体判断依据") },
+        text = {
+            Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).testTag("v2_entities_records"),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("自动判断记录，人工整理优先。同名记录可能指向不同身份。")
+                observations.forEachIndexed { index, o ->
+                    Column(Modifier.testTag("v2_entity_record_$index")) {
+                        Text("${o.surface} · ${o.decisionLabel}")
+                        Text(o.identityLabel)
+                        Text(o.effectiveLabel)
+                        Text("来源：${o.sourceLabel}")
+                        Text("来源版本 ${o.sourceRevision} · 身份目录 ${o.catalogVersion}")
+                        o.identifiers.forEach { Text(it) }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { expanded = false }) { Text("关闭") } },
+    )
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -307,8 +342,11 @@ internal fun v2ExportMarkdown(
     enrichment?.why?.takeIf { it.isNotBlank() }?.let { builder.appendLine("- 收藏原因：$it") }
     builder.appendLine("- 整理状态：${enrichment?.curationStatus?.label ?: ""}")
     val entities = selection?.state?.entities
-    builder.appendLine("- 实体状态：${entities?.label ?: "运行状态未知"}")
+    builder.appendLine("- 实体状态：${selection?.state?.entityStatusLabel ?: "运行状态未知"}")
     if (!entities?.values.isNullOrEmpty()) builder.appendLine("- 实体：${entities!!.values.joinToString(" / ") { "${it.term}（${it.label}）" }}")
+    selection?.state?.entityObservations.orEmpty().filter { it.effective }.forEach {
+        builder.appendLine("- 实体自动依据：${it.surface} · ${it.identityLabel} · ${it.sourceLabel}")
+    }
     enrichment?.summary?.takeIf { it.isNotBlank() }?.let {
         builder.appendLine()
         builder.appendLine("### 摘要")

@@ -47,11 +47,13 @@ UPDATE links SET classification='{"topics":["llm"],"form":"method","use":"try","
 UPDATE links SET classification='{"topics":["llm","eval"],"form":"method","use":"try","uncertainty":false}' WHERE url='https://example.com/android-term-reset';
 SQL
 (cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --file "$work/baseline.sql" > "$work/baseline.log" 2>&1)
+python3 "$root/tests/android-worker/entity_fixture.py" > "$work/entity.sql"
+(cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --file "$work/entity.sql" > "$work/entity-seed.log" 2>&1)
 python3 "$root/tests/android-worker/fault_proxy.py" "http://127.0.0.1:$worker_port" "$proxy_port" > "$work/proxy.log" 2>&1 &
 proxy_pid=$!
 "$adb" -s "$serial" reverse tcp:18978 "tcp:$proxy_port"
 (cd "$root/android" && ./gradlew --no-daemon --dependency-verification strict installDebug installDebugAndroidTest)
-for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConflictsAndMidChainFailure discardAndAccountSwitchPreserveUnrelatedActions preserveAmbiguousLegacyAndSeparateSameSuffixAccounts explicitlyRecoverLegacyAfterRestart persistResetWithIndependentAutomaticBaseline restoreAutomaticDraftAfterProcessDeath persistTermResetAfterExplicitEmpty restoreTermResetAfterProcessDeath confirmedCurationRefreshesRealFilteredSearch blankKeywordLibraryUsesFullEffectiveFiltersAndConfirmedWrites persistDeletionAfterRealCommitResponseLoss recoverDeletionAfterProcessDeathWithoutReplayingCuration; do
+for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConflictsAndMidChainFailure discardAndAccountSwitchPreserveUnrelatedActions preserveAmbiguousLegacyAndSeparateSameSuffixAccounts explicitlyRecoverLegacyAfterRestart persistResetWithIndependentAutomaticBaseline restoreAutomaticDraftAfterProcessDeath persistTermResetAfterExplicitEmpty restoreTermResetAfterProcessDeath confirmedCurationRefreshesRealFilteredSearch blankKeywordLibraryUsesFullEffectiveFiltersAndConfirmedWrites persistDeletionAfterRealCommitResponseLoss recoverDeletionAfterProcessDeathWithoutReplayingCuration readEntityProvenanceAndHumanOverridesFromRealWorker; do
   "$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
   "$adb" -s "$serial" shell am instrument -w -r \
     -e class "com.alpenl.cairn.share.CurationWorkerRecoveryTest#$phase" \
@@ -61,4 +63,4 @@ for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConfl
   grep -Eq '^OK \(1 test\)' "$work/$phase.log"
 done
 curl -fsS "http://127.0.0.1:$proxy_port/__test/control" > "$work/transport-history.json"
-echo "PASS: thirteen phases ran in separate Android processes against actual authenticated Worker/D1"
+echo "PASS: fourteen phases ran in separate Android processes against actual authenticated Worker/D1"

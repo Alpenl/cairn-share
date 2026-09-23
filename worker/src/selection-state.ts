@@ -12,7 +12,7 @@ type Decision = { id: number; content_revision: number; automatic: string; polic
   run_references_complete: number; runs: Array<{ coverage: string; evidence_coverage: string }> };
 type Legacy = { payload: string | null; revision: number; provenance: string };
 type Entity = { state: string; content_revision: number; content_hash: string; evidence_snapshot_id: number;
-  entities: string; revision: number; snapshot_matches: number };
+  entities: string; observations: string; revision: number; snapshot_matches: number };
 type Queue = { status: string; content_revision: number };
 type Evidence = { id: number; content_hash: string; truncated: number; completeness: string };
 type Row = { personal_revision: number; content_revision: number; classification: string | null;
@@ -50,7 +50,7 @@ export async function readSelectionSnapshot(env: Env, id: number) {
     (SELECT json_object('payload',h.payload,'revision',h.revision,'provenance',h.provenance)
       FROM legacy_curation_history h WHERE h.link_id=l.id ORDER BY h.id DESC LIMIT 1) AS legacy,
     (SELECT json_object('state',e.state,'content_revision',e.content_revision,'content_hash',e.content_hash,
-      'evidence_snapshot_id',e.evidence_snapshot_id,'entities',e.entities,'revision',e.revision,
+      'evidence_snapshot_id',e.evidence_snapshot_id,'entities',e.entities,'observations',e.observations,'revision',e.revision,
       'snapshot_matches',CASE WHEN s.link_id=e.link_id AND s.content_revision=e.content_revision AND s.content_hash=e.content_hash THEN 1 ELSE 0 END)
       FROM entity_states e LEFT JOIN evidence_snapshots s ON s.id=e.evidence_snapshot_id WHERE e.link_id=l.id) AS entity,
     (SELECT json_object('status',j.status,'content_revision',j.content_revision) FROM classification_jobs j WHERE j.link_id=l.id) AS queue,
@@ -81,6 +81,17 @@ export async function readSelectionSnapshot(env: Env, id: number) {
   const origins = effectiveOrigins(view, layered, decision ? "automatic" : "legacy_unknown");
   // Entities have their own run, independent of whether classification ran.
   origins.entities = effectiveOrigins(view, layered, "automatic").entities;
+  // Read provenance in the same snapshot as effective values. Expose a bounded
+  // display contract, not private cache requests or the entire catalog.
+  const storedObservations = parse<Array<Record<string, any>>>(entity?.observations ?? null, []);
+  const observations = (Array.isArray(storedObservations) ? storedObservations : []).flatMap((o) => {
+    if (!o || typeof o !== "object" || !o.candidate || typeof o.candidate.surface !== "string") return [];
+    return [{ candidate: o.candidate, decision: o.decision, canonical_state: o.canonical_state,
+      canonical_id: o.canonical_id ?? null, canonical_label: o.canonical_label ?? null,
+      canonical_kind: o.canonical_kind ?? null, canonical_evidence: o.canonical_evidence,
+      catalog_version: o.catalog_version,
+      effective: !entityStale && entity?.state === "completed_nonempty" && o.decision === "relevant" && view.entities.includes(o.candidate.surface) }];
+  });
   const assessment = validAssessment(automatic.assessment) ? automatic.assessment : null;
   const runs = decision && Array.isArray(decision.runs) ? decision.runs : [];
   const partial = (field: "coverage" | "evidence_coverage") => {
@@ -113,7 +124,8 @@ export async function readSelectionSnapshot(env: Env, id: number) {
       classification_queue: queue, evidence, fields,
       entities: { ...origins.entities, status: entityStale ? "stale" : entity?.state ?? "not_run",
         recorded_state: entity?.state ?? "not_run", content_revision: entity?.content_revision ?? null,
-        evidence_snapshot_id: entity?.evidence_snapshot_id ?? null, revision: entity?.revision ?? 0, automatic: automatic.entities }
+        evidence_snapshot_id: entity?.evidence_snapshot_id ?? null, revision: entity?.revision ?? 0, automatic: automatic.entities,
+        observations_version: 1, observations }
     }
   };
 }

@@ -179,6 +179,59 @@ class V2CurationInstrumentedTest {
         }
     }
 
+    private fun inspectEntityEvidence(stale: Boolean) {
+        val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val fixture = JSONObject(InstrumentationRegistry.getInstrumentation().context.assets
+            .open("entity-observations-v1.json").bufferedReader().use { it.readText() }).put("id", 4)
+        if (stale) {
+            fixture.getJSONObject("state").put("content_revision", 2).getJSONObject("entities")
+                .put("status", "stale").put("values", JSONArray())
+        }
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.requestUrl!!.encodedPath
+                paths.add("${request.method} $path")
+                return when (path) {
+                    "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                    "/api/bookmarks/4" -> response(link(4))
+                    "/api/bookmarks/4/v2-selection" -> response(fixture)
+                    "/api/v2-taxonomy" -> response(taxonomy())
+                    else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+                }
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use { scenario ->
+            openDetailAndLoadTaxonomy()
+            fun inspect() {
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entities_observations"))
+                // The entire v2 section is one tall LazyColumn item. Finding
+                // its descendant composes it but does not bring it on screen.
+                compose.onNodeWithTag("v2_entities_observations").performScrollTo().assertIsDisplayed().performClick()
+                compose.waitUntil(20_000) { runCatching {
+                    compose.onNodeWithTag("v2_entities_records").assertExists(); true
+                }.getOrDefault(false) }
+                compose.onNodeWithText("Acme（项目，acme-a）").performScrollTo().assertIsDisplayed()
+                compose.onNodeWithText("https://example.com/a").assertExists()
+                compose.onNodeWithText("Acme（项目，acme-b）").performScrollTo().assertIsDisplayed()
+                compose.onNodeWithText("身份未确定").performScrollTo().assertIsDisplayed()
+                compose.onAllNodesWithText(if (stale) "非当前有效结果" else "当前有效自动建议").assertCountEquals(3)
+                compose.onAllNodesWithText(if (stale) "当前有效自动建议" else "非当前有效结果").assertCountEquals(0)
+                compose.onNodeWithText("关闭").performClick()
+            }
+            inspect()
+            scenario.recreate()
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entities_observations")); true
+            }.getOrDefault(false) }
+            inspect()
+            assertTrue(paths.none { it.startsWith("POST ") || it.contains("/classifications/") })
+        }
+    }
+
+    @Test fun showsSameNamedEntityIdentitiesAndUnknownWithoutNewInference() = inspectEntityEvidence(false)
+
+    @Test fun staleEntityEvidenceRemainsReadableAfterActivityRecreation() = inspectEntityEvidence(true)
+
     @Test fun aConflictKeepsTheDraftAndOffersReapply() {
         val attempts = java.util.concurrent.atomic.AtomicInteger()
         val bodies = java.util.Collections.synchronizedList(mutableListOf<JSONObject>())

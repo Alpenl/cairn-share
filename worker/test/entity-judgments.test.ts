@@ -1,6 +1,7 @@
 import {applyD1Migrations,env,reset} from "cloudflare:test";
 import {beforeEach,expect,it} from "vitest";
 import worker from "../src/index";
+import displayFixture from "./fixtures/entity-observations-v1.json";
 const hex=(n:number)=>n.toString(16).padStart(64,"0");
 const bindings=()=>({...env,CAIRN_API_TOKEN:"app",CAIRN_ENRICHER_TOKEN:"internal"});
 beforeEach(async()=>{await reset();await applyD1Migrations(env.DB,env.TEST_MIGRATIONS);});
@@ -92,4 +93,36 @@ it("upgrades legacy entity records with unknown provenance without rewriting sou
  expect(await env.DB.prepare("SELECT * FROM entity_states").first()).toEqual({...before,observations:"[]"});
  expect((await env.DB.prepare("SELECT * FROM evidence_snapshots").all()).results).toEqual(snapshot.results);
  expect(await(await call("v2/links/1/entities")).json()).toMatchObject({entities:["Acme"],observations:[],effective_observations:[]});
+});
+
+it("serves Android provenance with the same authoritative source and human selection snapshot",async()=>{
+ const f=await fixture();
+ expect((await call("v2/links/1/entity-state",f.submission)).status).toBe(200);
+ const read=async()=>{
+  const response=await call("bookmarks/1/v2-selection?include_state=1",undefined,"GET","app");
+  expect(response.status).toBe(200);
+  return response.json() as Promise<{revision:number;state:{personal_revision:number;content_revision:number;entities:typeof displayFixture.state.entities}}>;
+ };
+ let value=await read();
+ expect(value.state.entities).toEqual(displayFixture.state.entities);
+ expect(value.state.personal_revision).toBe(value.revision);
+ expect(value.state.content_revision).toBe(value.state.entities.content_revision);
+ expect(JSON.stringify(value.state.entities)).not.toContain("canonical_options");
+ expect(JSON.stringify(value.state.entities)).not.toContain("probabilities");
+ const legacy=await(await call("bookmarks/1/v2-selection",undefined,"GET","app")).json();
+ expect(legacy).not.toHaveProperty("state");
+ expect((await call("v2/links/1/entities",{operation_key:"display-reject",action:"reject",term:"Acme"})).status).toBe(200);
+ value=await read();
+ expect(value.state.entities.values).toEqual([]);
+ expect(value.state.entities.observations.map(o=>o.effective)).toEqual([false,false,false]);
+ expect(value.state.entities.observations.map(o=>o.canonical_id)).toEqual(["acme-a","acme-b",null]);
+ expect((await call("v2/links/1/entities",{operation_key:"display-reset",action:"reset",term:"Acme"})).status).toBe(200);
+ expect((await read()).state.entities.observations.every(o=>o.effective)).toBe(true);
+ await env.DB.prepare("UPDATE links SET original_text='Changed' WHERE id=1").run();
+ value=await read();
+ expect(value.state.entities.status).toBe("stale");
+ expect(value.state.entities.values).toEqual([]);
+ expect(value.state.entities.observations.map(o=>o.effective)).toEqual([false,false,false]);
+ expect(value.state.entities.content_revision).toBe(1);
+ expect(value.state.content_revision).toBe(2);
 });

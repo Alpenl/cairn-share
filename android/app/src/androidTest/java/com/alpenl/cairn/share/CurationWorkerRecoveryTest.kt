@@ -70,6 +70,33 @@ class CurationWorkerRecoveryTest {
         while (!predicate()) delay(30)
     }
 
+    @Test fun readEntityProvenanceAndHumanOverridesFromRealWorker() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        control("online")
+        val items = http("/__test/direct/api/links?limit=100").getJSONArray("items")
+        val saved = (0 until items.length()).map { items.getJSONObject(it) }
+            .single { it.getString("url") == "https://example.com/android-entity" }
+        val id = saved.getInt("id")
+        val client = V2CurationClient(base)
+        fun read() = (client.loadSelection(id, token) as V2Result.Loaded).value
+        val before = read()
+        assertEquals(listOf("acme-a", "acme-b", null), before.state!!.entityObservations!!.map { it.canonicalId })
+        assertTrue(before.state.entityObservations.all { it.effective })
+        for ((action, expected) in listOf("reject" to false, "reset" to true)) {
+            val current = read()
+            http("/__test/direct/api/bookmarks/$id/v2-override", JSONObject().put("field", "entities")
+                .put("term", "Acme").put("action", action).put("operation_key", "android-entity-$action")
+                .put("expected_revision", current.revision))
+            val changed = read()
+            assertEquals(current.revision + 1, changed.revision)
+            assertEquals(listOf("acme-a", "acme-b", null), changed.state!!.entityObservations!!.map { it.canonicalId })
+            assertTrue(changed.state.entityObservations.all { it.effective == expected })
+            val exported = v2ExportMarkdown(LinkJson.decodeLink(saved), changed, null)
+            assertEquals(expected, exported.contains("acme-a"))
+            assertEquals(expected, exported.contains("acme-b"))
+        }
+    }
+
     @Test fun persistBeforeSendAndLoseFirstResponse() = runBlocking<Unit> {
         assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
         store.clear()
