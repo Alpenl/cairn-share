@@ -1,4 +1,5 @@
 import { entityCacheRoute } from "./entity-cache";
+import {validEntityObservations,type EntityBlock} from "./entity-judgments";
 import { classificationBudgetRoute } from "./classification-budget";
 import { readSelectionSnapshot } from "./selection-state";
 import { extensionBudgetRoute } from "./extension-budget";
@@ -136,8 +137,8 @@ async function entitiesView(env: Env, id: number): Promise<Response> {
     .first<{ id: number; personal_revision: number }>();
   if (!link) return fail("not_found", 404);
   const state = await env.DB.prepare(
-    `SELECT state, content_revision, content_hash, evidence_snapshot_id, entities, updated_at FROM entity_states WHERE link_id = ?`
-  ).bind(id).first<{ state: string; content_revision: number; content_hash: string; evidence_snapshot_id: number; entities: string; updated_at: string }>();
+    `SELECT state, content_revision, content_hash, evidence_snapshot_id, entities, observations, updated_at FROM entity_states WHERE link_id = ?`
+  ).bind(id).first<{ state: string; content_revision: number; content_hash: string; evidence_snapshot_id: number; entities: string; observations:string; updated_at: string }>();
   const { view } = await computeEffective(env, id);
   const linkRevision = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
     .first<{ content_revision: number }>();
@@ -150,6 +151,8 @@ async function entitiesView(env: Env, id: number): Promise<Response> {
     else if (entry.action === "accept") accepted.add(entry.term);
     else accepted.delete(entry.term);
   }
+  const stale=state !== null && (state.evidence_snapshot_id === 0 || (linkRevision?.content_revision ?? 0) !== state.content_revision);
+  const observations=(state?parseJSON(state.observations,[]):[]) as Array<{candidate:{surface:string};decision:string}>;
   return reply({
     id,
     state: state?.state ?? "not_run",
@@ -158,10 +161,12 @@ async function entitiesView(env: Env, id: number): Promise<Response> {
     content_hash: state?.content_hash ?? "",
     // Entity staleness is judged against the entity input revision, never
     // against an unrelated classification decision (R2-08).
-    stale: state !== null && (state.evidence_snapshot_id === 0 || (linkRevision?.content_revision ?? 0) !== state.content_revision),
+    stale,
     updated_at: state?.updated_at ?? null,
     automatic: await entityAutomatic(env, id),
     archived_entities: state ? parseJSON(state.entities, []) : [],
+    observations,
+    effective_observations:stale?[]:observations.filter(v=>v.decision==="relevant"&&view.entities.includes(v.candidate.surface)),
     entities: view.entities,
     human: view.entities.filter((entity) => accepted.has(entity)),
     overrides: overrides.results,
@@ -197,6 +202,8 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
   if (!Number.isSafeInteger(body.content_revision) || Number(body.content_revision) < 1 ||
       !Number.isSafeInteger(body.evidence_snapshot_id) || Number(body.evidence_snapshot_id) < 1 ||
       typeof body.content_hash !== "string" || !/^[a-f0-9]{64}$/.test(body.content_hash)) return fail("invalid_evidence_identity");
+  const observations=body.observations??[];
+  if(!Array.isArray(observations)||observations.length>40)return fail("invalid_entity_observations");
   const requestHash = await sha256Hex(canonicalJSON({ link_id: id, ...body }));
   type Receipt = { link_id: number; request_hash: string; content_revision: number; outcome: string };
   const receipt = () => env.DB.prepare(`SELECT link_id,request_hash,content_revision,outcome FROM entity_operations WHERE operation_key=?`)
@@ -208,26 +215,35 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
   if (existing) return acknowledge(existing, true);
   const link = await env.DB.prepare(`SELECT id FROM links WHERE id=?`).bind(id).first();
   if (!link) return fail("not_found", 404);
+  if(body.observations!==undefined){
+    const material=await env.DB.prepare(`SELECT s.payload,l.related_links FROM evidence_snapshots s JOIN links l ON l.id=s.link_id
+      WHERE l.id=? AND s.id=? AND s.content_revision=? AND s.content_hash=? AND l.content_revision=s.content_revision`)
+      .bind(id,body.evidence_snapshot_id,body.content_revision,body.content_hash).first<{payload:string;related_links:string|null}>();
+    if(!material)return fail("run_stale",409);
+    const blocks=(parseJSON(material.payload,{blocks:[]}) as {blocks:EntityBlock[]}).blocks;
+    if(!validEntityObservations(observations,entities as string[],blocks,parseJSON(material.related_links??"[]",[]) as string[]))return fail("invalid_entity_observations");
+  }
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO entity_operations(operation_key,link_id,request_hash,evidence_snapshot_id,content_revision,content_hash,payload,outcome,created_at)
       SELECT ?,l.id,?,s.id,s.content_revision,s.content_hash,?,
-        CASE WHEN ? IN ('failed','not_run') AND EXISTS (
+        CASE WHEN EXISTS (
           SELECT 1 FROM entity_states e WHERE e.link_id=l.id AND e.content_revision=s.content_revision
             AND e.content_hash=s.content_hash AND e.evidence_snapshot_id=s.id
             AND e.state IN ('completed_empty','completed_nonempty')
+            AND (? IN ('failed','not_run') OR (?=1 AND json_array_length(e.observations)>0))
         ) THEN 'ignored_stale' ELSE 'stored' END,?
       FROM links l JOIN evidence_snapshots s ON s.link_id=l.id AND s.content_revision=l.content_revision
       WHERE l.id=? AND s.id=? AND s.content_revision=? AND s.content_hash=?
       ON CONFLICT(operation_key) DO NOTHING`)
-      .bind(operationKey, requestHash, canonicalJSON(body), state, now, id, body.evidence_snapshot_id, body.content_revision, body.content_hash),
-    env.DB.prepare(`INSERT INTO entity_states(link_id,state,content_revision,content_hash,evidence_snapshot_id,entities,updated_at,operation_key,revision)
-      SELECT link_id,?,content_revision,content_hash,evidence_snapshot_id,?,?,operation_key,1 FROM entity_operations
+      .bind(operationKey, requestHash, canonicalJSON(body), state,body.observations===undefined?1:0, now, id, body.evidence_snapshot_id, body.content_revision, body.content_hash),
+    env.DB.prepare(`INSERT INTO entity_states(link_id,state,content_revision,content_hash,evidence_snapshot_id,entities,observations,updated_at,operation_key,revision)
+      SELECT link_id,?,content_revision,content_hash,evidence_snapshot_id,?,?,?,operation_key,1 FROM entity_operations
       WHERE operation_key=? AND request_hash=? AND applied=0 AND outcome='stored'
       ON CONFLICT(link_id) DO UPDATE SET state=excluded.state,content_revision=excluded.content_revision,
         content_hash=excluded.content_hash,evidence_snapshot_id=excluded.evidence_snapshot_id,
-        entities=excluded.entities,updated_at=excluded.updated_at,operation_key=excluded.operation_key,revision=entity_states.revision+1`)
-      .bind(state, canonicalJSON(entities), now, operationKey, requestHash),
+        entities=excluded.entities,observations=excluded.observations,updated_at=excluded.updated_at,operation_key=excluded.operation_key,revision=entity_states.revision+1`)
+      .bind(state, canonicalJSON(entities),canonicalJSON(observations), now, operationKey, requestHash),
     env.DB.prepare(`UPDATE entity_operations SET applied=1 WHERE operation_key=? AND request_hash=? AND applied=0`)
       .bind(operationKey, requestHash)
   ]);

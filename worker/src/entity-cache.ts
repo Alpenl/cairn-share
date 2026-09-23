@@ -1,5 +1,6 @@
 import type { Env } from "./index";
 import { canonicalJSON } from "./domain";
+import {validEntityCandidate,validEntityV2Questions,validEntityV2State,validTypedEntityAnswers} from "./entity-judgments";
 
 const reply=(body:unknown,status=200)=>new Response(JSON.stringify(body),{status,headers:{"Content-Type":"application/json","Cache-Control":"no-store"}});
 const fail=(error:string,status=400)=>reply({error},status);
@@ -25,11 +26,6 @@ async function bodyOf(request:Request):Promise<Record<string,unknown>|null>{
  const body=JSON.parse(new TextDecoder().decode(bytes));return body&&typeof body==="object"&&!Array.isArray(body)?body:null;}catch{return null;}
 }
 const view=(r:Row,owned=false)=>({key:r.cache_key,status:r.status,owned,expires_at:r.expires_at,answers:JSON.parse(r.answers)});
-function validAnswers(value:unknown,candidates:Candidate[]){
- if(!value||typeof value!=="object"||Array.isArray(value))return false;
- const answers=value as Record<string,Record<string,unknown>>;
- return Object.keys(answers).length===candidates.length && candidates.every((_,i)=>{const a=answers[`entity_${i}`];return a&&Object.keys(a).length===2&&a.type==="noul"&&typeof a.noul==="number"&&Number.isFinite(a.noul)&&a.noul>=0&&a.noul<=1;});
-}
 export async function pruneEntityCache(env:{DB:D1Database}){
  await env.DB.prepare("DELETE FROM entity_cache WHERE cache_key IN (SELECT cache_key FROM entity_cache WHERE expires_at<=? ORDER BY expires_at LIMIT 100)").bind(Date.now()).run();
 }
@@ -40,9 +36,9 @@ export async function entityCacheRoute(request:Request,env:Env,path:string):Prom
   const b=await bodyOf(request);
   const keys=["link_id","evidence_snapshot_id","content_revision","content_hash","owner_token","request_json","candidates","spec_hash"];
   if(!b||Object.keys(b).length!==keys.length||Object.keys(b).some(k=>!keys.includes(k))||!positive(b.link_id)||!positive(b.evidence_snapshot_id)||!positive(b.content_revision)||!hex(b.content_hash)||!hex(b.owner_token)||!hex(b.spec_hash)||typeof b.request_json!=="string"||new TextEncoder().encode(b.request_json).length>131072||!Array.isArray(b.candidates)||b.candidates.length<1||b.candidates.length>40)return fail("invalid_entity_cache_request");
-  let wire:{model:string;state:{material:Array<{ID:string;Text:string;role?:string;url?:string}>;stored_links:string[]};questions:Record<string,{type:string}>};
+  let wire:{model:string;state:{material:Array<{ID:string;Text:string;role?:string;url?:string}>;stored_links:string[];entity_protocol?:number};questions:Record<string,{type:string}>};
   try{wire=JSON.parse(b.request_json);}catch{return fail("invalid_entity_cache_request");}
-  if(!wire||wire.model!=="jev-1.13.0"||!wire.state||!Array.isArray(wire.state.material)||!Array.isArray(wire.state.stored_links)||!wire.state.stored_links.every(v=>typeof v==="string")||!wire.questions||Object.keys(wire.questions).length!==b.candidates.length||!b.candidates.every((_,i)=>wire.questions[`entity_${i}`]?.type==="noul"))return fail("invalid_entity_cache_request");
+  if(!wire||wire.model!=="jev-1.13.0"||!wire.state||!Array.isArray(wire.state.material)||!Array.isArray(wire.state.stored_links)||!wire.state.stored_links.every(v=>typeof v==="string")||!wire.questions)return fail("invalid_entity_cache_request");
   const binding=b as unknown as Binding,links=canonicalJSON(wire.state.stored_links);
   const snapshot=await env.DB.prepare("SELECT payload FROM evidence_snapshots WHERE id=? AND link_id=? AND content_revision=? AND content_hash=?").bind(b.evidence_snapshot_id,b.link_id,b.content_revision,b.content_hash).first<{payload:string}>();
   if(!snapshot||!await current(env,binding,links))return fail("entity_input_stale",409);
@@ -50,10 +46,10 @@ export async function entityCacheRoute(request:Request,env:Env,path:string):Prom
   const material=blocks.map(v=>({ID:v.id,Text:v.text,...(v.role?{role:v.role}:{}),...(v.url?{url:v.url}:{})}));
   if(canonicalJSON(material)!==canonicalJSON(wire.state.material))return fail("entity_material_mismatch",409);
   const candidates=b.candidates as Candidate[];
-  if(!candidates.every(c=>{if(!c||typeof c.surface!=="string"||!c.surface||c.surface.length>2048||typeof c.block_id!=="string"||!Number.isSafeInteger(c.start)||!Number.isSafeInteger(c.end))return false;
-   if(c.kind==="link")return c.source_url===c.surface&&wire.state.stored_links.includes(c.surface)&&c.block_id===""&&c.start===0&&c.end===0;
-   const block=blocks.find(v=>v.id===c.block_id);return c.kind==="surface"&&block&&c.start>=0&&c.end>c.start&&c.end<=Array.from(block.text).length&&Array.from(block.text).slice(c.start,c.end).join("")===c.surface;
-  }))return fail("invalid_entity_candidates");
+  if(!candidates.every(c=>validEntityCandidate(c,blocks,wire.state.stored_links)))return fail("invalid_entity_candidates");
+  if(wire.state.entity_protocol===2){
+   if(!validEntityV2State(wire.state,candidates,blocks)||!validEntityV2Questions(wire.questions,wire.state,candidates))return fail("invalid_entity_judgments");
+  }else if(wire.state.entity_protocol!==undefined||Object.keys(wire.questions).length!==candidates.length||!candidates.every((_,i)=>wire.questions[`entity_${i}`]?.type==="noul"))return fail("invalid_entity_cache_request");
   const {owner_token:ignoredOwner,...identity}=b;
   const key=await hash(canonicalJSON(identity));
   // b includes the exact request, candidates and semantic/policy hash. Only the
@@ -74,7 +70,7 @@ export async function entityCacheRoute(request:Request,env:Env,path:string):Prom
  if(!match[2]){if(request.method!=="GET")return fail("method_not_allowed",405);return await current(env,row,row.source_links)?reply(view(row)):fail("entity_input_stale",409);}
  if(request.method!=="POST")return fail("method_not_allowed",405);const body=await bodyOf(request);
  if(!body||Object.keys(body).some(k=>!["owner_token","status","answers"].includes(k))||body.owner_token!==row.owner_token||!['completed','failed'].includes(String(body.status))||typeof body.status!=="string")return fail("invalid_entity_cache_completion",409);
- if(body.status==="completed"&&!validAnswers(body.answers,JSON.parse(row.candidates)))return fail("invalid_entity_answers");
+ if(body.status==="completed"&&!validTypedEntityAnswers(body.answers,JSON.parse(row.request_json).questions))return fail("invalid_entity_answers");
  if(body.status==="failed"&&(!body.answers||typeof body.answers!=="object"||Array.isArray(body.answers)||Object.keys(body.answers).length!==0))return fail("invalid_entity_answers");
  const answers=canonicalJSON(body.answers),resultHash=await hash(canonicalJSON({status:body.status,answers:body.answers}));if(answers.length>32768)return fail("invalid_entity_answers");
  if(row.status!=="pending")return row.result_hash===resultHash&&await current(env,row,row.source_links)?reply(view(row)):fail("operation_conflict",409);

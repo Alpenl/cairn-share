@@ -88,6 +88,9 @@ async function immutable() {
 
 async function checkUpgrade(cases: Awaited<ReturnType<typeof seed>>[]) {
   const before = await immutable();
+  // 0030 adds an explicitly empty provenance column to legacy entity rows.
+  // Every previously stored field must still remain byte-for-byte unchanged.
+  before.entity_states=(before.entity_states as Record<string,unknown>[]).map(row=>({...row,observations:"[]"}));
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   expect(await immutable()).toEqual(before);
   for (const { id, expected, noDecision } of cases) {
