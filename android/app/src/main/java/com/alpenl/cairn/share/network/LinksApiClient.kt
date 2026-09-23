@@ -6,6 +6,7 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -29,6 +30,7 @@ internal enum class LinkFilter(val apiValue: String) {
 internal sealed interface LinkPageResult {
     data class Loaded(val page: LinkPage) : LinkPageResult
     data class Failed(val kind: FailureKind) : LinkPageResult
+    data object UnsupportedFilters : LinkPageResult
 }
 
 internal data class LinkPage(
@@ -50,6 +52,7 @@ internal sealed interface LinkCreateResult {
 internal sealed interface LinkMutationResult {
     data class Updated(val link: SavedLink) : LinkMutationResult
     data object Deleted : LinkMutationResult
+    data object DeletionPending : LinkMutationResult
     data class Failed(val kind: FailureKind) : LinkMutationResult
 }
 
@@ -59,8 +62,8 @@ internal class LinksApiClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
-    fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null, filters: BookmarkFilters = BookmarkFilters()): LinkPageResult {
-        val endpoint = URL(listUrl(filter, query, beforeId, filters))
+    fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null, filters: BookmarkFilters = BookmarkFilters(), filterTime: Instant = Instant.now()): LinkPageResult {
+        val endpoint = URL(listUrl(filter, query, beforeId, filters, filterTime))
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
@@ -69,7 +72,9 @@ internal class LinksApiClient(
             val status = connection.responseCode
             val body = responseBody(connection)
             when (status) {
-                HttpURLConnection.HTTP_OK -> LinkPageResult.Loaded(LinkJson.decodePage(body))
+                HttpURLConnection.HTTP_OK -> if (filters.needsEffectiveFilterContract() && JSONObject(body).opt("filter_contract_version") != 1) {
+                    LinkPageResult.UnsupportedFilters
+                } else LinkPageResult.Loaded(LinkJson.decodePage(body))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> LinkPageResult.Failed(FailureKind.Unauthorized)
                 else -> LinkPageResult.Failed(FailureKind.Server)
             }
@@ -85,7 +90,7 @@ internal class LinksApiClient(
     }
 
     fun get(id: Int, apiToken: String): LinkGetResult {
-        val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id?include=enrichment")
+        val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id?include=enrichment&include_cache_identity=1")
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
@@ -146,7 +151,7 @@ internal class LinksApiClient(
         note: String? = null,
         learned: Boolean? = null,
         apiToken: String,
-    ): LinkMutationResult = patch("/api/links/$id?include=enrichment", LinkJson.encodeUpdate(url, note, learned), apiToken)
+    ): LinkMutationResult = patch("/api/links/$id?include=enrichment&include_cache_identity=1", LinkJson.encodeUpdate(url, note, learned), apiToken)
 
     fun curate(id: Int, update: CurationUpdate, apiToken: String): LinkMutationResult =
         patch("/api/links/$id/curation", update.encode(), apiToken)
@@ -188,9 +193,11 @@ internal class LinksApiClient(
             connection.requestMethod = "DELETE"
             configure(connection, apiToken)
             val status = connection.responseCode
-            responseBody(connection)
+            val body = responseBody(connection)
             when (status) {
                 HttpURLConnection.HTTP_NO_CONTENT -> LinkMutationResult.Deleted
+                HttpURLConnection.HTTP_UNAVAILABLE -> if (runCatching { JSONObject(body).optString("error") }.getOrNull() == "deletion_cleanup_pending")
+                    LinkMutationResult.DeletionPending else LinkMutationResult.Failed(FailureKind.Server)
                 HttpURLConnection.HTTP_UNAUTHORIZED -> LinkMutationResult.Failed(FailureKind.Unauthorized)
                 else -> LinkMutationResult.Failed(FailureKind.Server)
             }
@@ -203,16 +210,17 @@ internal class LinksApiClient(
         }
     }
 
-    private fun listUrl(filter: LinkFilter, query: String, beforeId: Int?, filters: BookmarkFilters): String {
+    private fun listUrl(filter: LinkFilter, query: String, beforeId: Int?, filters: BookmarkFilters, filterTime: Instant): String {
         val params = mutableListOf(
             "limit=100",
-            "include=enrichment",
+            "include=enrichment", "include_cache_identity=1",
             "learned=${filter.apiValue}",
         )
         if (beforeId != null) {
             params += "before_id=$beforeId"
         }
-        for ((key, value) in filters.parameters()) params += "$key=${URLEncoder.encode(value, "UTF-8")}"
+        for ((key, value) in filters.parameters(filterTime)) params += "$key=${URLEncoder.encode(value, "UTF-8")}"
+        if (filters.needsEffectiveFilterContract()) params += "filter_contract_version=1"
         val trimmed = query.trim()
         if (trimmed.isNotEmpty()) {
             params += "q=${URLEncoder.encode(trimmed, "UTF-8")}"

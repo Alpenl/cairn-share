@@ -15,7 +15,7 @@ fun versionCodeFrom(versionName: String): Int {
 }
 
 val releaseVersionName = providers.gradleProperty("cairnShareVersionName")
-    .orElse("0.3.0")
+    .orElse("0.3.2")
     .get()
 val releaseVersionCode = providers.gradleProperty("cairnShareVersionCode")
     .map(String::toInt)
@@ -53,6 +53,9 @@ android {
             )
         }
     }
+
+    sourceSets.getByName("test").resources.srcDir("../../worker/test/fixtures")
+    sourceSets.getByName("androidTest").assets.srcDir("../../worker/test/fixtures")
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

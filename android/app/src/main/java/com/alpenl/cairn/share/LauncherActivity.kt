@@ -17,6 +17,9 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import com.alpenl.cairn.share.network.ApiDebugClient
+import com.alpenl.cairn.share.network.V2ClientTransport
+import com.alpenl.cairn.share.network.V2CurationClient
+import com.alpenl.cairn.share.network.V2CurationRepository
 import com.alpenl.cairn.share.network.AppUpdateInfo
 import com.alpenl.cairn.share.network.LinksApiClient
 import com.alpenl.cairn.share.network.UpdateApiClient
@@ -52,6 +55,8 @@ class LauncherActivity : ComponentActivity() {
             settingsStore = SharePreferencesStore(this),
             pendingUploadStore = PendingUploadStore(this),
             apiDebugClient = ApiDebugClient(apiBaseUrl),
+            v2Repository = V2CurationRepository(V2ClientTransport(V2CurationClient(apiBaseUrl))),
+            curationActionStore = CurationActionStore(this),
             apiBaseUrl = apiBaseUrl,
             releasesApiUrl = releasesApiUrl,
             currentVersionName = BuildConfig.VERSION_NAME,
