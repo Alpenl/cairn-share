@@ -664,10 +664,10 @@ export async function sourceRoute(request: Request, env: Env, id: number): Promi
   const now = new Date().toISOString();
   const guard = "id=? AND enrichment_status='processing' AND enrichment_lease_token=? AND enrichment_lease_until>?";
   const results = await env.DB.batch([
-    env.DB.prepare(`UPDATE links SET original_text=?,original_language=?,related_links=?,
+    env.DB.prepare(`UPDATE links SET original_text=?,original_language=?,source_context_text=?,related_links=?,
       ai_title=NULL,translated_text=NULL,summary=NULL,images=CASE WHEN original_text IS ? THEN images ELSE '[]' END,
       enrichment_updated_at=? WHERE ${guard} RETURNING id`)
-      .bind(source.original_text, source.original_language || null, JSON.stringify(source.related_links), source.original_text, now, id, body.lease_token, now),
+      .bind(source.original_text, source.original_language || null, source.context_text, JSON.stringify(source.related_links), source.original_text, now, id, body.lease_token, now),
     env.DB.prepare(`INSERT INTO enrichment_sources(link_id,url,original_text,payload,fetched_at)
       SELECT id,url,?,?,? FROM links WHERE ${guard}
       ON CONFLICT(link_id) DO UPDATE SET url=excluded.url,original_text=excluded.original_text,

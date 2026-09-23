@@ -11,7 +11,7 @@ it('0025 preserves existing records, invalidates authoritative changes atomicall
     snapshots:(await env.DB.prepare('SELECT * FROM evidence_snapshots').all()).results});
   const generation=()=>env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>('value');
   const before=await records(),initial=await generation();
-  await applyD1Migrations(env.DB,env.TEST_MIGRATIONS);
+  await applyD1Migrations(env.DB,env.TEST_MIGRATIONS.filter(m=>m.name<'0026'));
   expect(await records()).toEqual(before);expect(await generation()).toBe(initial);
   await env.DB.prepare('UPDATE links SET content_revision=content_revision+1 WHERE id=1').run();
   expect(await generation()).toBe(initial!+1);
