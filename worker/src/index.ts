@@ -1,5 +1,10 @@
+import { cleanupDeletedImages, maintainPrivacy } from "./privacy";
+import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
-import { classificationRoute, sourceRoute } from "./classification";
+import { ackSourceRefresh, classificationRoute, refreshSource, sourceRoute } from "./classification";
+import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
+import { applyV1Write } from "./taxonomy-v2";
+import { taxonomyV2Route } from "./taxonomy-routes";
 
 export interface Env {
   DB: D1Database;
@@ -34,12 +39,18 @@ interface EnrichmentJobRow {
   enrichment_attempts: number;
   enrichment_lease_token: string;
   enrichment_lease_until: string;
+  refresh_epoch: number;
 }
 
 type EnrichmentStatus = "pending" | "processing" | "completed" | "failed" | "exhausted";
 type EnrichmentFilter = EnrichmentStatus | "unsupported";
 
 interface EnrichmentListRow {
+  content_revision?: number;
+  personal_revision?: number;
+  app_body_revision?: number;
+  cache_decision_id?: number;
+  cache_entity_revision?: number;
   id: number;
   url: string;
   note: string;
@@ -84,6 +95,7 @@ interface EnrichmentCountRow {
 
 type ErrorCode =
   | "invalid_json"
+  | "invalid_expected_revision"
   | "invalid_content_type"
   | "invalid_url"
   | "invalid_note"
@@ -104,7 +116,18 @@ type ErrorCode =
   | "lease_conflict"
   | "job_busy"
   | "not_found"
-  | "method_not_allowed";
+  | "method_not_allowed"
+  | "invalid_classification_config"
+  | "invalid_classification"
+  | "invalid_source"
+  | "invalid_operation_key"
+  | "capability_mismatch"
+  | "target_changed"
+  | "input_changed"
+  | "lease_expired"
+  | "already_completed"
+  | "operation_conflict"
+  | "configuration_error";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -146,7 +169,7 @@ const MAX_ENRICHMENT_ERROR_LENGTH = 2_000;
 const ENRICHMENT_RETRY_DELAYS_MILLISECONDS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
 const READ_CACHE_TTL_SECONDS = 15;
 const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}, s-maxage=${READ_CACHE_TTL_SECONDS}`;
-const CACHE_VERSION = "3";
+const CACHE_VERSION = "4";
 const CACHE_ORIGIN = "https://cairn-share-cache.internal";
 const LINKS_CACHE_GENERATION_KEY = "links_generation";
 const X_LINK_SQL = `(
@@ -175,6 +198,18 @@ function contentColumns(summary: boolean): string {
 
 function includeEnrichment(url: URL): boolean {
   return url.searchParams.get("include") === "enrichment";
+}
+
+function includeCacheIdentity(url: URL): boolean {
+  return includeEnrichment(url) && url.searchParams.get("include_cache_identity") === "1";
+}
+
+function cacheIdentityColumns(enabled: boolean): string {
+  // Latest canonical versions are invalidation markers, not provenance of the
+  // legacy classification projection returned alongside them.
+  return enabled ? `, content_revision, app_body_revision, personal_revision,
+    COALESCE((SELECT MAX(d.id) FROM classification_decisions d WHERE d.link_id=links.id),0) AS cache_decision_id,
+    COALESCE((SELECT e.revision FROM entity_states e WHERE e.link_id=links.id),0) AS cache_entity_revision` : "";
 }
 
 type CacheState = "MISS" | "HIT" | "BYPASS";
@@ -211,6 +246,9 @@ class TimingCollector {
 }
 
 export default {
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await maintainPrivacy(env);
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     const timing = new TimingCollector();
     const response = await handleRequest(request, env, timing);
@@ -266,10 +304,53 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   }
 
   const sourceMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/source$/);
-  if (sourceMatch || path.startsWith("/api/enrichment/classifications/")) {
+  const refreshMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/refresh-source$/);
+  const refreshAckMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/refresh-source\/ack$/);
+  if (sourceMatch || refreshMatch || refreshAckMatch || path.startsWith("/api/enrichment/classifications/")) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
+    if (refreshAckMatch) {
+      if (request.method !== "POST") return error("method_not_allowed", 405);
+      return ackSourceRefresh(request, env, Number(refreshAckMatch[1]));
+    }
+    if (refreshMatch) {
+      if (request.method !== "POST") return error("method_not_allowed", 405);
+      return refreshSource(env, Number(refreshMatch[1]));
+    }
     return sourceMatch ? sourceRoute(request, env, Number(sourceMatch[1])) : classificationRoute(request, env, path);
+  }
+
+  // App-facing curation is an exact allowlist, never an alias for arbitrary
+  // internal v2 paths. Reads and human field actions do not invoke a model.
+  const appV2 = path.match(/^\/api\/bookmarks\/(\d+)\/(v2-selection|v2-override)$/);
+  if (path === "/api/v2-taxonomy" || appV2) {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    if (path === "/api/v2-taxonomy") {
+      return routeMethod(request, ["GET"], () => taxonomyV2Route(request, env, "/api/v2/taxonomy"));
+    }
+    const [, id, action] = appV2!;
+    if (action === "v2-selection") {
+      return routeMethod(request, ["GET"], () => taxonomyV2Route(request, env, `/api/v2/links/${id}/selection`));
+    }
+    return routeMethod(request, ["POST"], async () => {
+      const body = await request.clone().json().catch(() => null) as Record<string, unknown> | null;
+      if (!body || !Number.isSafeInteger(body.expected_revision) || Number(body.expected_revision) < 0) {
+        return error("invalid_expected_revision", 400);
+      }
+      return domainRoute(request, env, `/api/v2/links/${id}/overrides`);
+    });
+  }
+
+  // Internal v2 domain API (evidence, specs, runs, decisions, overrides).
+  // Management-only and behind the enricher token; the App token cannot reach it.
+  if (path.startsWith("/api/v2/")) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    if (path.startsWith("/api/v2/taxonomy") || /^\/api\/v2\/links\/\d+\/selection/.test(path)) {
+      return taxonomyV2Route(request, env, path);
+    }
+    return domainRoute(request, env, path);
   }
 
   if (path === "/api/enrichment/jobs/claim") {
@@ -404,7 +485,7 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
 
   return cachedJson(request, env, timing, (generation) => listCacheUrl(url, { limit, beforeId, learned, query }, generation), async () => {
     const pageSize = limit + 1;
-    const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}` : ""} FROM links`;
+    const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""} FROM links`;
     const order = "ORDER BY id DESC LIMIT ?";
     const clauses = [...filters.clauses];
     const bindings = [...filters.bindings];
@@ -430,7 +511,8 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
     const rows = result.results ?? [];
     const items = rows.slice(0, limit);
     const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
-    return { items: items.map((row) => enriched ? mapAppLink(row, false) : mapLink(row)), next_before_id: next };
+    return { items: items.map((row) => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row)), next_before_id: next,
+      ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {}) };
   });
 }
 
@@ -438,7 +520,7 @@ async function getLink(request: Request, url: URL, id: number, env: Env, timing:
   return cachedJson(request, env, timing, (generation) => detailCacheUrl(id, url, generation), async () => {
     const row = await timing.measure("db", () =>
       env.DB.prepare(
-        `SELECT ${LINK_COLUMNS}${includeEnrichment(url) ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}` : ""} FROM links WHERE id = ?`
+        `SELECT ${LINK_COLUMNS}${includeEnrichment(url) ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""} FROM links WHERE id = ?`
       )
         .bind(id)
         .first<LinkRow & EnrichmentListRow>()
@@ -447,7 +529,7 @@ async function getLink(request: Request, url: URL, id: number, env: Env, timing:
     if (row === null) {
       return null;
     }
-    return includeEnrichment(url) ? mapAppLink(row, true) : mapLink(row);
+    return includeEnrichment(url) ? mapAppLink(row, true, includeCacheIdentity(url)) : mapLink(row);
   });
 }
 
@@ -465,7 +547,13 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
   const body = raw as Record<string, unknown>;
   const updates: string[] = [];
   const bindings: Array<string | number | null> = [];
-  let enrichmentInputChanged = false;
+  // URL and note invalidate different things and must not be coupled:
+  //  - a URL change means the stored snapshot belongs to a different page, so
+  //    source/content is invalidated (human curation is preserved).
+  //  - a note change is a personal annotation. It must not discard the fetched
+  //    source, translation or images, and must not trigger a refetch.
+  let urlChanged = false;
+  let noteChanged = false;
 
   if ("url" in body) {
     if (typeof body.url !== "string") {
@@ -477,7 +565,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     }
     updates.push("url = ?");
     bindings.push(url);
-    enrichmentInputChanged = true;
+    urlChanged = true;
   }
 
   if ("note" in body) {
@@ -486,7 +574,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     }
     updates.push("note = ?");
     bindings.push(body.note);
-    enrichmentInputChanged = true;
+    noteChanged = true;
   }
 
   if ("learned" in body) {
@@ -501,7 +589,10 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     return error("invalid_update");
   }
 
-  if (enrichmentInputChanged) {
+  // A URL change invalidates the stored source and the derived reading content
+  // because they describe a different page. Human curation, why and status are
+  // deliberately preserved: they are the user's own decisions.
+  if (urlChanged) {
     updates.push(
       "enrichment_status = 'pending'",
       "enrichment_attempts = 0",
@@ -524,13 +615,14 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
   }
 
   bindings.push(id);
-  const enriched = includeEnrichment(new URL(request.url));
+  const requestUrl = new URL(request.url);
+  const enriched = includeEnrichment(requestUrl);
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `UPDATE links
         SET ${updates.join(", ")}
         WHERE id = ?
-        RETURNING ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}` : ""}`
+        RETURNING ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(includeCacheIdentity(requestUrl))}` : ""}`
     )
       .bind(...bindings)
       .first<LinkRow & EnrichmentListRow>()
@@ -540,6 +632,14 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     return error("not_found", 404);
   }
   await bumpLinksCacheGeneration(env, timing);
+  if (includeCacheIdentity(requestUrl)) {
+    // SQLite RETURNING precedes AFTER triggers. Read body and identity together
+    // after their revisions have advanced, never attach pre-trigger revisions.
+    const current = await timing.measure("db", () => env.DB.prepare(
+      `SELECT ${LINK_COLUMNS}, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(true)} FROM links WHERE id=?`
+    ).bind(id).first<LinkRow & EnrichmentListRow>());
+    return current ? json(mapAppLink(current, true, true)) : error("not_found", 404);
+  }
   return json(enriched ? mapAppLink(row, true) : mapLink(row));
 }
 
@@ -550,10 +650,12 @@ async function deleteLink(env: Env, id: number, timing: TimingCollector): Promis
       .first<{ id: number }>()
   );
 
-  if (row === null) {
+  if (row === null && !await env.DB.prepare("SELECT link_id FROM privacy_deletions WHERE link_id=?").bind(id).first()) {
     return error("not_found", 404);
   }
-  await bumpLinksCacheGeneration(env, timing);
+  // The trigger removes budgets, invalidates cached reads and records the outbox
+  // in the same transaction as deletion. A lost response can safely be retried.
+  if (!await cleanupDeletedImages(env, id)) return json({ error: "deletion_cleanup_pending" }, 503, { "Retry-After": "300" });
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
@@ -566,15 +668,10 @@ function bookmarkFilters(url: URL, query?: string): { clauses: string[]; binding
     clauses.push("curation_status = ?");
     bindings.push(curationStatus);
   }
-  for (const [key, dimension, field] of [["topic", "topics", "topics"], ["form", "forms", "form"], ["use", "uses", "use"]] as const) {
-    const value = url.searchParams.get(key);
-    if (!value) continue;
-    if (!validTerm(dimension, value, false)) return error("invalid_query");
-    clauses.push(key === "topic"
-      ? "EXISTS (SELECT 1 FROM json_each(COALESCE(curation, classification, '{}'), '$.topics') WHERE value = ?)"
-      : `json_extract(COALESCE(curation, classification, '{}'), '$.${field}') = ?`);
-    bindings.push(value);
-  }
+  const selection = selectionFilters(url.searchParams);
+  if (!selection) return error("invalid_query");
+  clauses.push(...selection.clauses);
+  bindings.push(...selection.bindings);
   const wechatSQL = "(lower(url) LIKE 'https://mp.weixin.qq.com/%' OR lower(url) LIKE 'http://mp.weixin.qq.com/%')";
   const source = url.searchParams.get("source");
   if (source) {
@@ -599,7 +696,13 @@ function bookmarkFilters(url: URL, query?: string): { clauses: string[]; binding
     for (const term of terms) {
       const like = `%${escapeLike(term)}%`;
       const fields = ["url", "note", "ai_title", "summary", "translated_text", "original_text", "why",
-        "json_extract(classification, '$.why_suggestion')", "json_extract(classification, '$.entities')"];
+        "json_extract(classification, '$.why_suggestion')",
+        // Retain legacy full-text metadata until an independent entity run or
+        // correction exists. Thereafter only current, corrected entities match.
+        `(CASE WHEN NOT EXISTS (SELECT 1 FROM entity_states WHERE link_id=links.id)
+          AND NOT EXISTS (SELECT 1 FROM curation_overrides WHERE link_id=links.id AND field IN ('entity','entities'))
+          THEN json_extract(classification, '$.entities')
+          ELSE (SELECT group_concat(term, ' ') FROM effective_entity_terms WHERE link_id=links.id) END)`];
       clauses.push(`(${fields.map((field) => `COALESCE(${field}, '') LIKE ? ESCAPE '\\'`).join(" OR ")})`);
       bindings.push(...fields.map(() => like));
     }
@@ -619,6 +722,10 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   if (query === null) return error("invalid_query");
   const filters = bookmarkFilters(url, query);
   if (filters instanceof Response) return filters;
+  // Counts are status facets for the filtered collection, independent of the
+  // selected status tab and page cursor. Capture before adding those clauses.
+  const countWhere = filters.clauses.length ? `WHERE ${filters.clauses.join(" AND ")}` : "";
+  const countBindings = [...filters.bindings];
   const { clauses, bindings } = filters;
   if (beforeId !== undefined) {
     clauses.push("id < ?");
@@ -632,11 +739,12 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
     bindings.push(status);
   }
   const summary = url.searchParams.get("view") === "summary";
+  const withIdentity = url.searchParams.get("include_cache_identity") === "1";
 
   const pageSize = limit + 1;
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const listStatement = env.DB.prepare(
-    `SELECT id, url, note, created_at, ${ENRICHMENT_COLUMNS}, ${contentColumns(summary)}
+    `SELECT id, url, note, created_at, ${ENRICHMENT_COLUMNS}, ${contentColumns(summary)} ${cacheIdentityColumns(withIdentity)}
        FROM links
       ${where}
       ORDER BY id DESC
@@ -650,22 +758,21 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'exhausted' THEN 1 ELSE 0 END), 0) AS exhausted,
             COALESCE(SUM(CASE WHEN NOT ${X_LINK_SQL} THEN 1 ELSE 0 END), 0) AS unsupported
-       FROM links`
-  );
+       FROM links ${countWhere}`
+  ).bind(...countBindings);
 
-  const [listResult, countRow] = await timing.measure("db", () =>
-    Promise.all([
-      listStatement.all<EnrichmentListRow>(),
-      countStatement.first<EnrichmentCountRow>()
-    ])
-  );
-  const rows = listResult.results ?? [];
+  // D1 batches are transactional. Do not attach counts read after a
+  // concurrent mutation to a page that predates it.
+  const [listResult, countResult] = await timing.measure("db", () => env.DB.batch([listStatement, countStatement]));
+  const rows = (listResult.results ?? []) as unknown as EnrichmentListRow[];
+  const countRow = (countResult.results?.[0] ?? null) as unknown as EnrichmentCountRow | null;
   const items = rows.slice(0, limit);
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
   return json({
-    items: items.map((row) => ({ ...mapEnrichmentListItem(row), ...(summary ? { content_loaded: false } : {}) })),
+    items: items.map((row) => ({ ...mapEnrichmentListItem(row, withIdentity), ...(summary ? { content_loaded: false } : {}) })),
     next_before_id: next,
-    counts: mapEnrichmentCounts(countRow)
+    counts: mapEnrichmentCounts(countRow),
+    ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {})
   });
 }
 
@@ -707,14 +814,43 @@ async function updateCuration(request: Request, env: Env, id: number, timing: Ti
     const selection = validateSelection(body.classification);
     if (body.classification !== null && (selection === null || !record(body.classification) ||
       Object.keys(body.classification).some((key) => !["topics", "form", "use"].includes(key)))) return error("invalid_curation");
-    updates.push("curation = ?");
-    bindings.push(selection === null ? null : JSON.stringify(selection));
   }
-  if (updates.length === 0) return error("invalid_curation");
-  const row = await timing.measure("db", () => env.DB.prepare(
-    `UPDATE links SET ${updates.join(", ")} WHERE id = ? RETURNING id`
-  ).bind(...bindings, id).first<{ id: number }>());
-  if (row === null) return error("not_found", 404);
+  if (updates.length === 0 && !("classification" in body)) return error("invalid_curation");
+  const exists = await timing.measure("db", () => env.DB.prepare(`SELECT id FROM links WHERE id = ?`).bind(id)
+    .first<{ id: number }>());
+  if (exists === null) return error("not_found", 404);
+  if (updates.length > 0) {
+    await timing.measure("db", () => env.DB.prepare(
+      `UPDATE links SET ${updates.join(", ")} WHERE id = ?`
+    ).bind(...bindings, id).run());
+  }
+  // The pre-v2 client writes only topics<=3 plus form/use. That write is
+  // translated into the same field-level override log the v2 UI uses, so the
+  // old endpoint and the new view derive from one effective result and the
+  // hidden v2 dimensions are preserved (R2-03).
+  if ("classification" in body) {
+    const { view } = await computeEffective(env, id);
+    const existing = {
+      topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
+      affordances: view.affordances, form: view.form, use: view.use
+    };
+    const selection = body.classification === null ? null : validateSelection(body.classification);
+    const { selection: desired } = applyV1Write(existing, selection === null
+      ? { topics: [], form: "", use: "" }
+      : { topics: selection.topics, form: selection.form, use: selection.use });
+    // The legacy write has no revision and no operation id. It is recorded as a
+    // legacy_unknown human action at the current revision; the CAS is not
+    // invented for a protocol that cannot carry one. `classification: null`
+    // restores the automatic value for exactly the v1-expressible dimensions
+    // and never clears hidden v2 dimensions (B05-T06/R2-03).
+    const result = await persistSelectionOverrides(env, id, desired, {
+      source: "legacy_unknown",
+      operationPrefix: `v1-${id}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+      rejectAutomaticExtras: true,
+      resetFields: selection === null ? ["topics", "form", "use"] : undefined
+    });
+    if ("conflict" in result) return json({ error: "revision_conflict", revision: result.conflict }, 409);
+  }
   if (app) {
     const item = await timing.measure("db", () => env.DB.prepare(
       `SELECT ${LINK_COLUMNS}, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)} FROM links WHERE id = ?`
@@ -760,7 +896,7 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
           LIMIT 1
         )
         RETURNING id, url, note, created_at, enrichment_attempts,
-                  enrichment_lease_token, enrichment_lease_until`
+                  enrichment_lease_token, enrichment_lease_until, refresh_epoch`
     )
       .bind(leaseToken, leaseUntil, nowIso, MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso)
       .first<EnrichmentJobRow>()
@@ -800,7 +936,7 @@ async function claimEnrichmentJobById(
             OR enrichment_lease_until <= ?
           )
         RETURNING id, url, note, created_at, enrichment_attempts,
-                  enrichment_lease_token, enrichment_lease_until`
+                  enrichment_lease_token, enrichment_lease_until, refresh_epoch`
     )
       .bind(leaseToken, leaseUntil, nowIso, id, nowIso)
       .first<EnrichmentJobRow>()
@@ -963,7 +1099,16 @@ async function storeEnrichmentImages(
   const images: EnrichmentImage[] = [];
   try {
     for (const imageUrl of imageUrls) {
-      images.push(await fetchAndStoreImage(env, id, imageUrl, timing));
+      const image = await fetchAndStoreImage(env, id, imageUrl, timing);
+      images.push(image);
+      const current = await env.DB.prepare("SELECT id FROM links WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?")
+        .bind(id, leaseToken).first();
+      if (!current) {
+        // A delete during put is cleaned here; if this isolate dies, the durable
+        // tombstone/scheduled scan catches the late object without trusting memory.
+        await cleanupDeletedImages(env, id);
+        return error("lease_conflict", 409);
+      }
     }
   } catch {
     return error("image_fetch_failed", 502);
@@ -1007,7 +1152,7 @@ async function fetchAndStoreImage(
     env.ENRICHMENT_IMAGES.put(key, body, {
       httpMetadata: {
         contentType,
-        cacheControl: "private, max-age=86400"
+        cacheControl: "private, no-store"
       },
       customMetadata: { source_url: imageUrl }
     })
@@ -1048,21 +1193,29 @@ async function readBodyWithinLimit(response: Response, limit: number): Promise<U
 async function getEnrichmentImage(request: Request, env: Env, key: string): Promise<Response> {
   if (!isValidImageKey(key)) return error("not_found", 404);
 
+  const id = Number(key.split("/")[1]);
+  if (!Number.isSafeInteger(id) || !await env.DB.prepare("SELECT id FROM links WHERE id=?").bind(id).first()) return error("not_found", 404);
   const object = await env.ENRICHMENT_IMAGES.get(key);
+  // Recheck after storage I/O, including before conditional 304 responses.
+  if (!await env.DB.prepare("SELECT id FROM links WHERE id=?").bind(id).first()) {
+    await object?.body.cancel();
+    return error("not_found", 404);
+  }
   if (object === null) return error("not_found", 404);
 
   const etag = object.httpEtag;
   if (request.headers.get("if-none-match") === etag) {
+    await object.body.cancel();
     return new Response(null, {
       status: 304,
-      headers: { ETag: etag, "Cache-Control": "private, max-age=86400", ...CORS_HEADERS }
+      headers: { ETag: etag, "Cache-Control": "private, no-store", ...CORS_HEADERS }
     });
   }
 
   const headers = new Headers(CORS_HEADERS);
   object.writeHttpMetadata(headers);
   headers.set("ETag", etag);
-  headers.set("Cache-Control", "private, max-age=86400");
+  headers.set("Cache-Control", "private, no-store");
   headers.set("X-Content-Type-Options", "nosniff");
   return new Response(object.body, { headers });
 }
@@ -1293,6 +1446,9 @@ function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS"): Resp
 function withServerTiming(response: Response, timing: TimingCollector): Response {
   const headers = new Headers(response.headers);
   headers.set("Server-Timing", timing.headerValue());
+  // Internal generation-keyed cache entries expire after 15s. Never expose
+  // those public caching headers for authenticated private content to clients.
+  headers.set("Cache-Control", "private, no-store");
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -1345,7 +1501,7 @@ function listCacheUrl(
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
   if (parsed.query !== undefined) url.searchParams.set("q", parsed.query);
-  for (const key of ["include", "curation_status", "topic", "form", "use", "source", "uncertain", "since"]) {
+  for (const key of ["include", "include_cache_identity", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
     const value = requestUrl.searchParams.get(key);
     if (value) url.searchParams.set(key, value);
   }
@@ -1358,6 +1514,7 @@ function detailCacheUrl(id: number, requestUrl: URL, generation: number): string
   url.searchParams.set("v", CACHE_VERSION);
   url.searchParams.set("g", String(generation));
   if (includeEnrichment(requestUrl)) url.searchParams.set("include", "enrichment");
+  if (includeCacheIdentity(requestUrl)) url.searchParams.set("include_cache_identity", "1");
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
 }
@@ -1483,7 +1640,7 @@ function mapLink(row: LinkRow): LinkRecord {
   };
 }
 
-function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean): LinkRecord & { enrichment: Record<string, unknown> } {
+function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean, withIdentity = false): LinkRecord & { enrichment: Record<string, unknown> } {
   return {
     ...mapLink(row),
     enrichment: {
@@ -1499,6 +1656,11 @@ function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean): LinkReco
       updated_at: row.enrichment_updated_at,
       enriched_at: row.enriched_at,
       content_loaded: detail,
+      ...(withIdentity ? { cache_identity: {
+        schema_version: 1, representation: detail ? "enrichment_detail" : "enrichment_summary",
+        content_revision: row.content_revision, body_revision: row.app_body_revision, personal_revision: row.personal_revision,
+        latest_decision_id: row.cache_decision_id, latest_entity_revision: row.cache_entity_revision
+      } } : {}),
       ...(detail ? {
         original_text: row.original_text,
         translated_text: row.translated_text,
@@ -1517,11 +1679,14 @@ function mapEnrichmentJob(row: EnrichmentJobRow): Record<string, unknown> {
     created_at: row.created_at,
     attempt: row.enrichment_attempts,
     lease_token: row.enrichment_lease_token,
-    lease_until: row.enrichment_lease_until
+    lease_until: row.enrichment_lease_until,
+    // A non-zero epoch is an explicit, one-shot refresh intent the processor
+    // must consume instead of reusing a stored source (R2-06).
+    refresh_epoch: row.refresh_epoch ?? 0
   };
 }
 
-function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> {
+function mapEnrichmentListItem(row: EnrichmentListRow, withIdentity = false): Record<string, unknown> {
   const processable = row.processable === 1;
   return {
     id: row.id,
@@ -1547,7 +1712,11 @@ function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> 
     model: row.enrichment_model,
     error: row.enrichment_error,
     updated_at: row.enrichment_updated_at,
-    enriched_at: row.enriched_at
+    enriched_at: row.enriched_at,
+    ...(withIdentity ? {cache_identity: {
+      schema_version:1, content_revision:row.content_revision, body_revision:row.app_body_revision,
+      personal_revision:row.personal_revision, latest_decision_id:row.cache_decision_id, latest_entity_revision:row.cache_entity_revision
+    }} : {})
   };
 }
 

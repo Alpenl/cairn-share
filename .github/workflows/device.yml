@@ -7,6 +7,8 @@ on:
       - main
     paths:
       - "android/**"
+      - "worker/**"
+      - "tests/android-worker/**"
       - ".github/workflows/device.yml"
 
 permissions:
@@ -37,6 +39,16 @@ jobs:
           java-version: "17"
           cache: gradle
 
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install local Worker dependencies
+        run: npm ci --prefix worker
+
       - name: Enable KVM
         run: |
           set -euo pipefail
@@ -51,13 +63,19 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
-          script: ./android/gradlew -p android --no-daemon --dependency-verification strict connectedDebugAndroidTest
+          script: |
+            ./android/gradlew -p android --no-daemon --dependency-verification strict connectedDebugAndroidTest
+            ANDROID_SERIAL="$(adb devices | awk '$2 == "device" && $1 ~ /^emulator-/ {print $1}')" bash tests/android-worker/run.sh
 
       - name: Upload instrumentation report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: connected-test-report-api-${{ matrix.api-level }}
-          path: android/app/build/reports/androidTests/connected/**
+          path: |
+            android/app/build/reports/androidTests/connected/**
+            android/app/build/outputs/androidTest-results/connected/**
+            ${{ runner.temp }}/cairn-android-worker.*/*.log
+            ${{ runner.temp }}/cairn-android-worker.*/transport-history.json
           if-no-files-found: ignore
           retention-days: 7
