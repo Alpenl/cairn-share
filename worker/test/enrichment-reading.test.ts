@@ -12,6 +12,41 @@ function call(path: string, token = "internal", method = "GET", body?: unknown) 
   }), bindings());
 }
 
+it("exports effective views in one bounded SQL snapshot with per-link semantics", async () => {
+  const ids: number[] = [];
+  for (const suffix of [201, 202, 203]) {
+    const created = await call("links", "app", "POST", { url: `https://x.com/u/status/${suffix}` });
+    ids.push((await created.json() as { id: number }).id);
+  }
+  await env.DB.prepare(`UPDATE links SET classification=?,why='export why',original_text='private article'
+    WHERE id=?`).bind(JSON.stringify({ topics: ["llm"], form: "case", use: "learn" }), ids[0]).run();
+  expect((await call(`bookmarks/${ids[1]}/v2-override`, "app", "POST", {
+    operation_key: "batch-human-topic", field: "topics", action: "accept", term: "design", expected_revision: 0
+  })).status).toBe(200);
+  const singles = await Promise.all(ids.map(async (id) =>
+    await (await call(`v2/links/${id}/effective`)).json() as Record<string, unknown>));
+  const response = await call("v2/links/effective-batch", "internal", "POST", { ids: [ids[2], ids[0], 999999, ids[1]] });
+  expect(response.status).toBe(200);
+  const wire = await response.text();
+  expect(Number(response.headers.get("Content-Length"))).toBe(new TextEncoder().encode(wire).length);
+  expect(wire).not.toContain("private article");
+  const batch = JSON.parse(wire) as { version: number; items: Array<Record<string, unknown>>;
+    missing_ids: number[]; d1: { scope: string; sql_count: number; rows_read: number; rows_written: number } };
+  expect(batch.version).toBe(1);
+  expect(batch.items).toEqual([singles[2], singles[0], singles[1]]);
+  expect(batch.missing_ids).toEqual([999999]);
+  expect(batch.d1.scope).toBe("effective_view_only");
+  expect(batch.d1.sql_count).toBe(1);
+  expect(batch.d1.rows_read).toBeGreaterThan(0);
+  expect(batch.d1.rows_written).toBe(0);
+  expect((await call("v2/links/effective-batch", "app", "POST", { ids })).status).toBe(401);
+  for (const bad of [{ ids: [] }, { ids: [ids[0], ids[0]] }, { ids: [0] },
+    { ids: Array.from({ length: 51 }, (_, index) => index + 1) }, { ids, extra: true }]) {
+    expect((await call("v2/links/effective-batch", "internal", "POST", bad)).status).toBe(400);
+  }
+  expect((await call("v2/links/effective-batch", "internal", "GET")).status).toBe(405);
+});
+
 it("returns article, effective selection and entity state from one reading contract", async () => {
   const created = await call("links", "app", "POST", { url: "https://x.com/u/status/101" });
   const { id } = await created.json() as { id: number };

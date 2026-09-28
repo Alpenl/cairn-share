@@ -15,14 +15,14 @@ type Entity = { state: string; content_revision: number; content_hash: string; e
   entities: string; observations: string; revision: number; updated_at: string; snapshot_matches: number };
 type Queue = { status: string; content_revision: number };
 type Evidence = { id: number; content_hash: string; truncated: number; completeness: string };
-type Row = { personal_revision: number; content_revision: number; classification: string | null;
+type Row = { id: number; personal_revision: number; content_revision: number; classification: string | null;
   why: string | null; curation_status: string | null; decision: string | null; overrides: string;
   legacy: string | null; entity: string | null; queue: string | null; evidence: string | null };
 
 // The reading endpoint extends the same statement that folds the effective
 // selection. Keep these columns explicit: links also holds private source and
 // lease material which a detail read must not fetch or expose.
-const readingColumns = `,l.id,l.url,l.note,l.created_at,l.enrichment_status,l.enrichment_attempts,
+const readingColumns = `,l.url,l.note,l.created_at,l.enrichment_status,l.enrichment_attempts,
   l.enrichment_next_retry_at,l.enrichment_paid_uncertain,l.enrichment_paid_stage,
   l.ai_title,l.original_language,
   CASE WHEN l.app_body_revision=? THEN NULL ELSE l.original_text END AS original_text,
@@ -49,8 +49,8 @@ function legacyOverrides(source: Legacy | null): Override[] {
 // One SQLite statement gives every value and its identity the same read
 // snapshot. Separate awaited SELECTs can attach revision N+1 to values from N,
 // even when every individual query is correct. Never read mutable projections.
-export async function readSelectionSnapshot(env: Env, id: number, includeReading = false, knownBodyRevision = -1) {
-  const link = await env.DB.prepare(`SELECT l.personal_revision,l.content_revision,l.classification,l.why,l.curation_status,
+function selectionSQL(where: string, includeReading: boolean): string {
+  return `SELECT l.id,l.personal_revision,l.content_revision,l.classification,l.why,l.curation_status,
     (SELECT json_object('id',d.id,'content_revision',d.content_revision,'automatic',d.automatic,'policy_version',d.policy_version,
       'run_references_complete',d.run_references_complete,'runs',
       (SELECT json_group_array(json_object('coverage',r.coverage,'evidence_coverage',r.evidence_coverage))
@@ -70,8 +70,24 @@ export async function readSelectionSnapshot(env: Env, id: number, includeReading
     (SELECT json_object('id',s.id,'content_hash',s.content_hash,'truncated',s.truncated,'completeness',s.completeness)
       FROM evidence_snapshots s WHERE s.link_id=l.id AND s.content_revision=l.content_revision) AS evidence
     ${includeReading ? readingColumns : ""}
-    FROM links l WHERE l.id=?`).bind(...(includeReading ? [knownBodyRevision, knownBodyRevision, id] : [id])).first<Row>();
-  if (!link) return null;
+    FROM links l WHERE ${where}`;
+}
+
+export async function readSelectionSnapshot(env: Env, id: number, includeReading = false, knownBodyRevision = -1) {
+  const link = await env.DB.prepare(selectionSQL("l.id=?", includeReading))
+    .bind(...(includeReading ? [knownBodyRevision, knownBodyRevision, id] : [id])).first<Row>();
+  return link ? selectionFromRow(link) : null;
+}
+
+// A single SQLite read snapshot supplies every exported view. The outer IN is
+// a bounded set query; no per-link HTTP call or per-link SQL statement runs.
+export async function readSelectionSnapshots(env: Env, ids: number[]) {
+  const result = await env.DB.prepare(selectionSQL(`l.id IN (${ids.map(() => "?").join(",")})`, false))
+    .bind(...ids).all<Row>();
+  return { snapshots: new Map(result.results.map((row) => [row.id, selectionFromRow(row)])), meta: result.meta };
+}
+
+function selectionFromRow(link: Row) {
   const decision = parse<Decision | null>(link.decision, null);
   const entity = parse<Entity | null>(link.entity, null);
   const queue = parse<Queue | null>(link.queue, null);

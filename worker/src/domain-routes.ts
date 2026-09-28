@@ -1,7 +1,7 @@
 import { entityCacheRoute } from "./entity-cache";
 import {validEntityObservations,type EntityBlock} from "./entity-judgments";
 import { classificationBudgetRoute } from "./classification-budget";
-import { readSelectionSnapshot } from "./selection-state";
+import { readSelectionSnapshot, readSelectionSnapshots } from "./selection-state";
 import { extensionBudgetRoute } from "./extension-budget";
 import { rerankCacheRoute } from "./rerank-cache";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
@@ -40,6 +40,9 @@ async function sha256Hex(value: string): Promise<string> {
 // Internal v2 API. Every route requires the enricher token (enforced by the
 // caller); management-only mutations are additionally documented as such.
 export async function domainRoute(request: Request, env: Env, path: string): Promise<Response> {
+  if (path === "/api/v2/links/effective-batch") {
+    return request.method === "POST" ? effectiveBatch(request, env) : fail("method_not_allowed", 405);
+  }
   const entityCached = await entityCacheRoute(request, env, path);
   if (entityCached) return entityCached;
   const classificationBudget = await classificationBudgetRoute(request, env, path);
@@ -1349,12 +1352,57 @@ export async function rebuildProjection(env: Env, id: number): Promise<void> {
 }
 
 async function effective(env: Env, id: number): Promise<Response> {
-  const link = await env.DB.prepare(`SELECT why, curation_status FROM links WHERE id = ?`).bind(id)
-    .first<{ why: string | null; curation_status: string | null }>();
-  if (!link) return fail("not_found", 404);
-  const { view, projected, stale, contentRevision } = await computeEffective(env, id);
-  return reply({
-    id, content_revision: contentRevision, effective: view, projected, stale,
-    why: link.why, curation_status: link.curation_status
-  });
+  const snapshot = await readSelectionSnapshot(env, id);
+  return snapshot ? reply(effectivePayload(snapshot)) : fail("not_found", 404);
+}
+
+function effectivePayload(snapshot: NonNullable<Awaited<ReturnType<typeof readSelectionSnapshot>>>) {
+  return { id: snapshot.link.id, content_revision: snapshot.contentRevision,
+    effective: snapshot.view, projected: snapshot.projected, stale: snapshot.stale,
+    why: snapshot.link.why, curation_status: snapshot.link.curation_status };
+}
+
+// Export is an internal, read-only operation. A fixed 50-ID cap stays well
+// below D1's 100 binding parameters and bounds response size and JS memory.
+async function effectiveBatch(request: Request, env: Env): Promise<Response> {
+  if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
+    return fail("invalid_content_type");
+  }
+  const reader = request.body?.getReader();
+  if (!reader) return fail("invalid_json");
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let ids: number[];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > 2048) { await reader.cancel(); return fail("request_too_large", 413); }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    const body: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+      Object.keys(body).length !== 1 || !("ids" in body)) return fail("invalid_ids");
+    const input = (body as { ids: unknown }).ids;
+    if (!Array.isArray(input) || input.length < 1 || input.length > 50 ||
+      !input.every((id: unknown) => typeof id === "number" && Number.isSafeInteger(id) && id > 0) ||
+      new Set(input).size !== input.length) {
+      return fail("invalid_ids");
+    }
+    ids = input as number[];
+  } catch { return fail("invalid_json"); }
+  const { snapshots, meta } = await readSelectionSnapshots(env, ids);
+  const payload = { version: 1, items: ids.flatMap((id) => {
+    const snapshot = snapshots.get(id);
+    return snapshot ? [effectivePayload(snapshot)] : [];
+  }), missing_ids: ids.filter((id) => !snapshots.has(id)),
+  d1: { scope: "effective_view_only", sql_count: 1,
+    rows_read: meta.rows_read, rows_written: meta.rows_written } };
+  const body = JSON.stringify(payload);
+  return new Response(body, { headers: { ...headers,
+    "Content-Length": String(new TextEncoder().encode(body).length) } });
 }
