@@ -13,6 +13,7 @@ export interface Env {
   ENRICHMENT_IMAGES: R2Bucket;
   CAIRN_API_TOKEN: string;
   CAIRN_ENRICHER_TOKEN: string;
+  CAIRN_OPERATOR_TOKEN?: string;
   HISTORY_RETENTION_DAYS?: string;
 }
 
@@ -399,8 +400,15 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   }
 
   if (path.startsWith("/api/enrichment/provider-attempts")) {
-    const authError = requireEnricherToken(request, env);
-    if (authError !== null) return authError;
+    const operatorOnly = path === "/api/enrichment/provider-attempts/reconcile";
+    if (operatorOnly && (!env.CAIRN_OPERATOR_TOKEN?.trim() ||
+        env.CAIRN_OPERATOR_TOKEN.trim() === env.CAIRN_ENRICHER_TOKEN?.trim() ||
+        env.CAIRN_OPERATOR_TOKEN.trim() === env.CAIRN_API_TOKEN?.trim())) {
+      return authError("auth_not_configured", 500);
+    }
+    const authResult = operatorOnly
+      ? requireBearerToken(request, env.CAIRN_OPERATOR_TOKEN!) : requireEnricherToken(request, env);
+    if (authResult !== null) return authResult;
     return await providerAttemptRoute(request, env, path) ?? error("not_found", 404);
   }
 
@@ -972,8 +980,8 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
             )
             AND (enrichment_status <> 'pending' OR enrichment_next_retry_at IS NULL
               OR enrichment_next_retry_at <= ?)
-            AND (SELECT COUNT(*) FROM enrichment_provider_attempts
-              WHERE created_at>=? AND created_at<?) < ?
+            AND COALESCE((SELECT total FROM enrichment_provider_daily_usage
+              WHERE day=?),0) < ?
             AND (SELECT COUNT(*) FROM enrichment_provider_attempts a
               WHERE a.link_id=links.id AND a.created_at>=? AND a.created_at<?) < ?
           ORDER BY manual_priority DESC, id ASC
@@ -985,7 +993,7 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
     )
       .bind(guarded ? 0 : 1, guarded ? 0 : 1, guarded ? null : "legacy_unknown", leaseToken, leaseUntil, nowIso,
         MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso, nowIso, nowIso,
-        budgetStart, budgetEnd, PROVIDER_ATTEMPT_LIMITS.daily_total,
+        budgetStart.slice(0, 10), PROVIDER_ATTEMPT_LIMITS.daily_total,
         budgetStart, budgetEnd, PROVIDER_ATTEMPT_LIMITS.daily_item)
       .first<EnrichmentJobRow>()
   );
@@ -1031,8 +1039,8 @@ async function claimEnrichmentJobById(
           AND enrichment_paid_uncertain=0
           AND (COALESCE(enrichment_error,'') <> 'budget_exhausted'
             OR enrichment_next_retry_at IS NULL OR enrichment_next_retry_at<=?)
-          AND (SELECT COUNT(*) FROM enrichment_provider_attempts
-            WHERE created_at>=? AND created_at<?) < ?
+          AND COALESCE((SELECT total FROM enrichment_provider_daily_usage
+            WHERE day=?),0) < ?
           AND (SELECT COUNT(*) FROM enrichment_provider_attempts a
             WHERE a.link_id=links.id AND a.created_at>=? AND a.created_at<?) < ?
           AND (
@@ -1046,7 +1054,7 @@ async function claimEnrichmentJobById(
     )
       .bind(guarded ? 0 : 1, guarded ? 0 : 1, guarded ? null : "legacy_unknown",
         leaseToken, leaseUntil, nowIso, id, nowIso,
-        budgetStart, budgetEnd, PROVIDER_ATTEMPT_LIMITS.daily_total,
+        budgetStart.slice(0, 10), PROVIDER_ATTEMPT_LIMITS.daily_total,
         budgetStart, budgetEnd, PROVIDER_ATTEMPT_LIMITS.daily_item, nowIso)
       .first<EnrichmentJobRow>()
   );
@@ -1294,8 +1302,10 @@ async function failEnrichmentJob(
         SET enrichment_status = ?,
             manual_priority = CASE WHEN ? = 'exhausted' THEN 0 ELSE manual_priority END,
             enrichment_next_retry_at = ?,
-            enrichment_lease_token = NULL,
-            enrichment_lease_until = NULL,
+            enrichment_lease_token = CASE WHEN enrichment_paid_uncertain=1
+              THEN enrichment_lease_token ELSE NULL END,
+            enrichment_lease_until = CASE WHEN enrichment_paid_uncertain=1
+              THEN enrichment_lease_until ELSE NULL END,
             enrichment_error = ?,
             enrichment_updated_at = ?
         WHERE id = ? AND enrichment_status = 'processing' AND enrichment_lease_token = ?

@@ -140,7 +140,7 @@ export async function publishPolicy(request: Request, db: D1Database): Promise<R
 function routeTemplate(path: string): string {
   if (path === "/api/links" || path === "/api/enrichment/jobs" || path === "/health") return path;
   if (path === "/api/enrichment/provider-attempts") return path;
-  if (["reserve", "settle", "authorize-fallback", "summary"].some((action) =>
+  if (["reserve", "settle", "authorize-fallback", "summary", "reconcile"].some((action) =>
     path === `/api/enrichment/provider-attempts/${action}`)) return path;
   if (/^\/api\/links\/\d+$/.test(path)) return "/api/links/:id";
   if (/^\/api\/links\/\d+\/curation$/.test(path)) return "/api/links/:id/curation";

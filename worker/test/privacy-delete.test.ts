@@ -146,11 +146,14 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("enrichment_provider_attempts",{operation_key:"a".repeat(64),link_id:id,
     lease_hash:"b".repeat(64),content_revision:1,stage:"fetch",variant:"fetch_thread",
     attempt_number:1,request_hash:"c".repeat(64),reservation_hash:"d".repeat(64),model:"fixture",created_at:"t"});
+  await insert("enrichment_provider_reconciliations",{operation_key:"a".repeat(64),link_id:id,
+    verdict:"confirmed_not_billed",actor:"fixture",evidence_kind:"provider_support",
+    evidence_ref:"case-12345",request_hash:"e".repeat(64),created_at:"t"});
   await insert("budget_ledger",{scope:"batch",operation_key:"global-budget",created_at:"t"});
   await insert("rerank_cache",{cache_key:"private-rank",owner_token:"owner",status:"pending",request_json:"private query",scope_hash:"scope",spec_hash:"spec",model:"model",items:"[]",created_at:1,expires_at:2});
   await insert("rerank_cache_links",{cache_key:"private-rank",link_id:id});
   await insert("entity_cache",{cache_key:"private-entity",link_id:id,evidence_snapshot_id:snapshotID,content_revision:1,content_hash:"hash",source_links:"[]",owner_token:"owner",status:"completed",request_json:"private entity material",candidates:"[]",spec_hash:"spec",answers:"{}",created_at:1,expires_at:Date.now()+86400000});
-  const tables=["entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links"];
+  const tables=["entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links"];
   const schema=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_*'").all<{name:string}>();
   const linked:string[]=[];
   for(const {name} of schema.results) {
@@ -166,6 +169,8 @@ it("atomically deletes populated private tables, references, budgets and cached 
   const generation=await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value");
   expect((await request(`links/${id}`,"DELETE")).status).toBe(204);
   for(const table of tables) expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first("n"),table).toBe(0);
+  expect(await env.DB.prepare("SELECT total FROM enrichment_provider_daily_usage WHERE day='t'")
+    .first<number>("total")).toBe(1);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_decision_runs").first("n")).toBe(0);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_run_reuse_sources").first("n")).toBe(0);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM budget_ledger WHERE link_id IS NULL").first("n")).toBe(1);

@@ -2,7 +2,8 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it } from "vitest";
 import worker from "../src/index";
 
-const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
+const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal",
+  CAIRN_OPERATOR_TOKEN: "operator" });
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 
 function call(path: string, body?: unknown, token = "internal", method = "POST") {
@@ -35,6 +36,9 @@ function first(job: Awaited<ReturnType<typeof fixture>>) {
 const settle = (operation_key: string, http_status = 200) => ({ operation_key, http_status,
   response_id: "resp_test", input_tokens: 100, output_tokens: 20, total_tokens: 120,
   x_search_calls: 1, cost_usd_ticks: 1234 });
+const reconcile = (operation_key: string) => ({ operation_key, verdict: "confirmed_not_billed",
+  actor: "ops@example.org", evidence_kind: "provider_support",
+  evidence_ref: "case-20260929-123" });
 
 it("grants one durable permit, rejects replay and binds to the current lease and content", async () => {
   const job = await fixture();
@@ -97,6 +101,81 @@ it("keeps a lost provider result charged across lease expiry and deletes private
     .bind(job.id).first<{n:number}>())?.n).toBe(0);
 });
 
+it("requires separate operator proof and an expired matching lease before releasing an unknown attempt", async () => {
+  const job = await fixture();
+  const body = first(job);
+  const path = "enrichment/provider-attempts/reconcile";
+  expect((await call("enrichment/provider-attempts/reserve", body)).status).toBe(200);
+  expect((await call(path, reconcile(body.operation_key), "internal")).status).toBe(401);
+  expect((await call(path, reconcile(body.operation_key), "app")).status).toBe(401);
+  expect((await call(path, reconcile(body.operation_key), "operator")).status).toBe(409);
+  expect((await call(path, { ...reconcile(body.operation_key), evidence_ref: "no" }, "operator")).status).toBe(400);
+  expect((await call(`enrichment/jobs/${job.id}/fail`, {
+    lease_token: job.lease_token, error: "provider_result_unknown"
+  })).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT enrichment_status,enrichment_lease_token,
+    enrichment_paid_uncertain FROM links WHERE id=?`).bind(job.id).first())
+    .toMatchObject({ enrichment_status: "failed", enrichment_lease_token: job.lease_token,
+      enrichment_paid_uncertain: 1 });
+  expect((await call(path, reconcile(body.operation_key), "operator")).status).toBe(409);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind("2000-01-01T00:00:00.000Z", job.id).run();
+  expect(await (await call(path, reconcile(body.operation_key), "operator")).json())
+    .toEqual({ reconciled: true, status: "pending" });
+  expect(await env.DB.prepare(`SELECT enrichment_status,enrichment_paid_uncertain,enrichment_attempts,
+    enrichment_lease_token FROM links WHERE id=?`).bind(job.id).first())
+    .toMatchObject({ enrichment_status: "pending", enrichment_paid_uncertain: 0,
+      enrichment_attempts: 0, enrichment_lease_token: null });
+  expect(await (await call(path, reconcile(body.operation_key), "operator")).json())
+    .toEqual({ reconciled: true, status: "pending" });
+  expect((await call(path, { ...reconcile(body.operation_key), evidence_ref: "case-20260929-456" }, "operator")).status).toBe(409);
+  expect((await call("enrichment/provider-attempts/settle", settle(body.operation_key))).status).toBe(409);
+  const rows = await call("enrichment/provider-attempts?state=confirmed_not_billed", undefined, "internal", "GET");
+  expect(await rows.json()).toMatchObject({ items: [{ operation_key: body.operation_key,
+    state: "confirmed_not_billed", reconciled_by: "ops@example.org" }] });
+  const summary = await call("enrichment/provider-attempts/summary", undefined, "internal", "GET");
+  expect(await summary.json()).toMatchObject({ unknown: { count: 0 }, budget: { used: { total: 1 } } });
+  const claimed = await call("enrichment/jobs/claim", {});
+  expect(claimed.status).toBe(200);
+  const next = await claimed.json() as { lease_token: string };
+  expect(next.lease_token).not.toBe(job.lease_token);
+  expect((await call("enrichment/provider-attempts/reserve", body)).status).toBe(200);
+  expect(await (await call("enrichment/provider-attempts/reserve", body)).json())
+    .toEqual({ granted: false, reason: "already_reserved" });
+});
+
+it("cannot reconcile a settled response or a changed content version", async () => {
+  const job = await fixture();
+  const body = first(job);
+  expect((await call("enrichment/provider-attempts/reserve", body)).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=?,content_revision=content_revision+1 WHERE id=?")
+    .bind("2000-01-01T00:00:00.000Z", job.id).run();
+  expect((await call("enrichment/provider-attempts/reconcile", reconcile(body.operation_key), "operator")).status).toBe(409);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_reconciliations")
+    .first<{n:number}>())?.n).toBe(0);
+  await env.DB.prepare("UPDATE links SET content_revision=? WHERE id=?").bind(job.content_revision, job.id).run();
+  expect((await call("enrichment/provider-attempts/settle", settle(body.operation_key))).status).toBe(200);
+  expect((await call("enrichment/provider-attempts/reconcile", reconcile(body.operation_key), "operator")).status).toBe(409);
+});
+
+it("rolls back the operator audit if releasing the blocked link fails", async () => {
+  const job = await fixture();
+  const body = first(job);
+  expect((await call("enrichment/provider-attempts/reserve", body)).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind("2000-01-01T00:00:00.000Z", job.id).run();
+  await env.DB.prepare(`CREATE TRIGGER block_reconciliation BEFORE UPDATE ON links
+    WHEN OLD.id=${job.id} AND OLD.enrichment_paid_uncertain=1 AND NEW.enrichment_status='pending'
+    BEGIN SELECT RAISE(ABORT,'injected reconciliation failure'); END`).run();
+  await expect(call("enrichment/provider-attempts/reconcile", reconcile(body.operation_key), "operator"))
+    .rejects.toThrow();
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_reconciliations")
+    .first<{n:number}>())?.n).toBe(0);
+  expect(await env.DB.prepare("SELECT enrichment_paid_uncertain,enrichment_status FROM links WHERE id=?")
+    .bind(job.id).first()).toMatchObject({ enrichment_paid_uncertain: 1,
+    enrichment_status: "processing" });
+});
+
 it("budgets startup canaries independently even across unique operations", async () => {
   const path = "enrichment/provider-attempts/reserve";
   for (let n = 0; n < 4; n++) {
@@ -109,6 +188,10 @@ it("budgets startup canaries independently even across unique operations", async
   const rejected = await call(path, excess);
   expect(rejected.status).toBe(429);
   expect(await rejected.json()).toEqual({ error: "budget_exhausted" });
+  await env.DB.prepare("DELETE FROM enrichment_provider_attempts WHERE stage='canary'").run();
+  expect((await call(path, excess)).status).toBe(429);
+  const summary = await call("enrichment/provider-attempts/summary", undefined, "internal", "GET");
+  expect(await summary.json()).toMatchObject({ budget: { used: { canary: 4, total: 4 } } });
 });
 
 it("defers a budget-denied stage without charging a job attempt or losing its priority", async () => {
@@ -130,6 +213,9 @@ it("defers a budget-denied stage without charging a job attempt or losing its pr
     .toMatchObject({ enrichment_status: "pending", enrichment_attempts: 0, enrichment_paid_uncertain: 0 });
   expect((await call("enrichment/jobs/claim", {})).status).toBe(204);
   await env.DB.prepare("DELETE FROM enrichment_provider_attempts WHERE link_id IS NULL").run();
+  // Advance the fixture's daily aggregate window without altering production
+  // code; deleting private attempt rows alone must never refund quota.
+  await env.DB.prepare("DELETE FROM enrichment_provider_daily_usage").run();
   await env.DB.prepare("UPDATE links SET enrichment_next_retry_at='2000-01-01T00:00:00.000Z' WHERE id=?")
     .bind(job.id).run();
   const resumed = await call("enrichment/jobs/claim", {});

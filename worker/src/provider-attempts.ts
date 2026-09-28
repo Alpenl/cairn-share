@@ -80,18 +80,19 @@ async function reserve(request: Request, env: Env): Promise<Response> {
   const now = new Date();
   const nowISO = now.toISOString();
   const start = nowISO.slice(0, 10) + "T00:00:00.000Z";
+  const day = start.slice(0, 10);
   const end = new Date(Date.parse(start) + 86400000).toISOString();
   let result: D1Result;
   if (value.stage === "canary") {
     result = await env.DB.prepare(`INSERT INTO enrichment_provider_attempts
       (operation_key,stage,variant,attempt_number,request_hash,reservation_hash,model,created_at)
       SELECT ?,'canary','canary',1,?,?,?,?
-      WHERE (SELECT COUNT(*) FROM enrichment_provider_attempts WHERE created_at>=? AND created_at<?) < ?
-        AND (SELECT COUNT(*) FROM enrichment_provider_attempts WHERE stage='canary' AND created_at>=? AND created_at<?) < ?
+      WHERE COALESCE((SELECT total FROM enrichment_provider_daily_usage WHERE day=?),0) < ?
+        AND COALESCE((SELECT canary FROM enrichment_provider_daily_usage WHERE day=?),0) < ?
       ON CONFLICT(operation_key) DO NOTHING`)
       .bind(value.operation_key, value.request_hash, payloadHash, value.model, nowISO,
-        start, end, PROVIDER_ATTEMPT_LIMITS.daily_total,
-        start, end, PROVIDER_ATTEMPT_LIMITS.daily_canary).run();
+        day, PROVIDER_ATTEMPT_LIMITS.daily_total,
+        day, PROVIDER_ATTEMPT_LIMITS.daily_canary).run();
   } else {
     const leaseHash = await digest(value.lease_token!);
     const deadline = new Date(now.getTime() + value.min_remaining_ms!).toISOString();
@@ -103,7 +104,7 @@ async function reserve(request: Request, env: Env): Promise<Response> {
         AND l.enrichment_status='processing' AND l.enrichment_lease_token=?
         AND l.enrichment_lease_until>=?
         AND l.enrichment_paid_stage=?
-        AND (SELECT COUNT(*) FROM enrichment_provider_attempts WHERE created_at>=? AND created_at<?) < ?
+        AND COALESCE((SELECT total FROM enrichment_provider_daily_usage WHERE day=?),0) < ?
         AND (SELECT COUNT(*) FROM enrichment_provider_attempts WHERE link_id=l.id AND created_at>=? AND created_at<?) < ?
         AND ((?=1 AND l.enrichment_paid_uncertain=0
           AND NOT EXISTS (SELECT 1 FROM enrichment_provider_attempts a
@@ -119,7 +120,7 @@ async function reserve(request: Request, env: Env): Promise<Response> {
       .bind(value.operation_key, leaseHash, value.stage, value.variant, value.attempt_number,
         value.request_hash, payloadHash, value.model, nowISO,
         value.link_id, value.content_revision, value.lease_token, deadline, value.stage,
-        start, end, PROVIDER_ATTEMPT_LIMITS.daily_total,
+        day, PROVIDER_ATTEMPT_LIMITS.daily_total,
         start, end, PROVIDER_ATTEMPT_LIMITS.daily_item,
         value.attempt_number, leaseHash, value.stage,
         value.attempt_number, leaseHash, leaseHash).run();
@@ -131,13 +132,13 @@ async function reserve(request: Request, env: Env): Promise<Response> {
   if (raced) return raced.reservation_hash === payloadHash
     ? json({ granted: false, reason: "already_reserved" }) : fail("operation_conflict", 409);
   const counts = await env.DB.prepare(`SELECT
-    (SELECT COUNT(*) FROM enrichment_provider_attempts WHERE created_at>=? AND created_at<?) AS total,
-    (SELECT COUNT(*) FROM enrichment_provider_attempts WHERE stage='canary' AND created_at>=? AND created_at<?) AS canary,
+    (SELECT total FROM enrichment_provider_daily_usage WHERE day=?) AS total,
+    (SELECT canary FROM enrichment_provider_daily_usage WHERE day=?) AS canary,
     (SELECT COUNT(*) FROM enrichment_provider_attempts WHERE link_id=? AND created_at>=? AND created_at<?) AS item`)
-    .bind(start, end, start, end, value.link_id ?? null, start, end)
+    .bind(day, day, value.link_id ?? null, start, end)
     .first<{ total: number; canary: number; item: number }>();
-  if (counts && (counts.total >= PROVIDER_ATTEMPT_LIMITS.daily_total ||
-      value.stage === "canary" && counts.canary >= PROVIDER_ATTEMPT_LIMITS.daily_canary ||
+  if (counts && ((counts.total ?? 0) >= PROVIDER_ATTEMPT_LIMITS.daily_total ||
+      value.stage === "canary" && (counts.canary ?? 0) >= PROVIDER_ATTEMPT_LIMITS.daily_canary ||
       value.stage !== "canary" && counts.item >= PROVIDER_ATTEMPT_LIMITS.daily_item)) {
     return fail("budget_exhausted", 429);
   }
@@ -165,7 +166,9 @@ async function settle(request: Request, env: Env): Promise<Response> {
   const result = await env.DB.prepare(`UPDATE enrichment_provider_attempts SET
     state='responded',http_status=?,response_id=?,input_tokens=?,output_tokens=?,
     total_tokens=?,x_search_calls=?,cost_usd_ticks=?,settlement_hash=?,settled_at=?
-    WHERE operation_key=? AND state='reserved'`)
+    WHERE operation_key=? AND state='reserved'
+      AND NOT EXISTS (SELECT 1 FROM enrichment_provider_reconciliations r
+        WHERE r.operation_key=enrichment_provider_attempts.operation_key)`)
     .bind(value.http_status, value.response_id, value.input_tokens, value.output_tokens,
       value.total_tokens, value.x_search_calls, value.cost_usd_ticks, settlementHash,
       new Date().toISOString(), value.operation_key).run();
@@ -187,36 +190,112 @@ async function authorizeFallback(request: Request, env: Env): Promise<Response> 
   return result.meta.changes === 1 ? json({ authorized: true }) : fail("attempt_not_eligible", 409);
 }
 
+// This is deliberately an operator-only decision, never a background retry.
+// A missing response, elapsed time or provider GET failure is not evidence of
+// non-billing. The audit row, queue transition and old permit remain durable.
+async function reconcile(request: Request, env: Env): Promise<Response> {
+  const value = await readBody(request);
+  if (value instanceof Response) return value;
+  const keys = ["operation_key", "verdict", "actor", "evidence_kind", "evidence_ref"];
+  if (Object.keys(value).length !== keys.length || Object.keys(value).some((key) => !keys.includes(key)) ||
+      !hex(value.operation_key) || value.verdict !== "confirmed_not_billed" ||
+      typeof value.actor !== "string" || !/^[A-Za-z0-9._@-]{3,80}$/.test(value.actor) ||
+      (value.evidence_kind !== "provider_invoice" && value.evidence_kind !== "provider_support") ||
+      typeof value.evidence_ref !== "string" || !/^[A-Za-z0-9._:/-]{8,120}$/.test(value.evidence_ref)) {
+    return fail("invalid_reconciliation");
+  }
+  const requestHash = await digest(canonicalJSON(value));
+  const prior = await env.DB.prepare(`SELECT request_hash FROM enrichment_provider_reconciliations
+    WHERE operation_key=?`).bind(value.operation_key).first<{ request_hash: string }>();
+  if (prior) return prior.request_hash === requestHash
+    ? json({ reconciled: true, status: "pending" }) : fail("operation_conflict", 409);
+
+  const attempt = await env.DB.prepare(`SELECT a.link_id,a.lease_hash,l.enrichment_lease_token
+    FROM enrichment_provider_attempts a JOIN links l ON l.id=a.link_id
+    WHERE a.operation_key=? AND a.state='reserved' AND a.link_id IS NOT NULL`)
+    .bind(value.operation_key).first<{ link_id: number; lease_hash: string;
+      enrichment_lease_token: string | null }>();
+  if (!attempt?.enrichment_lease_token ||
+      await digest(attempt.enrichment_lease_token) !== attempt.lease_hash) {
+    return fail("attempt_not_eligible", 409);
+  }
+  const now = new Date().toISOString();
+  try {
+    const results = await env.DB.batch([
+      env.DB.prepare(`INSERT INTO enrichment_provider_reconciliations
+        (operation_key,link_id,verdict,actor,evidence_kind,evidence_ref,request_hash,created_at)
+        SELECT a.operation_key,l.id,'confirmed_not_billed',?,?,?,?,?
+        FROM enrichment_provider_attempts a JOIN links l ON l.id=a.link_id
+        WHERE a.operation_key=? AND a.state='reserved'
+          AND a.content_revision=l.content_revision
+          AND a.lease_hash=? AND l.enrichment_lease_token=?
+          AND l.enrichment_status IN ('processing','failed','exhausted')
+          AND l.enrichment_paid_uncertain=1
+          AND l.enrichment_paid_stage=a.stage AND l.enrichment_lease_until<=?
+          AND NOT EXISTS (SELECT 1 FROM enrichment_provider_reconciliations r
+            WHERE r.operation_key=a.operation_key)
+        RETURNING operation_key`)
+        .bind(value.actor, value.evidence_kind, value.evidence_ref, requestHash, now,
+          value.operation_key, attempt.lease_hash, attempt.enrichment_lease_token, now),
+      env.DB.prepare(`UPDATE links SET enrichment_status='pending',enrichment_attempts=0,
+        enrichment_paid_stage_started=0,enrichment_paid_uncertain=0,enrichment_paid_stage=NULL,
+        enrichment_lease_token=NULL,enrichment_lease_until=NULL,enrichment_next_retry_at=NULL,
+        enrichment_error=NULL,enrichment_updated_at=?
+        WHERE id=? AND enrichment_lease_token=? AND enrichment_paid_uncertain=1
+          AND EXISTS (SELECT 1 FROM enrichment_provider_reconciliations
+            WHERE operation_key=? AND link_id=links.id)
+        RETURNING id`)
+        .bind(now, attempt.link_id, attempt.enrichment_lease_token, value.operation_key)
+    ]);
+    if (results[0].results.length === 1 && results[1].results.length === 1) {
+      return json({ reconciled: true, status: "pending" });
+    }
+    // The two guarded statements share one D1 transaction. A missing insert
+    // cannot authorize the UPDATE; a missing UPDATE must not create an audit.
+    if (results[0].results.length || results[1].results.length) throw Error("incomplete reconciliation");
+  } catch (cause) {
+    const raced = await env.DB.prepare(`SELECT request_hash FROM enrichment_provider_reconciliations
+      WHERE operation_key=?`).bind(value.operation_key).first<{ request_hash: string }>();
+    if (raced) return raced.request_hash === requestHash
+      ? json({ reconciled: true, status: "pending" }) : fail("operation_conflict", 409);
+    throw cause;
+  }
+  return fail("attempt_not_eligible", 409);
+}
+
 async function list(env: Env, url: URL): Promise<Response> {
   const state = url.searchParams.get("state") ?? "reserved";
   const limit = Number(url.searchParams.get("limit") ?? "50");
-  if (!(["reserved", "responded", "all"].includes(state)) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+  if (!(["reserved", "responded", "confirmed_not_billed", "all"].includes(state)) ||
+      !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
     return fail("invalid_query");
   }
-  const rows = await env.DB.prepare(`SELECT operation_key,link_id,content_revision,stage,variant,
-    attempt_number,model,state,http_status,response_id,input_tokens,output_tokens,total_tokens,
-    x_search_calls,cost_usd_ticks,created_at,settled_at
-    FROM enrichment_provider_attempts WHERE (?='all' OR state=?)
-    ORDER BY created_at DESC LIMIT ?`).bind(state, state, limit).all();
+  const rows = await env.DB.prepare(`SELECT a.operation_key,a.link_id,a.content_revision,a.stage,a.variant,
+    a.attempt_number,a.model,CASE WHEN r.operation_key IS NULL THEN a.state
+      ELSE 'confirmed_not_billed' END AS state,a.http_status,a.response_id,a.input_tokens,
+    a.output_tokens,a.total_tokens,a.x_search_calls,a.cost_usd_ticks,a.created_at,a.settled_at,
+    r.actor AS reconciled_by,r.evidence_kind,r.evidence_ref,r.created_at AS reconciled_at
+    FROM enrichment_provider_attempts a LEFT JOIN enrichment_provider_reconciliations r
+      ON r.operation_key=a.operation_key
+    WHERE (?='all' OR (?='confirmed_not_billed' AND r.operation_key IS NOT NULL)
+      OR (?=a.state AND r.operation_key IS NULL))
+    ORDER BY a.created_at DESC LIMIT ?`).bind(state, state, state, limit).all();
   return json({ items: rows.results });
 }
 
 async function summary(env: Env): Promise<Response> {
   const now = new Date();
   const start = now.toISOString().slice(0, 10) + "T00:00:00.000Z";
-  const end = new Date(Date.parse(start) + 86400000).toISOString();
   const [unknown, used] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(*) AS count,MIN(created_at) AS oldest_at
-      FROM enrichment_provider_attempts WHERE state='reserved'`)
+      FROM enrichment_provider_attempts a WHERE a.state='reserved'
+        AND NOT EXISTS (SELECT 1 FROM enrichment_provider_reconciliations r
+          WHERE r.operation_key=a.operation_key)`)
       .first<{ count: number; oldest_at: string | null }>(),
-    env.DB.prepare(`SELECT COUNT(*) AS total,
-      SUM(CASE WHEN stage='canary' THEN 1 ELSE 0 END) AS canary,
-      SUM(CASE WHEN stage='fetch' AND attempt_number=1 THEN 1 ELSE 0 END) AS fetch_first,
-      SUM(CASE WHEN stage='fetch' AND attempt_number=2 THEN 1 ELSE 0 END) AS fetch_fallback,
-      SUM(CASE WHEN stage='reading' THEN 1 ELSE 0 END) AS reading
-      FROM enrichment_provider_attempts WHERE created_at>=? AND created_at<?`)
-      .bind(start, end).first<{ total: number; canary: number | null; fetch_first: number | null;
-        fetch_fallback: number | null; reading: number | null }>()
+    env.DB.prepare(`SELECT total,canary,fetch_first,fetch_fallback,reading
+      FROM enrichment_provider_daily_usage WHERE day=?`)
+      .bind(start.slice(0, 10)).first<{ total: number; canary: number; fetch_first: number;
+        fetch_fallback: number; reading: number }>()
   ]);
   return json({ as_of: now.toISOString(), unknown: {
     count: unknown?.count ?? 0, oldest_at: unknown?.oldest_at ?? null,
@@ -229,7 +308,7 @@ async function summary(env: Env): Promise<Response> {
 
 export async function providerAttemptRoute(request: Request, env: Env, path: string): Promise<Response | null> {
   const root = "/api/enrichment/provider-attempts";
-  if (path !== root && !["reserve", "settle", "authorize-fallback", "summary"].some((part) => path === `${root}/${part}`)) {
+  if (path !== root && !["reserve", "settle", "authorize-fallback", "summary", "reconcile"].some((part) => path === `${root}/${part}`)) {
     return null;
   }
   if (path === root) return request.method === "GET" ? list(env, new URL(request.url)) : fail("method_not_allowed", 405);
@@ -237,5 +316,6 @@ export async function providerAttemptRoute(request: Request, env: Env, path: str
   if (request.method !== "POST") return fail("method_not_allowed", 405);
   if (path.endsWith("/reserve")) return reserve(request, env);
   if (path.endsWith("/settle")) return settle(request, env);
+  if (path.endsWith("/reconcile")) return reconcile(request, env);
   return authorizeFallback(request, env);
 }

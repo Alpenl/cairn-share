@@ -267,7 +267,7 @@ Cloudflare 配置位于 `worker/wrangler.jsonc`：
 - D1 binding：`DB`
 - D1 database id：`08f52f6c-4f94-4e51-bd1c-596fdeac295c`
 - Custom domain：`share.alpenl.com`
-- Worker secrets：`CAIRN_API_TOKEN`、`CAIRN_ENRICHER_TOKEN`
+- Worker secrets：`CAIRN_API_TOKEN`、`CAIRN_ENRICHER_TOKEN`；付费尝试人工核对另需独立的 `CAIRN_OPERATOR_TOKEN`
 
 发布包含 Worker 协议或 migration 的 Android 版本前，需要先手动运行 `deploy-worker.yml`；
 它会先测试，再迁移 D1 并部署。也可以在本地手动部署：
@@ -281,6 +281,7 @@ cd worker
 npm run migrate:remote
 npx wrangler secret put CAIRN_API_TOKEN
 npx wrangler secret put CAIRN_ENRICHER_TOKEN
+npx wrangler secret put CAIRN_OPERATOR_TOKEN
 npm run deploy
 ```
 
@@ -292,7 +293,7 @@ repository/environment secrets：
 
 Cloudflare API token 应使用最小权限，只授予部署该 Worker 和迁移该 D1 所需能力。
 `CAIRN_API_TOKEN` 是应用访问 API 用的 Bearer token；`CAIRN_ENRICHER_TOKEN` 只供
-伴随服务领取和提交增强任务。两者不得复用，均应通过 Wrangler secret 或 Cloudflare
+伴随服务领取和提交增强任务。`CAIRN_OPERATOR_TOKEN` 仅供人工核对未决付费尝试，不能配置给伴随服务。三者不得复用，均应通过 Wrangler secret 或 Cloudflare
 Dashboard 配置。不要提交 Wrangler OAuth 文件、Cloudflare token、`.dev.vars` 或
 GitHub secret 值。
 
