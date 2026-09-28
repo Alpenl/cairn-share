@@ -401,7 +401,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => json({ protocol: 1,
       lease_ms: ENRICHMENT_LEASE_MILLISECONDS, paid_stage_admission: true,
-      provider_result_guard: true }));
+      provider_result_guard: true, completion_replay: true }));
   }
 
   if (path === "/api/enrichment/jobs") {
@@ -1102,6 +1102,25 @@ async function completeEnrichmentJob(
     return error("invalid_enrichment");
   }
 
+  const digest = async (value: string): Promise<string> => {
+    const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+  const leaseHash = await digest(leaseToken);
+  const payloadHash = await digest(JSON.stringify({ originalText, aiTitle, originalLanguage,
+    translatedText, summary, model, relatedLinks, images, classification }));
+  const readReceipt = () => env.DB.prepare(`SELECT link_id,payload_hash,response
+    FROM enrichment_completion_receipts WHERE lease_hash=?`).bind(leaseHash)
+    .first<{ link_id: number; payload_hash: string; response: string }>();
+  const replay = async (): Promise<Response | null> => {
+    const receipt = await timing.measure("receipt", readReceipt);
+    if (!receipt) return null;
+    if (receipt.link_id !== id || receipt.payload_hash !== payloadHash) return error("operation_conflict", 409);
+    return json(JSON.parse(receipt.response));
+  };
+  const old = await replay();
+  if (old) return old;
+
   if (images.length > 0) {
     const storedImages = await timing.measure("r2-head", () =>
       Promise.all(images.map((image) => env.ENRICHMENT_IMAGES.head(image.key)))
@@ -1110,8 +1129,14 @@ async function completeEnrichmentJob(
   }
 
   const now = new Date().toISOString();
-  const row = await timing.measure("db", () =>
-    env.DB.prepare(
+  const receiptBody = { id, status: "completed", enriched_at: now };
+  try {
+    const results = await timing.measure("db", () => env.DB.batch([
+      env.DB.prepare(`INSERT INTO enrichment_completion_receipts(lease_hash,link_id,payload_hash,response,created_at)
+        SELECT ?,id,?,?,? FROM links WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+        RETURNING lease_hash`)
+        .bind(leaseHash, payloadHash, JSON.stringify(receiptBody), now, id, leaseToken),
+      env.DB.prepare(
       `UPDATE links
         SET enrichment_status = 'completed',
             manual_priority = 0,
@@ -1142,11 +1167,17 @@ async function completeEnrichmentJob(
         JSON.stringify(relatedLinks), JSON.stringify(images), classification ? JSON.stringify(classification) : null,
         model, now, now, id, leaseToken
       )
-      .first<{ id: number }>()
-  );
-
-  if (row === null) return error("lease_conflict", 409);
-  return json({ id: row.id, status: "completed", enriched_at: now });
+    ]));
+    if (!results[0].results.length || !results[1].results.length) return await replay() ?? error("lease_conflict", 409);
+    return json(receiptBody);
+  } catch (cause) {
+    // A concurrent identical completion may win the UNIQUE lease-hash race.
+    // D1 batch rolls back both writes on failure; a different failure remains
+    // visible to the caller after the exact receipt check.
+    const existing = await replay();
+    if (existing) return existing;
+    throw cause;
+  }
 }
 
 async function failEnrichmentJob(

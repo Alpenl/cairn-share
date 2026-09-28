@@ -33,7 +33,7 @@ it("requires the internal token for source lease capability negotiation", async 
     headers: { Authorization: "Bearer internal" } }), bindings());
   expect(valid.status).toBe(200);
   expect(await valid.json()).toEqual({ protocol: 1, lease_ms: 900_000,
-    paid_stage_admission: true, provider_result_guard: true });
+    paid_stage_admission: true, provider_result_guard: true, completion_replay: true });
 });
 
 it("holds a possibly paid call after a short lease instead of automatically paying twice", async () => {
