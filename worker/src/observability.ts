@@ -186,12 +186,16 @@ export type WorkerBusinessEvent =
       outcome: "accepted" | "replay" | "rejected" | "failed"; status: number }
   | { kind: "source_claim"; origin: "scheduled" | "by_id";
       outcome: "claimed"; status: 200 }
-  | { kind: "provider_attempt"; action: "reserve" | "settle";
+  | { kind: "enrichment_commit"; stage: "source" | "complete";
+      outcome: "stored" | "committed" | "replay" | "receipt_confirmed" | "rejected" | "failed";
+      status: number }
+  | { kind: "provider_attempt"; action: "reserve" | "settle" | "authorize_fallback" | "reconcile";
       stage: "fetch" | "reading" | "canary" | "unknown";
-      outcome: "reserved" | "already_reserved" | "responded" | "replay" | "rejected" | "failed";
+      outcome: "reserved" | "already_reserved" | "responded" | "authorized" |
+        "confirmed_not_billed" | "replay" | "rejected" | "failed";
       status: number; provider_status?: number; response_id_present?: boolean;
       reason?: "operation_conflict" | "budget_exhausted" | "lease_conflict" | "invalid_request" |
-        "not_found" | "unclassified" };
+        "not_found" | "attempt_not_eligible" | "unclassified" };
 
 function takeLogSlot(mode: Exclude<LogMode, "off">): boolean {
   const minute = Math.floor(Date.now() / 60_000);

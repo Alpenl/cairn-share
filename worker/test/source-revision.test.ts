@@ -1,9 +1,10 @@
 import {applyD1Migrations,env,reset} from "cloudflare:test";
-import {beforeEach,expect,it} from "vitest";
+import {beforeEach,expect,it,vi} from "vitest";
 import worker from "../src/index";
+import {resetObservabilityCacheForTest} from "../src/observability";
 import { settleFixtureAttempt } from "./provider-attempt-fixture";
 const bindings=()=>({...env,CAIRN_API_TOKEN:"app",CAIRN_ENRICHER_TOKEN:"internal"});
-beforeEach(async()=>{await reset();await applyD1Migrations(env.DB,env.TEST_MIGRATIONS);});
+beforeEach(async()=>{await reset();await applyD1Migrations(env.DB,env.TEST_MIGRATIONS);resetObservabilityCacheForTest();});
 async function call(path:string,body?:unknown,token="internal"){
  return worker.fetch(new Request("https://test/api/"+path,{method:body===undefined?"GET":"POST",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json","X-Cairn-Provider-Attempt-Ledger":"1",...(path.endsWith("/claim")?{"X-Cairn-Source-Lease-Admission":"1"}:{})},body:body===undefined?undefined:JSON.stringify(body)}),bindings());
 }
@@ -22,6 +23,23 @@ it("one actual source save changing context and links increments content revisio
  const source={...f.source,context_text:"second context",related_links:["https://example.com/second"]};
  expect((await f.save(source)).status).toBe(200);expect(await f.revision()).toBe(Number(before)+1);
  expect((await f.save(source)).status).toBe(200);expect(await f.revision()).toBe(Number(before)+1);
+});
+it("reports source checkpoints only after a successful write",async()=>{
+ const f=await setup();
+ expect((await call("internal/observability",{version:1,logs:"basic"})).status).toBe(200);
+ const log=vi.spyOn(console,"log").mockImplementation(()=>{});
+ try{
+  const changed={...f.source,context_text:"private changed context"};
+  expect((await f.save(changed)).status).toBe(200);
+  expect((await call(`enrichment/jobs/${f.id}/source`,{lease_token:"wrong",source:changed})).status).toBe(409);
+  const entries=log.mock.calls.map(([entry])=>JSON.parse(String(entry)) as Record<string,unknown>);
+  expect(entries.filter((entry)=>entry.kind==="enrichment_commit")).toEqual([
+   {schema:1,config_version:1,kind:"enrichment_commit",stage:"source",outcome:"stored",status:200},
+   {schema:1,config_version:1,kind:"enrichment_commit",stage:"source",outcome:"rejected",status:409}
+  ]);
+  expect(JSON.stringify(entries)).not.toContain(changed.context_text);
+  expect(JSON.stringify(entries)).not.toContain(f.lease);
+ }finally{log.mockRestore();}
 });
 
 it.each([1,2,3,4,5,6,7])("coalesces source field combination %i and keeps replay stable",async(mask)=>{

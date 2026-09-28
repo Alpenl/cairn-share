@@ -1,9 +1,14 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { resetObservabilityCacheForTest } from "../src/observability";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
-beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
+beforeEach(async () => {
+  await reset();
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+  resetObservabilityCacheForTest();
+});
 
 function call(path: string, body: unknown, token = "internal", method = "POST") {
   return worker.fetch(new Request(`https://test/api/${path}`, {
@@ -64,11 +69,51 @@ it("replays a lost completion response without rewriting the bookmark", async ()
   expect(await changed.json()).toEqual({ error: "operation_conflict" });
 });
 
+it("reports completed, replayed and rejected commits without exposing result text", async () => {
+  const { id, lease_token, completion } = await fixture();
+  expect((await call("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const path = `enrichment/jobs/${id}/complete`;
+    expect((await call(path, completion)).status).toBe(200);
+    expect((await call(path, completion)).status).toBe(200);
+    expect((await call(path, { ...completion, summary: "private changed summary" })).status).toBe(409);
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(entries.filter((entry) => entry.kind === "enrichment_commit")).toEqual([
+      { schema: 1, config_version: 1, kind: "enrichment_commit", stage: "complete",
+        outcome: "committed", status: 200 },
+      { schema: 1, config_version: 1, kind: "enrichment_commit", stage: "complete",
+        outcome: "replay", status: 200 },
+      { schema: 1, config_version: 1, kind: "enrichment_commit", stage: "complete",
+        outcome: "rejected", status: 409 }
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(lease_token);
+    expect(JSON.stringify(entries)).not.toContain("private changed summary");
+    expect((await call("internal/observability", { version: 2, logs: "off" })).status).toBe(200);
+    const count = log.mock.calls.length;
+    expect((await call(path, completion)).status).toBe(200);
+    expect(log.mock.calls.length).toBe(count);
+  } finally {
+    log.mockRestore();
+  }
+});
+
 it("rolls back both completion and receipt when the business update fails", async () => {
   const { id, completion } = await fixture();
+  expect((await call("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
   await env.DB.prepare(`CREATE TRIGGER reject_completion BEFORE UPDATE OF enrichment_status ON links
     WHEN NEW.enrichment_status='completed' BEGIN SELECT RAISE(ABORT,'injected_completion_failure'); END`).run();
-  await expect(call(`enrichment/jobs/${id}/complete`, completion)).rejects.toThrow("injected_completion_failure");
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    await expect(call(`enrichment/jobs/${id}/complete`, completion)).rejects.toThrow("injected_completion_failure");
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(entries.filter((entry) => entry.kind === "enrichment_commit")).toEqual([
+      { schema: 1, config_version: 1, kind: "enrichment_commit", stage: "complete",
+        outcome: "failed", status: 500 }
+    ]);
+  } finally {
+    log.mockRestore();
+  }
   expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_completion_receipts")
     .first<{ n: number }>())?.n).toBe(0);
   expect((await env.DB.prepare("SELECT enrichment_status,enrichment_paid_uncertain FROM links WHERE id=?")

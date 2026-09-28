@@ -895,7 +895,8 @@ export async function manualSourceRoute(request: Request, env: Env, id: number,
 
 // (the evidence read by snapshot id lives in domain-routes; see latestSnapshot)
 
-export async function sourceRoute(request: Request, env: Env, id: number): Promise<Response> {
+export async function sourceRoute(request: Request, env: Env, id: number,
+  onStored?: () => void): Promise<Response> {
   if (request.method === "GET") {
     const row = await env.DB.prepare(`SELECT s.payload FROM enrichment_sources s JOIN links l ON l.id=s.link_id
       WHERE l.id=? AND s.url=l.url AND s.original_text=l.original_text`).bind(id).first<{ payload: string }>();
@@ -933,7 +934,11 @@ export async function sourceRoute(request: Request, env: Env, id: number): Promi
       .bind(source.original_text, JSON.stringify(source), now, id, body.lease_token, now,
         source.original_text, source.context_text, JSON.stringify(source.related_links))
   ]);
-  return results[0].results.length ? reply({ id, status: "source_saved" }) : conflict();
+  if (results[0].results.length) {
+    onStored?.();
+    return reply({ id, status: "source_saved" });
+  }
+  return conflict();
 }
 
 

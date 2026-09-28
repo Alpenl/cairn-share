@@ -329,6 +329,20 @@ async function observeManualRoute(timing: TimingCollector, action: "source" | "p
   }
 }
 
+async function observeEnrichmentCommit(timing: TimingCollector, stage: "source" | "complete",
+  execute: (onResolved: (outcome: "stored" | "committed" | "replay" | "receipt_confirmed") => void) =>
+    Promise<Response>): Promise<Response> {
+  let outcome: "stored" | "committed" | "replay" | "receipt_confirmed" | "rejected" = "rejected";
+  try {
+    const response = await execute((resolved) => { outcome = resolved; });
+    timing.addBusinessEvent({ kind: "enrichment_commit", stage, outcome, status: response.status });
+    return response;
+  } catch (cause) {
+    timing.addBusinessEvent({ kind: "enrichment_commit", stage, outcome: "failed", status: 500 });
+    throw cause;
+  }
+}
+
 async function handleRequest(request: Request, env: Env, timing: TimingCollector): Promise<Response> {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -408,7 +422,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
       return observeManualRoute(timing, "process", (onResolved) =>
         manualEnqueueRoute(request, env, Number(manualEnqueueMatch[1]), onResolved));
     }
-    return sourceMatch ? sourceRoute(request, env, Number(sourceMatch[1])) : classificationRoute(request, env, path);
+    if (sourceMatch) {
+      if (request.method === "GET") return sourceRoute(request, env, Number(sourceMatch[1]));
+      return observeEnrichmentCommit(timing, "source", (onResolved) =>
+        sourceRoute(request, env, Number(sourceMatch[1]), () => onResolved("stored")));
+    }
+    return classificationRoute(request, env, path);
   }
 
   // App-facing curation is an exact allowlist, never an alias for arbitrary
@@ -529,7 +548,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
         return deferSourceBudget(request, env, id, timing);
       }
       return enrichmentJobMatch[2] === "complete"
-        ? completeEnrichmentJob(request, env, id, timing)
+        ? observeEnrichmentCommit(timing, "complete", (onResolved) =>
+          completeEnrichmentJob(request, env, id, timing, onResolved))
         : failEnrichmentJob(request, env, id, timing);
     });
   }
@@ -1376,7 +1396,8 @@ async function completeEnrichmentJob(
   request: Request,
   env: Env,
   id: number,
-  timing: TimingCollector
+  timing: TimingCollector,
+  onResolved: (outcome: "stored" | "committed" | "replay" | "receipt_confirmed") => void
 ): Promise<Response> {
   const body = await readEnrichmentBody(request);
   if (body instanceof Response) return body;
@@ -1415,7 +1436,10 @@ async function completeEnrichmentJob(
     return json(JSON.parse(receipt.response));
   };
   const old = await replay();
-  if (old) return old;
+  if (old) {
+    if (old.status === 200) onResolved("replay");
+    return old;
+  }
 
   if (images.length > 0) {
     const storedImages = await timing.measure("r2-head", () =>
@@ -1471,14 +1495,22 @@ async function completeEnrichmentJob(
         model, now, now, id, leaseToken, leaseHash
       )
     ]));
-    if (!results[0].results.length || !results[1].results.length) return await replay() ?? error("lease_conflict", 409);
+    if (!results[0].results.length || !results[1].results.length) {
+      const existing = await replay();
+      if (existing?.status === 200) onResolved("replay");
+      return existing ?? error("lease_conflict", 409);
+    }
+    onResolved("committed");
     return json(receiptBody);
   } catch (cause) {
     // A concurrent identical completion may win the UNIQUE lease-hash race.
     // D1 batch rolls back both writes on failure; a different failure remains
     // visible to the caller after the exact receipt check.
     const existing = await replay();
-    if (existing) return existing;
+    if (existing) {
+      if (existing.status === 200) onResolved("receipt_confirmed");
+      return existing;
+    }
     throw cause;
   }
 }

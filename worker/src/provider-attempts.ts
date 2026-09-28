@@ -12,6 +12,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
   status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
 });
 const fail = (code: string, status = 400) => json({ error: code }, status);
+type AttemptEvent = Extract<WorkerBusinessEvent, { kind: "provider_attempt" }>;
 
 async function readBody(request: Request, maxBytes = 4096): Promise<Record<string, unknown> | Response> {
   if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
@@ -71,7 +72,7 @@ function validReserve(value: Record<string, unknown>): value is Reserve {
 }
 
 async function reserve(request: Request, env: Env,
-  onResolved: (event: WorkerBusinessEvent) => void): Promise<Response> {
+  onResolved: (event: AttemptEvent) => void): Promise<Response> {
   const value = await readBody(request);
   if (value instanceof Response) return value;
   if (!validReserve(value)) return fail("invalid_reservation");
@@ -186,7 +187,7 @@ function validSettle(value: Record<string, unknown>): value is Settle {
     keys.slice(3).every((key) => value[key] === null || integer(value[key]));
 }
 async function settle(request: Request, env: Env,
-  onResolved: (event: WorkerBusinessEvent) => void): Promise<Response> {
+  onResolved: (event: AttemptEvent) => void): Promise<Response> {
   const value = await readBody(request);
   if (value instanceof Response) return value;
   if (!validSettle(value)) return fail("invalid_settlement");
@@ -223,21 +224,39 @@ async function settle(request: Request, env: Env,
   return fail("operation_conflict", 409);
 }
 
-async function authorizeFallback(request: Request, env: Env): Promise<Response> {
+async function authorizeFallback(request: Request, env: Env,
+  onResolved: (event: AttemptEvent) => void): Promise<Response> {
   const value = await readBody(request);
   if (value instanceof Response) return value;
   if (Object.keys(value).length !== 1 || !hex(value.operation_key)) return fail("invalid_operation");
   const result = await env.DB.prepare(`UPDATE enrichment_provider_attempts SET fallback_authorized=1
     WHERE operation_key=? AND stage='fetch' AND attempt_number=1
-      AND state='responded' AND http_status=200`)
+      AND state='responded' AND http_status=200 AND fallback_authorized=0
+    RETURNING stage`)
     .bind(value.operation_key).run();
-  return result.meta.changes === 1 ? json({ authorized: true }) : fail("attempt_not_eligible", 409);
+  if (result.results.length === 1) {
+    onResolved({ kind: "provider_attempt", action: "authorize_fallback", stage: "fetch",
+      outcome: "authorized", status: 200 });
+    return json({ authorized: true });
+  }
+  const old = await env.DB.prepare(`SELECT stage,attempt_number,state,http_status,fallback_authorized
+    FROM enrichment_provider_attempts WHERE operation_key=?`).bind(value.operation_key)
+    .first<{ stage: string; attempt_number: number; state: string;
+      http_status: number | null; fallback_authorized: number }>();
+  if (old?.stage === "fetch" && old.attempt_number === 1 && old.state === "responded" &&
+      old.http_status === 200 && old.fallback_authorized === 1) {
+    onResolved({ kind: "provider_attempt", action: "authorize_fallback", stage: "fetch",
+      outcome: "replay", status: 200 });
+    return json({ authorized: true });
+  }
+  return fail("attempt_not_eligible", 409);
 }
 
 // This is deliberately an operator-only decision, never a background retry.
 // A missing response, elapsed time or provider GET failure is not evidence of
 // non-billing. The audit row, queue transition and old permit remain durable.
-async function reconcile(request: Request, env: Env): Promise<Response> {
+async function reconcile(request: Request, env: Env,
+  onResolved: (event: AttemptEvent) => void): Promise<Response> {
   const value = await readBody(request);
   if (value instanceof Response) return value;
   const keys = ["operation_key", "verdict", "actor", "evidence_kind", "evidence_ref"];
@@ -249,16 +268,23 @@ async function reconcile(request: Request, env: Env): Promise<Response> {
     return fail("invalid_reconciliation");
   }
   const requestHash = await digest(canonicalJSON(value));
-  const prior = await env.DB.prepare(`SELECT request_hash FROM enrichment_provider_reconciliations
-    WHERE operation_key=?`).bind(value.operation_key).first<{ request_hash: string }>();
-  if (prior) return prior.request_hash === requestHash
-    ? json({ reconciled: true, status: "pending" }) : fail("operation_conflict", 409);
+  const readReceipt = () => env.DB.prepare(`SELECT r.request_hash,a.stage
+    FROM enrichment_provider_reconciliations r JOIN enrichment_provider_attempts a
+      ON a.operation_key=r.operation_key WHERE r.operation_key=?`).bind(value.operation_key)
+    .first<{ request_hash: string; stage: "fetch" | "reading" }>();
+  const prior = await readReceipt();
+  if (prior) {
+    if (prior.request_hash !== requestHash) return fail("operation_conflict", 409);
+    onResolved({ kind: "provider_attempt", action: "reconcile", stage: prior.stage,
+      outcome: "replay", status: 200 });
+    return json({ reconciled: true, status: "pending" });
+  }
 
-  const attempt = await env.DB.prepare(`SELECT a.link_id,a.lease_hash,l.enrichment_lease_token
+  const attempt = await env.DB.prepare(`SELECT a.link_id,a.lease_hash,a.stage,l.enrichment_lease_token
     FROM enrichment_provider_attempts a JOIN links l ON l.id=a.link_id
     WHERE a.operation_key=? AND a.state='reserved' AND a.link_id IS NOT NULL`)
     .bind(value.operation_key).first<{ link_id: number; lease_hash: string;
-      enrichment_lease_token: string | null }>();
+      stage: "fetch" | "reading"; enrichment_lease_token: string | null }>();
   if (!attempt?.enrichment_lease_token ||
       await digest(attempt.enrichment_lease_token) !== attempt.lease_hash) {
     return fail("attempt_not_eligible", 409);
@@ -292,16 +318,21 @@ async function reconcile(request: Request, env: Env): Promise<Response> {
         .bind(now, attempt.link_id, attempt.enrichment_lease_token, value.operation_key)
     ]);
     if (results[0].results.length === 1 && results[1].results.length === 1) {
+      onResolved({ kind: "provider_attempt", action: "reconcile", stage: attempt.stage,
+        outcome: "confirmed_not_billed", status: 200 });
       return json({ reconciled: true, status: "pending" });
     }
     // The two guarded statements share one D1 transaction. A missing insert
     // cannot authorize the UPDATE; a missing UPDATE must not create an audit.
     if (results[0].results.length || results[1].results.length) throw Error("incomplete reconciliation");
   } catch (cause) {
-    const raced = await env.DB.prepare(`SELECT request_hash FROM enrichment_provider_reconciliations
-      WHERE operation_key=?`).bind(value.operation_key).first<{ request_hash: string }>();
-    if (raced) return raced.request_hash === requestHash
-      ? json({ reconciled: true, status: "pending" }) : fail("operation_conflict", 409);
+    const raced = await readReceipt();
+    if (raced) {
+      if (raced.request_hash !== requestHash) return fail("operation_conflict", 409);
+      onResolved({ kind: "provider_attempt", action: "reconcile", stage: raced.stage,
+        outcome: "replay", status: 200 });
+      return json({ reconciled: true, status: "pending" });
+    }
     throw cause;
   }
   return fail("attempt_not_eligible", 409);
@@ -605,13 +636,17 @@ export async function providerAttemptRoute(request: Request, env: Env, path: str
   if (path === `${root}/summary`) return request.method === "GET" ? summary(env) : fail("method_not_allowed", 405);
   if (path === `${root}/inspect`) return request.method === "GET" ? inspect(env, new URL(request.url)) : fail("method_not_allowed", 405);
   if (request.method !== "POST") return fail("method_not_allowed", 405);
-  if (path.endsWith("/reserve") || path.endsWith("/settle")) {
-    const action = path.endsWith("/reserve") ? "reserve" : "settle";
-    let event: WorkerBusinessEvent | undefined;
+  if (["reserve", "settle", "authorize-fallback", "reconcile"].some((part) => path.endsWith(`/${part}`))) {
+    const action = path.endsWith("/reserve") ? "reserve" : path.endsWith("/settle") ? "settle" :
+      path.endsWith("/authorize-fallback") ? "authorize_fallback" : "reconcile";
+    let event: AttemptEvent | undefined;
     try {
       const response = action === "reserve"
         ? await reserve(request, env, (resolved) => { event = resolved; })
-        : await settle(request, env, (resolved) => { event = resolved; });
+        : action === "settle" ? await settle(request, env, (resolved) => { event = resolved; })
+          : action === "authorize_fallback"
+            ? await authorizeFallback(request, env, (resolved) => { event = resolved; })
+            : await reconcile(request, env, (resolved) => { event = resolved; });
       onBusiness?.(event ?? { kind: "provider_attempt", action, stage: "unknown",
         outcome: response.status >= 400 ? "rejected" : "failed", status: response.status,
         reason: response.status === 400 || response.status === 413 ? "invalid_request" :
@@ -622,7 +657,6 @@ export async function providerAttemptRoute(request: Request, env: Env, path: str
       throw cause;
     }
   }
-  if (path.endsWith("/reconcile")) return reconcile(request, env);
   if (path.endsWith("/recover-source") || path.endsWith("/recover-reading")) {
     const stage = path.endsWith("/recover-source") ? "source" : "reading";
     let outcome: ProviderRecoveryEvent["outcome"] = "rejected";
@@ -637,5 +671,5 @@ export async function providerAttemptRoute(request: Request, env: Env, path: str
       throw cause;
     }
   }
-  return authorizeFallback(request, env);
+  return fail("not_found", 404);
 }

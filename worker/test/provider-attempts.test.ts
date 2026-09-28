@@ -1,10 +1,15 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { resetObservabilityCacheForTest } from "../src/observability";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal",
   CAIRN_OPERATOR_TOKEN: "operator" });
-beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
+beforeEach(async () => {
+  await reset();
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+  resetObservabilityCacheForTest();
+});
 
 function call(path: string, body?: unknown, token = "internal", method = "POST") {
   return worker.fetch(new Request(`https://test/api/${path}`, {
@@ -148,6 +153,32 @@ it("requires a settled first response and explicit fallback authorization before
     .bind(job.id).first<{n:number}>())?.n).toBe(2);
 });
 
+it("records first fallback authorization and idempotent replay separately", async () => {
+  const job = await fixture();
+  const initial = first(job);
+  expect((await call("enrichment/provider-attempts/reserve", initial)).status).toBe(200);
+  expect((await call("enrichment/provider-attempts/settle", settle(initial.operation_key))).status).toBe(200);
+  expect((await call("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const path = "enrichment/provider-attempts/authorize-fallback";
+    const body = { operation_key: initial.operation_key };
+    expect((await call(path, body)).status).toBe(200);
+    expect((await call(path, body)).status).toBe(200);
+    expect((await call(path, { operation_key: "invalid" })).status).toBe(400);
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(entries.filter((entry) => entry.kind === "provider_attempt").map((entry) =>
+      [entry.action, entry.stage, entry.outcome, entry.status])).toEqual([
+      ["authorize_fallback", "fetch", "authorized", 200],
+      ["authorize_fallback", "fetch", "replay", 200],
+      ["authorize_fallback", "unknown", "rejected", 400]
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(initial.operation_key);
+  } finally {
+    log.mockRestore();
+  }
+});
+
 it("keeps a lost provider result charged across lease expiry and deletes private rows with the link", async () => {
   const job = await fixture();
   const body = first(job);
@@ -244,6 +275,39 @@ it("requires separate operator proof and an expired matching lease before releas
   expect((await call("enrichment/provider-attempts/reserve", body)).status).toBe(200);
   expect(await (await call("enrichment/provider-attempts/reserve", body)).json())
     .toEqual({ granted: false, reason: "already_reserved" });
+});
+
+it("reports operator-confirmed nonbilling only after its audit and queue transition commit", async () => {
+  const job = await fixture();
+  const permit = first(job);
+  expect((await call("enrichment/provider-attempts/reserve", permit)).status).toBe(200);
+  expect((await call(`enrichment/jobs/${job.id}/fail`, {
+    lease_token: job.lease_token, error: "provider_result_unknown"
+  })).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind("2000-01-01T00:00:00.000Z", job.id).run();
+  expect((await call("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const path = "enrichment/provider-attempts/reconcile";
+    const body = reconcile(permit.operation_key);
+    expect((await call(path, body, "operator")).status).toBe(200);
+    expect((await call(path, body, "operator")).status).toBe(200);
+    expect((await call(path, { ...body, evidence_ref: "case-20260929-other" }, "operator")).status).toBe(409);
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(entries.filter((entry) => entry.kind === "provider_attempt").map((entry) =>
+      [entry.action, entry.stage, entry.outcome, entry.status])).toEqual([
+      ["reconcile", "fetch", "confirmed_not_billed", 200],
+      ["reconcile", "fetch", "replay", 200],
+      ["reconcile", "unknown", "rejected", 409]
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(permit.operation_key);
+    expect(JSON.stringify(entries)).not.toContain(body.evidence_ref);
+    expect(await env.DB.prepare("SELECT enrichment_status,enrichment_paid_uncertain FROM links WHERE id=?")
+      .bind(job.id).first()).toMatchObject({ enrichment_status: "pending", enrichment_paid_uncertain: 0 });
+  } finally {
+    log.mockRestore();
+  }
 });
 
 it("recovers one settled source atomically after expiry without another paid permit", async () => {
