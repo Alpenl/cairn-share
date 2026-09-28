@@ -6,8 +6,8 @@ import { computeEffective, domainRoute, persistSelectionOverrides } from "./doma
 import { applyV1Write } from "./taxonomy-v2";
 import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
 import { readSelectionSnapshot } from "./selection-state";
-import { emitProviderRecovery, emitRequest, policyReadAvailable, publishPolicy, requestPolicy,
-  type ProviderRecoveryEvent, type RequestD1Stats } from "./observability";
+import { emitProviderRecovery, emitRequest, emitWorkerBusiness, policyReadAvailable, publishPolicy, requestPolicy,
+  type ProviderRecoveryEvent, type RequestD1Stats, type WorkerBusinessEvent } from "./observability";
 import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
 
 export interface Env {
@@ -234,6 +234,7 @@ class TimingCollector {
   private cacheState: CacheState | null = null;
   private d1Stats: RequestD1Stats | undefined;
   private recoveryEvent: ProviderRecoveryEvent | undefined;
+  private readonly businessEvents: WorkerBusinessEvent[] = [];
 
   async measure<T>(name: string, operation: () => Promise<T>): Promise<T> {
     const started = performance.now();
@@ -263,6 +264,14 @@ class TimingCollector {
 
   providerRecoveryEvent(): ProviderRecoveryEvent | undefined {
     return this.recoveryEvent;
+  }
+
+  addBusinessEvent(event: WorkerBusinessEvent): void {
+    this.businessEvents.push(event);
+  }
+
+  workerBusinessEvents(): readonly WorkerBusinessEvent[] {
+    return this.businessEvents;
   }
 
   headerValue(): string {
@@ -298,11 +307,27 @@ export default {
       else if (policy.version === -1) response.headers.set("X-Cairn-Observability-Status", "unconfigured");
       return response;
     } finally {
+      for (const event of timing.workerBusinessEvents()) {
+        try { emitWorkerBusiness(policy, event); } catch { /* optional logs never fail business */ }
+      }
       try { emitProviderRecovery(policy, timing.providerRecoveryEvent()); } catch { /* optional logs never fail business */ }
       try { emitRequest(policy, request, response, performance.now() - started, timing.requestD1Stats()); } catch { /* optional logs never fail business */ }
     }
   }
 };
+
+async function observeManualRoute(timing: TimingCollector, action: "source" | "process",
+  execute: (onResolved: (outcome: "accepted" | "replay") => void) => Promise<Response>): Promise<Response> {
+  let outcome: "accepted" | "replay" | "rejected" = "rejected";
+  try {
+    const response = await execute((resolved) => { outcome = resolved; });
+    timing.addBusinessEvent({ kind: "manual_request", action, outcome, status: response.status });
+    return response;
+  } catch (cause) {
+    timing.addBusinessEvent({ kind: "manual_request", action, outcome: "failed", status: 500 });
+    throw cause;
+  }
+}
 
 async function handleRequest(request: Request, env: Env, timing: TimingCollector): Promise<Response> {
   if (request.method === "OPTIONS") {
@@ -375,11 +400,13 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     }
     if (manualSourceMatch) {
       if (request.method !== "POST") return error("method_not_allowed", 405);
-      return manualSourceRoute(request, env, Number(manualSourceMatch[1]));
+      return observeManualRoute(timing, "source", (onResolved) =>
+        manualSourceRoute(request, env, Number(manualSourceMatch[1]), onResolved));
     }
     if (manualEnqueueMatch) {
       if (request.method !== "POST") return error("method_not_allowed", 405);
-      return manualEnqueueRoute(request, env, Number(manualEnqueueMatch[1]));
+      return observeManualRoute(timing, "process", (onResolved) =>
+        manualEnqueueRoute(request, env, Number(manualEnqueueMatch[1]), onResolved));
     }
     return sourceMatch ? sourceRoute(request, env, Number(sourceMatch[1])) : classificationRoute(request, env, path);
   }
@@ -1188,6 +1215,7 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
 
+  timing.addBusinessEvent({ kind: "source_claim", origin: "scheduled", outcome: "claimed", status: 200 });
   return json(mapEnrichmentJob(row));
 }
 
@@ -1244,7 +1272,10 @@ async function claimEnrichmentJobById(
         budgetStart, budgetEnd, PROVIDER_ATTEMPT_LIMITS.daily_item, nowIso)
       .first<EnrichmentJobRow>()
   );
-  if (row !== null) return json(mapEnrichmentJob(row));
+  if (row !== null) {
+    timing.addBusinessEvent({ kind: "source_claim", origin: "by_id", outcome: "claimed", status: 200 });
+    return json(mapEnrichmentJob(row));
+  }
 
   const existing = await timing.measure("db-check", () =>
     env.DB.prepare(`SELECT id FROM links WHERE id = ? AND ${X_LINK_SQL}`)

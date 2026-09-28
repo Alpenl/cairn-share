@@ -181,6 +181,12 @@ export type ProviderRecoveryEvent = {
   status: number;
 };
 
+export type WorkerBusinessEvent =
+  | { kind: "manual_request"; action: "source" | "process";
+      outcome: "accepted" | "replay" | "rejected" | "failed"; status: number }
+  | { kind: "source_claim"; origin: "scheduled" | "by_id";
+      outcome: "claimed"; status: 200 };
+
 function takeLogSlot(mode: Exclude<LogMode, "off">): boolean {
   const minute = Math.floor(Date.now() / 60_000);
   if (minute !== logWindow.minute) {
@@ -205,6 +211,14 @@ export function emitProviderRecovery(policy: Policy, event: ProviderRecoveryEven
   if (!event || mode === "off" || !takeLogSlot(mode)) return;
   console.log(JSON.stringify({ schema: 1, kind: "provider_recovery", config_version: policy.version,
     stage: event.stage, outcome: event.outcome, status: event.status }));
+}
+
+export function emitWorkerBusiness(policy: Policy, event: WorkerBusinessEvent): void {
+  const mode = effective(policy);
+  if (mode === "off" || !takeLogSlot(mode)) return;
+  // The lifecycle facts carry no private IDs. Durable operation receipts and
+  // leases remain the authoritative, deletable record for an individual link.
+  console.log(JSON.stringify({ schema: 1, config_version: policy.version, ...event }));
 }
 
 export function emitRequest(policy: Policy, request: Request, response: Response | null, durationMS: number,

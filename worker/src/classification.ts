@@ -719,7 +719,8 @@ const manualQueueFull = () => new Response(JSON.stringify({ error: "manual_queue
 
 // A manual rerun is durable queue state. Repeated requests for the same link
 // coalesce; the common scheduler takes capacity before it claims the lease.
-export async function manualEnqueueRoute(request: Request, env: Env, id: number): Promise<Response> {
+export async function manualEnqueueRoute(request: Request, env: Env, id: number,
+  onResolved?: (outcome: "accepted" | "replay") => void): Promise<Response> {
   const body = await bodyOf(request);
   if (!body || !text(body.operation_key, 200)) return fail("invalid_operation_key");
   const key = body.operation_key;
@@ -731,7 +732,10 @@ export async function manualEnqueueRoute(request: Request, env: Env, id: number)
       : fail("operation_conflict")
     : null;
   const prior = replay(await readReceipt());
-  if (prior) return prior;
+  if (prior) {
+    if (prior.status === 200) onResolved?.("replay");
+    return prior;
+  }
   const now = new Date().toISOString();
   let results: D1Result<Record<string, unknown>>[];
   try {
@@ -752,10 +756,14 @@ export async function manualEnqueueRoute(request: Request, env: Env, id: number)
     ]);
   } catch (error) {
     const raced = replay(await readReceipt());
-    if (raced) return raced;
+    if (raced) {
+      if (raced.status === 200) onResolved?.("replay");
+      return raced;
+    }
     throw error;
   }
   if (results[0].results.length && results[1].results.length) {
+    onResolved?.("accepted");
     return reply({ id, status: "pending", action: "manual_process" });
   }
   if (results[0].results.length || results[1].results.length) {
@@ -779,7 +787,8 @@ export async function manualEnqueueRoute(request: Request, env: Env, id: number)
 // active retrieval lease is left alone. An expired lease is fenced in the same
 // transaction; reading can claim the new source later, and classification can
 // start from the saved evidence without waiting for reading.
-export async function manualSourceRoute(request: Request, env: Env, id: number): Promise<Response> {
+export async function manualSourceRoute(request: Request, env: Env, id: number,
+  onResolved?: (outcome: "accepted" | "replay") => void): Promise<Response> {
   const body = await bodyOf(request);
   if (!body || !text(body.operation_key, 200) || !Number.isSafeInteger(body.expected_revision) ||
     Number(body.expected_revision) < 0 || !text(body.original_text, 100_000)) return fail("invalid_source");
@@ -800,7 +809,10 @@ export async function manualSourceRoute(request: Request, env: Env, id: number):
     return reply({ id, status: "source_saved", content_revision: row.result_revision });
   };
   const prior = replay(await existing());
-  if (prior) return prior;
+  if (prior) {
+    if (prior.status === 200) onResolved?.("replay");
+    return prior;
+  }
 
   const now = new Date().toISOString();
   const source = { original_text: sourceText, original_language: "", context_text: "",
@@ -869,10 +881,14 @@ export async function manualSourceRoute(request: Request, env: Env, id: number):
       throw Error("manual source transaction was incomplete");
     }
     const revision = (results[5].results[0] as { result_revision: number }).result_revision;
+    onResolved?.("accepted");
     return reply({ id, status: "source_saved", content_revision: revision });
   } catch (error) {
     const raced = replay(await existing());
-    if (raced) return raced;
+    if (raced) {
+      if (raced.status === 200) onResolved?.("replay");
+      return raced;
+    }
     throw error;
   }
 }

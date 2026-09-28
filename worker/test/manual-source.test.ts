@@ -1,5 +1,5 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { taxonomy } from "../src/curation";
 
@@ -75,6 +75,35 @@ it("commits manual source before accepting and replays the same operation withou
   const readingClaim = await call(`enrichment/jobs/${id}/claim`, {});
   expect(readingClaim.status).toBe(200);
   expect(await readingClaim.json()).toMatchObject({ id, refresh_epoch: 0 });
+});
+
+it("logs source acceptance only after durable evidence and distinguishes replay", async () => {
+  const id = await link("https://x.com/source/status/205");
+  const revision = (await state(id))!.content_revision;
+  expect((await call("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const body = { operation_key: "private-source-key", expected_revision: revision,
+      original_text: "手动提供的敏感原文" };
+    expect((await call(`enrichment/jobs/${id}/manual-source`, body)).status).toBe(200);
+    expect((await call(`enrichment/jobs/${id}/manual-source`, body)).status).toBe(200);
+    expect((await call(`enrichment/jobs/${id}/manual-source`, { ...body,
+      operation_key: "other", expected_revision: revision + 2 })).status).toBe(409);
+    expect((await call(`enrichment/jobs/${id}/claim`, {})).status).toBe(200);
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(entries.filter((entry) => entry.kind === "manual_request").map((entry) =>
+      [entry.action, entry.outcome, entry.status])).toEqual([
+      ["source", "accepted", 200], ["source", "replay", 200], ["source", "rejected", 409]
+    ]);
+    expect(entries.filter((entry) => entry.kind === "source_claim")).toEqual([
+      { schema: 1, config_version: 1, kind: "source_claim", origin: "by_id",
+        outcome: "claimed", status: 200 }
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(body.operation_key);
+    expect(JSON.stringify(entries)).not.toContain(body.original_text);
+  } finally {
+    log.mockRestore();
+  }
 });
 
 it("rejects an active lease, then fences an expired one without losing curation", async () => {
