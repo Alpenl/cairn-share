@@ -482,6 +482,14 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     );
   }
 
+  const enrichmentIdentityMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/cache-identity$/);
+  if (enrichmentIdentityMatch !== null) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () =>
+      getEnrichmentJobIdentity(env, Number(enrichmentIdentityMatch[1]), timing));
+  }
+
   const linkIdMatch = path.match(/^\/api\/links\/(\d+)$/);
   if (linkIdMatch !== null) {
     const authError = requireApiToken(request, env);
@@ -864,6 +872,23 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, w
   );
   if (row === null) return error("not_found", 404);
   return json(mapEnrichmentListItem(row, withIdentity));
+}
+
+async function getEnrichmentJobIdentity(env: Env, id: number, timing: TimingCollector): Promise<Response> {
+  const row = await timing.measure("db", () => env.DB.prepare(`SELECT id,enrichment_status,
+    enrichment_updated_at,enrichment_paid_uncertain${cacheIdentityColumns(true)}
+    FROM links WHERE id=?`).bind(id).first<{
+      id: number; enrichment_status: string; enrichment_updated_at: string | null;
+      enrichment_paid_uncertain: number; content_revision: number; app_body_revision: number;
+      personal_revision: number; cache_decision_id: number; cache_entity_revision: number;
+    }>());
+  if (!row) return error("not_found", 404);
+  return json({ id: row.id, status: row.enrichment_status,
+    updated_at: row.enrichment_updated_at, paid_call_unresolved: row.enrichment_paid_uncertain === 1,
+    cache_identity: { schema_version: 1, content_revision: row.content_revision,
+      body_revision: row.app_body_revision, personal_revision: row.personal_revision,
+      latest_decision_id: row.cache_decision_id,
+      latest_entity_revision: row.cache_entity_revision } });
 }
 
 async function updateCuration(request: Request, env: Env, id: number, timing: TimingCollector, app = false): Promise<Response> {
