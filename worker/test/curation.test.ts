@@ -161,6 +161,34 @@ describe("bookmark curation", () => {
     expect(job.status).toBe("pending");
   });
 
+  it("does not requeue v2 inference or clear curation for a note-only edit", async () => {
+    const id = await create();
+    expect((await complete(id)).status).toBe(200);
+    expect((await request(`/api/enrichment/jobs/${id}/curation`, "PATCH", {
+      why: "人工理由", classification: { topics: ["eng"], form: "method", use: "try" }
+    })).status).toBe(200);
+    await env.DB.prepare(`INSERT INTO classification_targets
+      (generation,spec_id,spec_hash,taxonomy_version,policy_version,requested_model,protocol,created_at)
+      VALUES (1,'v2-spec','hash','test-taxonomy','test-policy','test-model','v2','t')`).run();
+    await env.DB.prepare("UPDATE classification_target_state SET generation=1 WHERE id=1").run();
+    await env.DB.prepare("UPDATE classification_jobs SET status='completed',attempts=2 WHERE link_id=?")
+      .bind(id).run();
+    const before = await env.DB.prepare("SELECT revision,input_revision,status,attempts FROM classification_jobs WHERE link_id=?")
+      .bind(id).first();
+
+    expect((await request(`/api/links/${id}`, "PATCH", { note: "新的私人备注" }, appToken)).status).toBe(200);
+    expect(await env.DB.prepare("SELECT revision,input_revision,status,attempts FROM classification_jobs WHERE link_id=?")
+      .bind(id).first()).toEqual(before);
+    expect(await detail(id)).toMatchObject({ original_text: "KV cache original-only 100%_literal",
+      why: "人工理由", classification_reviewed: true,
+      classification: { topics: ["eng"], form: "method", use: "try" } });
+
+    // Source changes still invalidate the same v2 job.
+    expect((await request(`/api/links/${id}`, "PATCH", { url: "https://x.com/example/status/456" }, appToken)).status).toBe(200);
+    expect(await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?")
+      .bind(id).first()).toMatchObject({ status: "waiting_source" });
+  });
+
   it("leaves shelved bookmarks out of automatic model processing", async () => {
     const id = await create();
     await request(`/api/enrichment/jobs/${id}/curation`, "PATCH", { curation_status: "drop" });
