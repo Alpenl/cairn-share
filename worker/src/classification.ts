@@ -35,6 +35,7 @@ export type ClassificationErrorCode =
   | "invalid_operation_key"
   | "configuration_error"
   | "lease_conflict"
+  | "provider_result_unknown"
   | "not_found"
   | "method_not_allowed"
   | "invalid_json";
@@ -54,6 +55,7 @@ const ERROR_STATUS: Record<ClassificationErrorCode, number> = {
   invalid_operation_key: 400,
   configuration_error: 500,
   lease_conflict: 409,
+  provider_result_unknown: 409,
   not_found: 404,
   method_not_allowed: 405,
   invalid_json: 400
@@ -630,6 +632,7 @@ export async function refreshSource(request: Request, env: Env, id: number): Pro
   if (prior) return prior;
   const now = new Date().toISOString();
   const admission = `id=? AND ${X_LINK_SQL}
+    AND enrichment_paid_uncertain=0
     AND NOT (enrichment_status='processing' AND enrichment_lease_token IS NOT NULL
       AND enrichment_lease_until>?)
     AND (manual_priority=1 OR (${pendingManualCount})<?)`;
@@ -671,13 +674,15 @@ export async function refreshSource(request: Request, env: Env, id: number): Pro
   }
   if (!link) {
     const existing = await env.DB.prepare(`SELECT CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable,
-      enrichment_status,enrichment_lease_token,enrichment_lease_until FROM links WHERE id=?`)
+      enrichment_status,enrichment_lease_token,enrichment_lease_until,enrichment_paid_uncertain FROM links WHERE id=?`)
       .bind(id).first<{ processable: number; enrichment_status: string;
-        enrichment_lease_token: string | null; enrichment_lease_until: string | null }>();
+        enrichment_lease_token: string | null; enrichment_lease_until: string | null;
+        enrichment_paid_uncertain: number }>();
     if (!existing) return fail("not_found");
     if (!existing.processable) return fail("input_changed");
     if (existing.enrichment_status === "processing" && existing.enrichment_lease_token &&
       existing.enrichment_lease_until && existing.enrichment_lease_until > now) return fail("lease_conflict");
+    if (existing.enrichment_paid_uncertain === 1) return fail("provider_result_unknown");
     return manualQueueFull();
   }
   return response(link.content_revision);
@@ -731,6 +736,7 @@ export async function manualEnqueueRoute(request: Request, env: Env, id: number)
     results = await env.DB.batch([
       env.DB.prepare(`INSERT INTO manual_request_operations(operation_key,link_id,kind,created_at)
         SELECT ?,id,'process',? FROM links WHERE id=? AND ${X_LINK_SQL}
+          AND enrichment_paid_uncertain=0
           AND NOT (enrichment_status='processing' AND enrichment_lease_token IS NOT NULL
             AND enrichment_lease_until>?)
           AND (manual_priority=1 OR (${pendingManualCount})<?)
@@ -738,7 +744,7 @@ export async function manualEnqueueRoute(request: Request, env: Env, id: number)
       env.DB.prepare(`UPDATE links SET enrichment_status='pending',
         enrichment_attempts=0,enrichment_next_retry_at=NULL,enrichment_lease_token=NULL,
         enrichment_lease_until=NULL,enrichment_error=NULL,enrichment_updated_at=?,manual_priority=1
-        WHERE id=? AND EXISTS (SELECT 1 FROM manual_request_operations
+        WHERE id=? AND enrichment_paid_uncertain=0 AND EXISTS (SELECT 1 FROM manual_request_operations
           WHERE operation_key=? AND link_id=? AND kind='process')
         RETURNING id`).bind(now, id, key, id)
     ]);
@@ -754,13 +760,16 @@ export async function manualEnqueueRoute(request: Request, env: Env, id: number)
     throw Error("manual enqueue transaction was incomplete");
   }
   const link = await env.DB.prepare(`SELECT CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable,
-    enrichment_status, enrichment_lease_token, enrichment_lease_until FROM links WHERE id=?`)
+    enrichment_status, enrichment_lease_token, enrichment_lease_until,
+    enrichment_paid_uncertain FROM links WHERE id=?`)
     .bind(id).first<{ processable: number; enrichment_status: string;
-      enrichment_lease_token: string | null; enrichment_lease_until: string | null }>();
+      enrichment_lease_token: string | null; enrichment_lease_until: string | null;
+      enrichment_paid_uncertain: number }>();
   if (!link) return fail("not_found");
   if (!link.processable) return fail("input_changed");
   if (link.enrichment_status === "processing" && link.enrichment_lease_token &&
     link.enrichment_lease_until && link.enrichment_lease_until > now) return fail("lease_conflict");
+  if (link.enrichment_paid_uncertain === 1) return fail("provider_result_unknown");
   return manualQueueFull();
 }
 
@@ -811,6 +820,7 @@ export async function manualSourceRoute(request: Request, env: Env, id: number):
           ai_title=NULL,translated_text=NULL,summary=NULL,images='[]',enrichment_model=NULL,enriched_at=NULL,
           enrichment_status='pending',enrichment_attempts=0,enrichment_next_retry_at=NULL,
           enrichment_lease_token=NULL,enrichment_lease_until=NULL,enrichment_error=NULL,
+          enrichment_paid_uncertain=0,enrichment_paid_stage=NULL,
           enrichment_updated_at=?,refresh_epoch=refresh_epoch+1,refresh_requested_at=NULL,
           manual_priority=1
         WHERE id=? AND content_revision=? AND EXISTS
@@ -890,6 +900,7 @@ export async function sourceRoute(request: Request, env: Env, id: number): Promi
   const results = await env.DB.batch([
     env.DB.prepare(`UPDATE links SET original_text=?,original_language=?,source_context_text=?,related_links=?,
       ai_title=NULL,translated_text=NULL,summary=NULL,images=CASE WHEN original_text IS ? THEN images ELSE '[]' END,
+      enrichment_paid_uncertain=0,enrichment_paid_stage=NULL,
       enrichment_updated_at=? WHERE ${guard} RETURNING id`)
       .bind(source.original_text, source.original_language || null, source.context_text, JSON.stringify(source.related_links), source.original_text, now, id, body.lease_token, now),
     env.DB.prepare(`INSERT INTO enrichment_sources(link_id,url,original_text,payload,fetched_at)

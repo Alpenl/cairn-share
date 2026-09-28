@@ -29,7 +29,10 @@ function classification(extra: Partial<Classification> = {}): Classification {
 }
 
 async function complete(id: number, value: unknown = classification()): Promise<Response> {
-  const claim = await request(`/api/enrichment/jobs/${id}/claim`, "POST");
+  const claim = await worker.fetch(new Request(`https://test.example/api/enrichment/jobs/${id}/claim`, {
+    method: "POST", headers: { Authorization: `Bearer ${token}`, "X-Cairn-Source-Lease-Admission": "1" }
+  }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES,
+    CAIRN_API_TOKEN: appToken, CAIRN_ENRICHER_TOKEN: token });
   expect(claim.status).toBe(200);
   const job = await claim.json() as { lease_token: string };
   return request(`/api/enrichment/jobs/${id}/complete`, "POST", {

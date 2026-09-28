@@ -58,6 +58,8 @@ interface EnrichmentListRow {
   enrichment_status: EnrichmentStatus;
   enrichment_attempts: number;
   enrichment_next_retry_at: string | null;
+  enrichment_paid_uncertain: number;
+  enrichment_paid_stage: string | null;
   ai_title: string | null;
   original_language: string | null;
   original_text: string | null;
@@ -115,6 +117,7 @@ type ErrorCode =
   | "auth_not_configured"
   | "lease_conflict"
   | "lease_released"
+  | "provider_result_unknown"
   | "job_busy"
   | "not_found"
   | "method_not_allowed"
@@ -186,6 +189,7 @@ const X_LINK_SQL = `(
 
 const LINK_COLUMNS = "id, url, note, created_at, learned, learned_at";
 const ENRICHMENT_COLUMNS = `enrichment_status, enrichment_attempts, enrichment_next_retry_at,
+  enrichment_paid_uncertain, enrichment_paid_stage,
   ai_title, original_language, summary, images, enrichment_model, enrichment_error,
   enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
   CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable`;
@@ -374,7 +378,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => json({ protocol: 1,
-      lease_ms: ENRICHMENT_LEASE_MILLISECONDS, paid_stage_admission: true }));
+      lease_ms: ENRICHMENT_LEASE_MILLISECONDS, paid_stage_admission: true,
+      provider_result_guard: true }));
   }
 
   if (path === "/api/enrichment/jobs") {
@@ -622,6 +627,8 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
       "enrichment_next_retry_at = NULL",
       "enrichment_lease_token = NULL",
       "enrichment_lease_until = NULL",
+      "enrichment_paid_uncertain = 0",
+      "enrichment_paid_stage = NULL",
       "ai_title = NULL",
       "original_language = NULL",
       "original_text = NULL",
@@ -803,7 +810,8 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, w
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
-              enrichment_next_retry_at, ai_title, original_language, original_text,
+              enrichment_next_retry_at, enrichment_paid_uncertain, enrichment_paid_stage,
+              ai_title, original_language, original_text,
               translated_text, summary, related_links, images, enrichment_model,
               enrichment_error, enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
               CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable${cacheIdentityColumns(withIdentity)}
@@ -896,6 +904,8 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
             enrichment_attempts = enrichment_attempts + CASE
               WHEN enrichment_status='processing' AND enrichment_paid_stage_started=0 THEN 0 ELSE 1 END,
             enrichment_paid_stage_started = ?,
+            enrichment_paid_uncertain = ?,
+            enrichment_paid_stage = ?,
             enrichment_next_retry_at = NULL,
             enrichment_lease_token = ?,
             enrichment_lease_until = ?,
@@ -907,6 +917,7 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
           WHERE ${X_LINK_SQL}
             AND (curation_status <> 'drop' OR manual_priority = 1)
             AND enrichment_status IN ('pending', 'failed', 'processing')
+            AND enrichment_paid_uncertain=0
             AND (enrichment_attempts < ? OR
               (enrichment_status='processing' AND enrichment_paid_stage_started=0
                 AND enrichment_lease_until IS NOT NULL AND enrichment_lease_until <= ?))
@@ -928,7 +939,7 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
                   enrichment_lease_token, enrichment_lease_until,
                   CASE WHEN refresh_requested_at IS NOT NULL THEN refresh_epoch ELSE 0 END AS refresh_epoch`
     )
-      .bind(guarded ? 0 : 1, leaseToken, leaseUntil, nowIso,
+      .bind(guarded ? 0 : 1, guarded ? 0 : 1, guarded ? null : "legacy_unknown", leaseToken, leaseUntil, nowIso,
         MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso, nowIso)
       .first<EnrichmentJobRow>()
   );
@@ -957,6 +968,8 @@ async function claimEnrichmentJobById(
           SET enrichment_status = 'processing',
               enrichment_attempts = 1,
               enrichment_paid_stage_started = ?,
+              enrichment_paid_uncertain = ?,
+              enrichment_paid_stage = ?,
               enrichment_next_retry_at = NULL,
               enrichment_lease_token = ?,
               enrichment_lease_until = ?,
@@ -964,6 +977,7 @@ async function claimEnrichmentJobById(
               enrichment_updated_at = ?
         WHERE id = ?
           AND ${X_LINK_SQL}
+          AND enrichment_paid_uncertain=0
           AND (
             enrichment_status <> 'processing'
             OR enrichment_lease_until IS NULL
@@ -973,7 +987,8 @@ async function claimEnrichmentJobById(
                   enrichment_lease_token, enrichment_lease_until,
                   CASE WHEN refresh_requested_at IS NOT NULL THEN refresh_epoch ELSE 0 END AS refresh_epoch`
     )
-      .bind(guarded ? 0 : 1, leaseToken, leaseUntil, nowIso, id, nowIso)
+      .bind(guarded ? 0 : 1, guarded ? 0 : 1, guarded ? null : "legacy_unknown",
+        leaseToken, leaseUntil, nowIso, id, nowIso)
       .first<EnrichmentJobRow>()
   );
   if (row !== null) return json(mapEnrichmentJob(row));
@@ -997,26 +1012,28 @@ async function admitPaidSourceStage(
   if (body instanceof Response) return body;
   const token = readBoundedString(body.lease_token, 1, 100);
   const minRemaining = body.min_remaining_ms;
+  const stage = body.stage === undefined ? "legacy_unknown" : readBoundedString(body.stage, 1, 20);
   if (token === null || !Number.isSafeInteger(minRemaining) ||
-      Number(minRemaining) < 1 || Number(minRemaining) > ENRICHMENT_LEASE_MILLISECONDS) {
+      Number(minRemaining) < 1 || Number(minRemaining) > ENRICHMENT_LEASE_MILLISECONDS ||
+      (stage !== "fetch" && stage !== "reading" && stage !== "legacy_unknown")) {
     return error("invalid_enrichment");
   }
   const now = new Date();
   const deadline = new Date(now.getTime() + Number(minRemaining)).toISOString();
   const admitted = await timing.measure("db", () => env.DB.prepare(`UPDATE links
-    SET enrichment_paid_stage_started=1
+    SET enrichment_paid_stage_started=1,enrichment_paid_uncertain=1,enrichment_paid_stage=?
     WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
-      AND enrichment_lease_until>=?
-    RETURNING enrichment_lease_until`).bind(id, token, deadline)
+      AND enrichment_lease_until>=? AND enrichment_paid_uncertain=0
+    RETURNING enrichment_lease_until`).bind(stage, id, token, deadline)
     .first<{ enrichment_lease_until: string }>());
   if (admitted) {
     return json({ id, status: "admitted",
       remaining_ms: Math.max(0, Date.parse(admitted.enrichment_lease_until) - Date.now()) });
   }
   const current = await timing.measure("db-check", () => env.DB.prepare(`SELECT id,enrichment_status,
-    enrichment_lease_token,enrichment_lease_until FROM links WHERE id=?`).bind(id).first<{
+    enrichment_lease_token,enrichment_lease_until,enrichment_paid_uncertain FROM links WHERE id=?`).bind(id).first<{
     id: number; enrichment_status: string; enrichment_lease_token: string | null;
-    enrichment_lease_until: string | null;
+    enrichment_lease_until: string | null; enrichment_paid_uncertain: number;
   }>());
   if (!current) return error("not_found", 404);
   if (current.enrichment_status !== "processing" || current.enrichment_lease_token !== token ||
@@ -1032,7 +1049,9 @@ async function admitPaidSourceStage(
       AND enrichment_lease_until=? AND enrichment_lease_until<?
     RETURNING id`).bind(now.toISOString(), id, token, current.enrichment_lease_until, deadline)
     .first<{ id: number }>());
-  return released ? error("lease_released", 409) : error("lease_conflict", 409);
+  if (released) return error("lease_released", 409);
+  return current.enrichment_paid_uncertain === 1
+    ? error("provider_result_unknown", 409) : error("lease_conflict", 409);
 }
 
 async function completeEnrichmentJob(
@@ -1077,6 +1096,8 @@ async function completeEnrichmentJob(
             enrichment_next_retry_at = NULL,
             enrichment_lease_token = NULL,
             enrichment_lease_until = NULL,
+            enrichment_paid_uncertain = 0,
+            enrichment_paid_stage = NULL,
             ai_title = ?,
             original_language = ?,
             original_text = ?,
@@ -1797,6 +1818,8 @@ function mapEnrichmentListItem(row: EnrichmentListRow, withIdentity = false): Re
     images: parseStoredImages(row.images, row.id),
     model: row.enrichment_model,
     error: row.enrichment_error,
+    paid_call_unresolved: row.enrichment_paid_uncertain === 1,
+    paid_stage: row.enrichment_paid_stage,
     updated_at: row.enrichment_updated_at,
     enriched_at: row.enriched_at,
     ...(withIdentity ? {cache_identity: {

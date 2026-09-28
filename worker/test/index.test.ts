@@ -421,7 +421,8 @@ describe("cairn-share worker", () => {
       .run();
 
     const recovered = await json(await claimEnrichment());
-    expect(recovered).toMatchObject({ id: created.id, attempt: 2 });
+    // The expired claim never entered a paid stage, so reclaim reuses its attempt.
+    expect(recovered).toMatchObject({ id: created.id, attempt: 1 });
     expect(recovered.lease_token).not.toBe(firstJob.lease_token);
     await expectError(
       completeEnrichment(created.id, {
@@ -461,7 +462,7 @@ describe("cairn-share worker", () => {
     // reading aids, and must not trigger a refetch (B01-T07).
     expect(resetRow).toEqual({
       enrichment_status: "completed",
-      enrichment_attempts: 2,
+      enrichment_attempts: 1,
       original_text: "fresh text",
       summary: "fresh summary",
       enriched_at: expect.any(String)
@@ -909,11 +910,15 @@ async function patchRaw(id: number, body: string): Promise<Response> {
 }
 
 async function claimEnrichment(): Promise<Response> {
-  return dispatchEnrichment("/api/enrichment/jobs/claim", { method: "POST" });
+  return dispatchEnrichment("/api/enrichment/jobs/claim", {
+    method: "POST", headers: { "X-Cairn-Source-Lease-Admission": "1" }
+  });
 }
 
 async function claimEnrichmentByID(id: number): Promise<Response> {
-  return dispatchEnrichment(`/api/enrichment/jobs/${id}/claim`, { method: "POST" });
+  return dispatchEnrichment(`/api/enrichment/jobs/${id}/claim`, {
+    method: "POST", headers: { "X-Cairn-Source-Lease-Admission": "1" }
+  });
 }
 
 async function completeEnrichment(id: number, body: unknown): Promise<Response> {

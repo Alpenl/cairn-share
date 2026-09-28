@@ -12,7 +12,8 @@ async function call(path: string, body?: unknown, token = "internal", method?: s
   return worker.fetch(new Request(`https://test/api/${path}`, {
     method: method ?? (body === undefined ? "GET" : "POST"),
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json",
-      "X-Cairn-Classification-Budget": "1" },
+      "X-Cairn-Classification-Budget": "1",
+      ...(path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), bindings());
 }
@@ -89,9 +90,14 @@ it("rejects an active lease, then fences an expired one without losing curation"
   expect(await busy.json()).toMatchObject({ error: "lease_conflict" });
   expect(await state(id)).toEqual(before);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM manual_source_operations").first("n")).toBe(0);
+  expect((await call(`enrichment/jobs/${id}/lease-admit`, {
+    lease_token, stage: "fetch", min_remaining_ms: 210_000
+  })).status).toBe(200);
   await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
     .bind(new Date(Date.now() - 1000).toISOString(), id).run();
   expect((await call(`enrichment/jobs/${id}/manual-source`, body)).status).toBe(200);
+  expect(await env.DB.prepare("SELECT enrichment_paid_uncertain,enrichment_paid_stage FROM links WHERE id=?")
+    .bind(id).first()).toEqual({ enrichment_paid_uncertain: 0, enrichment_paid_stage: null });
   expect((await call(`enrichment/jobs/${id}/source`, { lease_token, source: {
     original_text: "stale text", original_language: "en", context_text: "", related_links: [], image_urls: [], model: "fixture"
   } })).status).toBe(409);
