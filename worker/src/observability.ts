@@ -5,6 +5,9 @@ interface Policy {
   logs: LogMode;
   fallback_logs: "off" | "basic" | null;
   diagnostic_until: number | null;
+  // A failed refresh can reuse the last confirmed policy while clearly
+  // reporting that this isolate cannot confirm the current desired version.
+  unavailable?: true;
 }
 
 const OFF: Policy = { version: -1, logs: "off", fallback_logs: null, diagnostic_until: null };
@@ -13,9 +16,10 @@ const FAILURE_RETRY_MS = 5_000;
 const MAX_BODY_BYTES = 1024;
 const CLOCK_SKEW_MS = 5 * 60_000;
 
-// An isolate reads once on first use. Expired reads share one promise and a
-// failed read is cached briefly as off, so a D1 outage cannot fan out reads.
+// An isolate reads once on first use. Expired reads share one promise; failures
+// retry soon while the last confirmed policy remains available to the runtime.
 let cache: { policy: Policy; until: number } | undefined;
+let lastConfirmed: Policy | undefined;
 let loading: Promise<Policy> | undefined;
 let generation = 0;
 let logWindow = { minute: -1, emitted: 0, dropped: 0 };
@@ -40,17 +44,25 @@ export async function requestPolicy(db: D1Database): Promise<Policy> {
   if (!loading) {
     const startedAtGeneration = generation;
     loading = load(db).then((policy) => {
-      if (generation === startedAtGeneration) cache = { policy, until: Date.now() + CACHE_MS };
+      if (generation === startedAtGeneration) {
+        lastConfirmed = policy;
+        cache = { policy, until: Date.now() + CACHE_MS };
+      }
       return cache?.policy ?? policy;
     }).catch(() => {
-      if (generation === startedAtGeneration) cache = { policy: OFF, until: Date.now() + FAILURE_RETRY_MS };
+      if (generation === startedAtGeneration) {
+        cache = { policy: lastConfirmed ? { ...lastConfirmed, unavailable: true } : OFF,
+          until: Date.now() + FAILURE_RETRY_MS };
+      }
       return cache?.policy ?? OFF;
     }).finally(() => { loading = undefined; });
   }
   return loading;
 }
 
-export function policyReadAvailable(policy: Policy): boolean { return policy !== OFF; }
+export function policyReadAvailable(policy: Policy): boolean {
+  return policy !== OFF && policy.unavailable !== true;
+}
 
 function validPolicy(value: Policy): boolean {
   if (!Number.isSafeInteger(value.version) || value.version < -1) return false;
@@ -121,6 +133,7 @@ export async function publishPolicy(request: Request, db: D1Database): Promise<R
       .run();
     if (result.meta.changes === 1) {
       generation++;
+      lastConfirmed = proposed;
       cache = { policy: proposed, until: Date.now() + CACHE_MS };
       return reply({ version: proposed.version, effective_logs: effective(proposed) }, 200);
     }
@@ -128,6 +141,7 @@ export async function publishPolicy(request: Request, db: D1Database): Promise<R
     if (current.version === proposed.version && current.logs === proposed.logs &&
       current.fallback_logs === proposed.fallback_logs && current.diagnostic_until === proposed.diagnostic_until) {
       generation++;
+      lastConfirmed = current;
       cache = { policy: current, until: Date.now() + CACHE_MS };
       return reply({ version: current.version, effective_logs: effective(current) }, 200);
     }
@@ -196,6 +210,7 @@ export function emitRequest(policy: Policy, request: Request, response: Response
 export function resetObservabilityCacheForTest(): void {
   generation++;
   cache = undefined;
+  lastConfirmed = undefined;
   loading = undefined;
   logWindow = { minute: -1, emitted: 0, dropped: 0 };
 }

@@ -90,6 +90,46 @@ describe("application observability control", () => {
     expect((await publish({ version: 0, logs: "diagnostic", fallback_logs: "off", diagnostic_until: Date.now() + 1000 })).status).toBe(503);
   });
 
+  it("keeps a confirmed policy on refresh failure, expires diagnostics, and recovers", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-28T00:00:00Z"));
+    const until = Date.now() + 40_000;
+    expect((await publish({ version: 0, logs: "diagnostic", fallback_logs: "basic", diagnostic_until: until })).status).toBe(200);
+    const failingDB = new Proxy(env.DB, {
+      get(target, key) {
+        if (key === "prepare") return (sql: string) => {
+          if (sql.includes("FROM observability_policy")) throw new Error("D1 unavailable");
+          return target.prepare(sql);
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as D1Database;
+    const health = (database: D1Database) => worker.fetch(new Request("https://share.example/health"), {
+      DB: database, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES,
+      CAIRN_API_TOKEN: API_TOKEN, CAIRN_ENRICHER_TOKEN: ENRICHER_TOKEN
+    } satisfies Env);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.setSystemTime(new Date(Date.now() + 30_001));
+    const stale = await health(failingDB);
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-cairn-observability-version")).toBe("0");
+    expect(stale.headers.get("x-cairn-observability-status")).toBe("unavailable");
+    expect(log).toHaveBeenCalledOnce();
+
+    vi.setSystemTime(new Date(Date.now() + 10_000));
+    const expired = await health(failingDB);
+    expect(expired.headers.get("x-cairn-observability-status")).toBe("unavailable");
+    expect(log).toHaveBeenCalledOnce(); // fallback basic omits successful GETs
+
+    await env.DB.prepare("UPDATE observability_policy SET version=1,logs='off',fallback_logs=NULL,diagnostic_until=NULL WHERE singleton=1").run();
+    vi.setSystemTime(new Date(Date.now() + 5_001));
+    const recovered = await health(env.DB);
+    expect(recovered.headers.get("x-cairn-observability-version")).toBe("1");
+    expect(recovered.headers.get("x-cairn-observability-status")).toBeNull();
+    expect(log).toHaveBeenCalledOnce();
+  });
+
   it("bounds platform log volume and reports dropped events", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-28T00:00:00Z"));
