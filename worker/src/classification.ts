@@ -1,4 +1,5 @@
 import { CLASSIFICATION_LIMITS, classificationBudgetAvailable, classificationWindow, validClassificationLimits } from "./classification-budget";
+import { validEnrichmentSource } from "./source-validation";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { record, taxonomy, validateClassification } from "./curation";
@@ -888,12 +889,7 @@ export async function sourceRoute(request: Request, env: Env, id: number): Promi
   const body = await bodyOf(request);
   if (!body || !text(body.lease_token, 100) || !record(body.source)) return fail("invalid_source");
   const source = body.source;
-  if (!text(source.original_text, 100_000) || !text(source.model, 200) ||
-    typeof source.original_language !== "string" || source.original_language.length > 32 ||
-    typeof source.context_text !== "string" || source.context_text.length > 100_000 ||
-    !Array.isArray(source.related_links) || source.related_links.length > 50 ||
-    !source.related_links.every((v) => safeURL(v, false)) ||
-    !Array.isArray(source.image_urls) || source.image_urls.length > 8 || !source.image_urls.every((v) => safeURL(v, true))) {
+  if (!validEnrichmentSource(source)) {
     return fail("invalid_source");
   }
   const now = new Date().toISOString();
@@ -924,14 +920,5 @@ export async function sourceRoute(request: Request, env: Env, id: number): Promi
   return results[0].results.length ? reply({ id, status: "source_saved" }) : conflict();
 }
 
-function safeURL(value: unknown, image: boolean): boolean {
-  if (typeof value !== "string" || value.length > 8192) return false;
-  try {
-    const url = new URL(value);
-    return !url.username && !url.password && (image
-      ? url.protocol === "https:" && url.hostname === "pbs.twimg.com" && !url.port && url.pathname.startsWith("/media/")
-      : ["http:", "https:"].includes(url.protocol));
-  } catch { return false; }
-}
 
 export { LEGACY_ERROR_CODES };

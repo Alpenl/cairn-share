@@ -1,5 +1,6 @@
 import type { Env } from "./index";
-import { canonicalJSON } from "./domain";
+import { canonicalJSON, contentHash, objectivePayload, type EvidenceSnapshot } from "./domain";
+import { validEnrichmentSource } from "./source-validation";
 
 // Call-count reservations are the hard stop. Observed cost is recorded later,
 // since xAI does not provide a pre-call price for a tool-using response.
@@ -11,7 +12,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 });
 const fail = (code: string, status = 400) => json({ error: code }, status);
 
-async function readBody(request: Request): Promise<Record<string, unknown> | Response> {
+async function readBody(request: Request, maxBytes = 4096): Promise<Record<string, unknown> | Response> {
   if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
     return fail("invalid_content_type");
   }
@@ -24,7 +25,7 @@ async function readBody(request: Request): Promise<Record<string, unknown> | Res
       const { done, value } = await reader.read();
       if (done) break;
       length += value.length;
-      if (length > 4096) { await reader.cancel(); return fail("request_too_large", 413); }
+      if (length > maxBytes) { await reader.cancel(); return fail("request_too_large", 413); }
       parts.push(value);
     }
     const bytes = new Uint8Array(length);
@@ -327,9 +328,79 @@ async function inspect(env: Env, url: URL): Promise<Response> {
   return row ? json({ attempt: row }) : fail("not_found", 404);
 }
 
+// A provider GET and its decoded source are checked by the operator-side Go
+// command. The Worker accepts only a response ID already bound to this exact
+// settled permit; the migration trigger fences the expired original lease and
+// commits source, evidence, queue transition and audit in one SQLite statement.
+async function recoverSource(request: Request, env: Env): Promise<Response> {
+  const value = await readBody(request, 256 * 1024);
+  if (value instanceof Response) return value;
+  const keys = ["operation_key", "response_id", "actor", "source"];
+  if (Object.keys(value).length !== keys.length || Object.keys(value).some((key) => !keys.includes(key)) ||
+      !hex(value.operation_key) || typeof value.response_id !== "string" ||
+      value.response_id.length < 1 || value.response_id.length > 200 ||
+      !/^[A-Za-z0-9_-]+$/.test(value.response_id) ||
+      typeof value.actor !== "string" || !/^[A-Za-z0-9._@-]{3,80}$/.test(value.actor) ||
+      !validEnrichmentSource(value.source) || !value.source.original_language.trim()) {
+    return fail("invalid_recovery");
+  }
+  const source = value.source;
+  const payloadHash = await digest(canonicalJSON({ response_id: value.response_id, source }));
+  const readReceipt = () => env.DB.prepare(`SELECT payload_hash,response
+    FROM enrichment_provider_source_recoveries WHERE operation_key=?`)
+    .bind(value.operation_key).first<{ payload_hash: string; response: string }>();
+  const replay = (row: { payload_hash: string; response: string } | null) => row
+    ? row.payload_hash === payloadHash ? json(JSON.parse(row.response)) : fail("operation_conflict", 409)
+    : null;
+  const prior = replay(await readReceipt());
+  if (prior) return prior;
+
+  const owner = await env.DB.prepare(`SELECT a.lease_hash,l.enrichment_lease_token
+    FROM enrichment_provider_attempts a JOIN links l ON l.id=a.link_id
+    WHERE a.operation_key=?`).bind(value.operation_key)
+    .first<{ lease_hash: string | null; enrichment_lease_token: string | null }>();
+  if (!owner?.lease_hash || !owner.enrichment_lease_token ||
+      await digest(owner.enrichment_lease_token) !== owner.lease_hash) {
+    return fail("attempt_not_eligible", 409);
+  }
+
+  const now = new Date().toISOString();
+  const blocks: EvidenceSnapshot["blocks"] = [
+    { id: "primary-1", role: "primary", text: source.original_text, acquired: "fetch" }
+  ];
+  if (source.context_text.trim()) {
+    blocks.push({ id: "context-1", role: "legacy_unknown", text: source.context_text,
+      relation: "stored context" });
+  }
+  const snapshot: EvidenceSnapshot = { blocks, fetched_at: now, retrieval: "x_search",
+    truncation: { truncated: false } };
+  const evidenceHash = await contentHash(snapshot);
+  try {
+    await env.DB.prepare(`INSERT INTO enrichment_provider_source_recoveries
+      (operation_key,link_id,response_id,actor,payload_hash,source_payload,evidence_payload,
+       evidence_hash,lease_token,lease_hash,created_at)
+      SELECT ?,a.link_id,?,?,?,?,?,?,?,?,? FROM enrichment_provider_attempts a
+      WHERE a.operation_key=?`)
+      .bind(value.operation_key, value.response_id, value.actor, payloadHash,
+        JSON.stringify(source), objectivePayload(snapshot), evidenceHash,
+        owner.enrichment_lease_token, owner.lease_hash, now, value.operation_key).run();
+    const stored = await readReceipt();
+    if (!stored) return fail("attempt_not_eligible", 409);
+    return replay(stored)!;
+  } catch (cause) {
+    const raced = replay(await readReceipt());
+    if (raced) return raced;
+    if (String(cause).includes("provider_source_recovery_ineligible") ||
+        String(cause).includes("provider_source_recovery_snapshot_conflict")) {
+      return fail("attempt_not_eligible", 409);
+    }
+    throw cause;
+  }
+}
+
 export async function providerAttemptRoute(request: Request, env: Env, path: string): Promise<Response | null> {
   const root = "/api/enrichment/provider-attempts";
-  if (path !== root && !["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect"].some((part) => path === `${root}/${part}`)) {
+  if (path !== root && !["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect", "recover-source"].some((part) => path === `${root}/${part}`)) {
     return null;
   }
   if (path === root) return request.method === "GET" ? list(env, new URL(request.url)) : fail("method_not_allowed", 405);
@@ -339,5 +410,6 @@ export async function providerAttemptRoute(request: Request, env: Env, path: str
   if (path.endsWith("/reserve")) return reserve(request, env);
   if (path.endsWith("/settle")) return settle(request, env);
   if (path.endsWith("/reconcile")) return reconcile(request, env);
+  if (path.endsWith("/recover-source")) return recoverSource(request, env);
   return authorizeFallback(request, env);
 }

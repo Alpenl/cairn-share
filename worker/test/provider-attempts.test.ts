@@ -39,6 +39,10 @@ const settle = (operation_key: string, http_status = 200) => ({ operation_key, h
 const reconcile = (operation_key: string) => ({ operation_key, verdict: "confirmed_not_billed",
   actor: "ops@example.org", evidence_kind: "provider_support",
   evidence_ref: "case-20260929-123" });
+const recoveredSource = (operation_key: string) => ({ operation_key, response_id: "resp_test",
+  actor: "ops@example.org", source: { original_text: "Recovered original source",
+    original_language: "en", context_text: "Quoted context", related_links: [],
+    image_urls: [], model: "grok-test" } });
 
 it("grants one durable permit, rejects replay and binds to the current lease and content", async () => {
   const job = await fixture();
@@ -175,6 +179,96 @@ it("requires separate operator proof and an expired matching lease before releas
   expect((await call("enrichment/provider-attempts/reserve", body)).status).toBe(200);
   expect(await (await call("enrichment/provider-attempts/reserve", body)).json())
     .toEqual({ granted: false, reason: "already_reserved" });
+});
+
+it("recovers one settled source atomically after expiry without another paid permit", async () => {
+  const job = await fixture();
+  const permit = first(job);
+  const path = "enrichment/provider-attempts/recover-source";
+  const body = recoveredSource(permit.operation_key);
+  expect((await call(path, body, "app")).status).toBe(401);
+  expect((await call(path, body, "internal")).status).toBe(401);
+  expect((await call("enrichment/provider-attempts/reserve", permit)).status).toBe(200);
+  expect((await call("enrichment/provider-attempts/settle", settle(permit.operation_key))).status).toBe(200);
+  expect((await call(path, body, "operator")).status).toBe(409);
+  expect((await call(`enrichment/jobs/${job.id}/fail`, {
+    lease_token: job.lease_token, error: "provider_result_unknown"
+  })).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind("2000-01-01T00:00:00.000Z", job.id).run();
+  const recovered = await call(path, body, "operator");
+  expect(recovered.status).toBe(200);
+  const receipt = await recovered.json() as { recovered: boolean; id: number; content_revision: number };
+  expect(receipt).toMatchObject({ recovered: true, id: job.id, status: "source_saved" });
+  expect(receipt.content_revision).toBeGreaterThan(job.content_revision);
+  const link = await env.DB.prepare(`SELECT original_text,source_context_text,enrichment_status,
+    enrichment_paid_uncertain,enrichment_lease_token,content_revision FROM links WHERE id=?`)
+    .bind(job.id).first();
+  expect(link).toMatchObject({ original_text: body.source.original_text,
+    source_context_text: body.source.context_text, enrichment_status: "pending",
+    enrichment_paid_uncertain: 0, enrichment_lease_token: null,
+    content_revision: receipt.content_revision });
+  expect((await env.DB.prepare("SELECT payload FROM enrichment_sources WHERE link_id=?")
+    .bind(job.id).first<{ payload: string }>())?.payload).toContain("Recovered original source");
+  expect(await env.DB.prepare(`SELECT content_revision,completeness FROM evidence_snapshots
+    WHERE link_id=? ORDER BY id DESC LIMIT 1`).bind(job.id).first())
+    .toMatchObject({ content_revision: receipt.content_revision, completeness: "complete" });
+  expect(await env.DB.prepare(`SELECT source_payload,evidence_payload,lease_token,response
+    FROM enrichment_provider_source_recoveries WHERE operation_key=?`).bind(permit.operation_key).first())
+    .toMatchObject({ source_payload: null, evidence_payload: null, lease_token: null });
+  expect(await (await call(path, body, "operator")).json()).toEqual(receipt);
+  expect((await call(path, { ...body, source: { ...body.source, original_text: "conflict" } }, "operator")).status).toBe(409);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_source_recoveries")
+    .first<{ n: number }>())?.n).toBe(1);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_attempts WHERE link_id=?")
+    .bind(job.id).first<{ n: number }>())?.n).toBe(1);
+  expect((await env.DB.prepare("SELECT total FROM enrichment_provider_daily_usage WHERE day=?")
+    .bind(new Date().toISOString().slice(0, 10)).first<{ total: number }>())?.total).toBe(1);
+  expect((await call(`links/${job.id}`, undefined, "app", "DELETE")).status).toBe(204);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_source_recoveries")
+    .first<{ n: number }>())?.n).toBe(0);
+  expect((await env.DB.prepare("SELECT total FROM enrichment_provider_daily_usage WHERE day=?")
+    .bind(new Date().toISOString().slice(0, 10)).first<{ total: number }>())?.total).toBe(1);
+});
+
+it("rejects unbound, changed and failed source recovery without partial writes", async () => {
+  const job = await fixture();
+  const permit = first(job);
+  const path = "enrichment/provider-attempts/recover-source";
+  const body = recoveredSource(permit.operation_key);
+  expect((await call("enrichment/provider-attempts/reserve", permit)).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind("2000-01-01T00:00:00.000Z", job.id).run();
+  expect((await call(path, body, "operator")).status).toBe(409);
+  expect((await call("enrichment/provider-attempts/settle", settle(permit.operation_key))).status).toBe(200);
+  expect((await call(path, { ...body, response_id: "resp_other" }, "operator")).status).toBe(409);
+  expect((await call(path, { ...body, source: { ...body.source, model: "other" } }, "operator")).status).toBe(409);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_source_recoveries")
+    .first<{ n: number }>())?.n).toBe(0);
+  await env.DB.prepare("UPDATE links SET content_revision=content_revision+1 WHERE id=?")
+    .bind(job.id).run();
+  expect((await call(path, body, "operator")).status).toBe(409);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_source_recoveries")
+    .first<{ n: number }>())?.n).toBe(0);
+});
+
+it("rolls back source recovery audit when the evidence write fails", async () => {
+  const job = await fixture();
+  const permit = first(job);
+  expect((await call("enrichment/provider-attempts/reserve", permit)).status).toBe(200);
+  expect((await call("enrichment/provider-attempts/settle", settle(permit.operation_key))).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind("2000-01-01T00:00:00.000Z", job.id).run();
+  await env.DB.prepare(`CREATE TRIGGER block_source_recovery_snapshot BEFORE INSERT ON evidence_snapshots
+    WHEN NEW.link_id=${job.id} BEGIN SELECT RAISE(ABORT,'injected snapshot failure'); END`).run();
+  await expect(call("enrichment/provider-attempts/recover-source", recoveredSource(permit.operation_key), "operator"))
+    .rejects.toThrow();
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_source_recoveries")
+    .first<{ n: number }>())?.n).toBe(0);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_sources WHERE link_id=?")
+    .bind(job.id).first<{ n: number }>())?.n).toBe(0);
+  expect(await env.DB.prepare("SELECT original_text,enrichment_paid_uncertain FROM links WHERE id=?")
+    .bind(job.id).first()).toMatchObject({ original_text: null, enrichment_paid_uncertain: 1 });
 });
 
 it("cannot reconcile a settled response or a changed content version", async () => {
