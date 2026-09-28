@@ -6,7 +6,8 @@ import { computeEffective, domainRoute, persistSelectionOverrides } from "./doma
 import { applyV1Write } from "./taxonomy-v2";
 import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
 import { readSelectionSnapshot } from "./selection-state";
-import { emitRequest, policyReadAvailable, publishPolicy, requestPolicy, type RequestD1Stats } from "./observability";
+import { emitProviderRecovery, emitRequest, policyReadAvailable, publishPolicy, requestPolicy,
+  type ProviderRecoveryEvent, type RequestD1Stats } from "./observability";
 import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
 
 export interface Env {
@@ -232,6 +233,7 @@ class TimingCollector {
   private readonly entries: Array<{ name: string; duration: number }> = [];
   private cacheState: CacheState | null = null;
   private d1Stats: RequestD1Stats | undefined;
+  private recoveryEvent: ProviderRecoveryEvent | undefined;
 
   async measure<T>(name: string, operation: () => Promise<T>): Promise<T> {
     const started = performance.now();
@@ -253,6 +255,14 @@ class TimingCollector {
 
   requestD1Stats(): RequestD1Stats | undefined {
     return this.d1Stats;
+  }
+
+  setRecoveryEvent(event: ProviderRecoveryEvent): void {
+    this.recoveryEvent = event;
+  }
+
+  providerRecoveryEvent(): ProviderRecoveryEvent | undefined {
+    return this.recoveryEvent;
   }
 
   headerValue(): string {
@@ -288,6 +298,7 @@ export default {
       else if (policy.version === -1) response.headers.set("X-Cairn-Observability-Status", "unconfigured");
       return response;
     } finally {
+      try { emitProviderRecovery(policy, timing.providerRecoveryEvent()); } catch { /* optional logs never fail business */ }
       try { emitRequest(policy, request, response, performance.now() - started, timing.requestD1Stats()); } catch { /* optional logs never fail business */ }
     }
   }
@@ -425,7 +436,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authResult = operatorOnly
       ? requireBearerToken(request, env.CAIRN_OPERATOR_TOKEN!) : requireEnricherToken(request, env);
     if (authResult !== null) return authResult;
-    return await providerAttemptRoute(request, env, path) ?? error("not_found", 404);
+    return await providerAttemptRoute(request, env, path, (event) => timing.setRecoveryEvent(event)) ??
+      error("not_found", 404);
   }
 
   if (path === "/api/enrichment/source-lease-capability") {

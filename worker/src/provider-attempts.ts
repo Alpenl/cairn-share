@@ -1,4 +1,5 @@
 import type { Env } from "./index";
+import type { ProviderRecoveryEvent } from "./observability";
 import { canonicalJSON, contentHash, objectivePayload, type EvidenceSnapshot } from "./domain";
 import { validEnrichmentSource } from "./source-validation";
 
@@ -332,7 +333,8 @@ async function inspect(env: Env, url: URL): Promise<Response> {
 // command. The Worker accepts only a response ID already bound to this exact
 // settled permit; the migration trigger fences the expired original lease and
 // commits source, evidence, queue transition and audit in one SQLite statement.
-async function recoverSource(request: Request, env: Env): Promise<Response> {
+async function recoverSource(request: Request, env: Env,
+  onResolved: (outcome: "committed" | "replay") => void): Promise<Response> {
   const value = await readBody(request, 256 * 1024);
   if (value instanceof Response) return value;
   const keys = ["operation_key", "response_id", "actor", "source"];
@@ -353,7 +355,10 @@ async function recoverSource(request: Request, env: Env): Promise<Response> {
     ? row.payload_hash === payloadHash ? json(JSON.parse(row.response)) : fail("operation_conflict", 409)
     : null;
   const prior = replay(await readReceipt());
-  if (prior) return prior;
+  if (prior) {
+    if (prior.status === 200) onResolved("replay");
+    return prior;
+  }
 
   const owner = await env.DB.prepare(`SELECT a.lease_hash,l.enrichment_lease_token
     FROM enrichment_provider_attempts a JOIN links l ON l.id=a.link_id
@@ -386,10 +391,15 @@ async function recoverSource(request: Request, env: Env): Promise<Response> {
         owner.enrichment_lease_token, owner.lease_hash, now, value.operation_key).run();
     const stored = await readReceipt();
     if (!stored) return fail("attempt_not_eligible", 409);
-    return replay(stored)!;
+    const result = replay(stored)!;
+    if (result.status === 200) onResolved("committed");
+    return result;
   } catch (cause) {
     const raced = replay(await readReceipt());
-    if (raced) return raced;
+    if (raced) {
+      if (raced.status === 200) onResolved("replay");
+      return raced;
+    }
     if (String(cause).includes("provider_source_recovery_ineligible") ||
         String(cause).includes("provider_source_recovery_snapshot_conflict")) {
       return fail("attempt_not_eligible", 409);
@@ -465,7 +475,8 @@ async function verifiedCurrentImages(env: Env, id: number, payload: string): Pro
   return true;
 }
 
-async function recoverReading(request: Request, env: Env): Promise<Response> {
+async function recoverReading(request: Request, env: Env,
+  onResolved: (outcome: "committed" | "replay") => void): Promise<Response> {
   const value = await readBody(request, 512 * 1024);
   if (value instanceof Response) return value;
   const keys = ["operation_key", "response_id", "actor", "reading"];
@@ -484,7 +495,10 @@ async function recoverReading(request: Request, env: Env): Promise<Response> {
     ? row.payload_hash === payloadHash ? json(JSON.parse(row.response)) : fail("operation_conflict", 409)
     : null;
   const prior = replay(await readReceipt());
-  if (prior) return prior;
+  if (prior) {
+    if (prior.status === 200) onResolved("replay");
+    return prior;
+  }
 
   const current = await env.DB.prepare(`SELECT a.link_id,a.lease_hash,l.enrichment_lease_token,
     l.url,l.original_text,l.images,s.url AS source_url,s.original_text AS source_text,
@@ -522,10 +536,15 @@ async function recoverReading(request: Request, env: Env): Promise<Response> {
         current.enrichment_lease_token, current.lease_hash, now).run();
     const stored = await readReceipt();
     if (!stored) return fail("attempt_not_eligible", 409);
-    return replay(stored)!;
+    const result = replay(stored)!;
+    if (result.status === 200) onResolved("committed");
+    return result;
   } catch (cause) {
     const raced = replay(await readReceipt());
-    if (raced) return raced;
+    if (raced) {
+      if (raced.status === 200) onResolved("replay");
+      return raced;
+    }
     if (String(cause).includes("provider_reading_recovery_ineligible")) {
       return fail("attempt_not_eligible", 409);
     }
@@ -533,7 +552,8 @@ async function recoverReading(request: Request, env: Env): Promise<Response> {
   }
 }
 
-export async function providerAttemptRoute(request: Request, env: Env, path: string): Promise<Response | null> {
+export async function providerAttemptRoute(request: Request, env: Env, path: string,
+  onRecovery?: (event: ProviderRecoveryEvent) => void): Promise<Response | null> {
   const root = "/api/enrichment/provider-attempts";
   if (path !== root && !["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect", "recover-source", "recover-reading"].some((part) => path === `${root}/${part}`)) {
     return null;
@@ -545,7 +565,19 @@ export async function providerAttemptRoute(request: Request, env: Env, path: str
   if (path.endsWith("/reserve")) return reserve(request, env);
   if (path.endsWith("/settle")) return settle(request, env);
   if (path.endsWith("/reconcile")) return reconcile(request, env);
-  if (path.endsWith("/recover-source")) return recoverSource(request, env);
-  if (path.endsWith("/recover-reading")) return recoverReading(request, env);
+  if (path.endsWith("/recover-source") || path.endsWith("/recover-reading")) {
+    const stage = path.endsWith("/recover-source") ? "source" : "reading";
+    let outcome: ProviderRecoveryEvent["outcome"] = "rejected";
+    try {
+      const result = stage === "source"
+        ? await recoverSource(request, env, (resolved) => { outcome = resolved; })
+        : await recoverReading(request, env, (resolved) => { outcome = resolved; });
+      onRecovery?.({ stage, outcome, status: result.status });
+      return result;
+    } catch (cause) {
+      onRecovery?.({ stage, outcome: "failed", status: 500 });
+      throw cause;
+    }
+  }
   return authorizeFallback(request, env);
 }

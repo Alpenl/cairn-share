@@ -156,7 +156,8 @@ function routeTemplate(path: string): string {
     path === "/api/enrichment/overview" || path === "/health") return path;
   if (path === "/api/v2/links/effective-batch") return path;
   if (path === "/api/enrichment/provider-attempts") return path;
-  if (["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect"].some((action) =>
+  if (["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect",
+    "recover-source", "recover-reading"].some((action) =>
     path === `/api/enrichment/provider-attempts/${action}`)) return path;
   if (/^\/api\/links\/\d+$/.test(path)) return "/api/links/:id";
   if (/^\/api\/links\/\d+\/curation$/.test(path)) return "/api/links/:id/curation";
@@ -174,12 +175,13 @@ export type RequestD1Stats = {
 } & ({ query: "overview_aggregate"; scope: "aggregate_only" } |
   { query: "effective_batch"; scope: "effective_view_only" });
 
-export function emitRequest(policy: Policy, request: Request, response: Response | null, durationMS: number,
-  d1Stats?: RequestD1Stats): void {
-  const mode = effective(policy);
-  if (mode === "off" || (mode === "basic" && response !== null && response.status < 400 && request.method === "GET")) return;
-  const path = new URL(request.url).pathname;
-  if (path === "/api/internal/observability") return;
+export type ProviderRecoveryEvent = {
+  stage: "source" | "reading";
+  outcome: "committed" | "replay" | "rejected" | "failed";
+  status: number;
+};
+
+function takeLogSlot(mode: Exclude<LogMode, "off">): boolean {
   const minute = Math.floor(Date.now() / 60_000);
   if (minute !== logWindow.minute) {
     if (logWindow.dropped > 0) {
@@ -190,9 +192,28 @@ export function emitRequest(policy: Policy, request: Request, response: Response
   const limit = mode === "diagnostic" ? 600 : 120;
   if (logWindow.emitted >= limit) {
     logWindow.dropped++;
-    return;
+    return false;
   }
   logWindow.emitted++;
+  return true;
+}
+
+// Recovery receipts in D1 remain authoritative. This export is deliberately
+// free of operation/link IDs because platform logs cannot be deleted by link.
+export function emitProviderRecovery(policy: Policy, event: ProviderRecoveryEvent | undefined): void {
+  const mode = effective(policy);
+  if (!event || mode === "off" || !takeLogSlot(mode)) return;
+  console.log(JSON.stringify({ schema: 1, kind: "provider_recovery", config_version: policy.version,
+    stage: event.stage, outcome: event.outcome, status: event.status }));
+}
+
+export function emitRequest(policy: Policy, request: Request, response: Response | null, durationMS: number,
+  d1Stats?: RequestD1Stats): void {
+  const mode = effective(policy);
+  if (mode === "off" || (mode === "basic" && response !== null && response.status < 400 && request.method === "GET")) return;
+  const path = new URL(request.url).pathname;
+  if (path === "/api/internal/observability") return;
+  if (!takeLogSlot(mode)) return;
   const method = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(request.method) ? request.method : "OTHER";
   const contentLength = response?.headers.get("content-length");
   const responseBytes = contentLength && /^\d{1,12}$/.test(contentLength) ? Number(contentLength) : null;

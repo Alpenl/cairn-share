@@ -1,5 +1,5 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal",
@@ -150,4 +150,38 @@ it("rejects recovery when the current source has no evidence snapshot", async ()
   await fixture([], false);
   expect((await call("enrichment/provider-attempts/recover-reading", recovery(), "operator")).status)
     .toBe(409);
+});
+
+it("reports safe committed, replay and rejected outcomes under the live log switch", async () => {
+  await fixture();
+  const policy = (version: number, logs: "off" | "basic") =>
+    call("internal/observability", { version, logs }, "internal");
+  expect((await policy(1, "basic")).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const path = "enrichment/provider-attempts/recover-reading";
+    const body = recovery();
+    expect((await call(path, { ...body, response_id: "wrong" }, "operator")).status).toBe(409);
+    expect((await call(path, body, "operator")).status).toBe(200);
+    expect((await call(path, body, "operator")).status).toBe(200);
+    const events = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(events.filter((entry) => entry.kind === "provider_recovery")).toEqual([
+      { schema: 1, kind: "provider_recovery", config_version: 1,
+        stage: "reading", outcome: "rejected", status: 409 },
+      { schema: 1, kind: "provider_recovery", config_version: 1,
+        stage: "reading", outcome: "committed", status: 200 },
+      { schema: 1, kind: "provider_recovery", config_version: 1,
+        stage: "reading", outcome: "replay", status: 200 }
+    ]);
+    expect(events.filter((entry) => entry.kind === "worker_request").map((entry) => entry.route))
+      .toEqual(Array(3).fill("/api/enrichment/provider-attempts/recover-reading"));
+    expect(JSON.stringify(events)).not.toContain(readingKey);
+    expect(JSON.stringify(events)).not.toContain(body.reading.translated_text);
+    expect((await policy(2, "off")).status).toBe(200);
+    const logged = log.mock.calls.length;
+    expect((await call(path, body, "operator")).status).toBe(200);
+    expect(log.mock.calls.length).toBe(logged);
+  } finally {
+    log.mockRestore();
+  }
 });

@@ -1,5 +1,5 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal",
@@ -229,6 +229,37 @@ it("recovers one settled source atomically after expiry without another paid per
     .first<{ n: number }>())?.n).toBe(0);
   expect((await env.DB.prepare("SELECT total FROM enrichment_provider_daily_usage WHERE day=?")
     .bind(new Date().toISOString().slice(0, 10)).first<{ total: number }>())?.total).toBe(1);
+});
+
+it("reports settled source recovery and replay without logging source or permit identifiers", async () => {
+  const job = await fixture();
+  const permit = first(job);
+  expect((await call("enrichment/provider-attempts/reserve", permit)).status).toBe(200);
+  expect((await call("enrichment/provider-attempts/settle", settle(permit.operation_key))).status).toBe(200);
+  expect((await call(`enrichment/jobs/${job.id}/fail`, {
+    lease_token: job.lease_token, error: "provider_result_unknown"
+  })).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind("2000-01-01T00:00:00.000Z", job.id).run();
+  expect((await call("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const path = "enrichment/provider-attempts/recover-source";
+    const body = recoveredSource(permit.operation_key);
+    expect((await call(path, body, "operator")).status).toBe(200);
+    expect((await call(path, body, "operator")).status).toBe(200);
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(entries.filter((entry) => entry.kind === "provider_recovery").map((entry) =>
+      [entry.stage, entry.outcome, entry.status])).toEqual([
+      ["source", "committed", 200], ["source", "replay", 200]
+    ]);
+    expect(entries.filter((entry) => entry.kind === "worker_request").map((entry) => entry.route))
+      .toEqual(Array(2).fill("/api/enrichment/provider-attempts/recover-source"));
+    expect(JSON.stringify(entries)).not.toContain(permit.operation_key);
+    expect(JSON.stringify(entries)).not.toContain(body.source.original_text);
+  } finally {
+    log.mockRestore();
+  }
 });
 
 it("rejects unbound, changed and failed source recovery without partial writes", async () => {
