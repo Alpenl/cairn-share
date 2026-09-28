@@ -4,7 +4,8 @@ The internal `POST /api/v2/links/effective-batch` request now reports its
 effective-view SQL result through the existing switchable Worker request log.
 The log uses a fixed route and query name and carries `sql_count=1`,
 `rows_read`, `rows_written`, response bytes, and total request duration.
-`Server-Timing: db` reports the measured query duration. The response keeps
+`Server-Timing: db` measures only the D1 call, excluding the subsequent
+JavaScript folding. The response keeps
 the same scoped D1 statistics and export payload. No second SQL query is
 performed to obtain the statistics.
 

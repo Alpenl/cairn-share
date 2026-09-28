@@ -81,9 +81,11 @@ export async function readSelectionSnapshot(env: Env, id: number, includeReading
 
 // A single SQLite read snapshot supplies every exported view. The outer IN is
 // a bounded set query; no per-link HTTP call or per-link SQL statement runs.
-export async function readSelectionSnapshots(env: Env, ids: number[]) {
-  const result = await env.DB.prepare(selectionSQL(`l.id IN (${ids.map(() => "?").join(",")})`, false))
+export async function readSelectionSnapshots(env: Env, ids: number[],
+  timer?: { measure<T>(name: string, operation: () => Promise<T>): Promise<T> }) {
+  const query = () => env.DB.prepare(selectionSQL(`l.id IN (${ids.map(() => "?").join(",")})`, false))
     .bind(...ids).all<Row>();
+  const result = timer ? await timer.measure("db", query) : await query();
   return { snapshots: new Map(result.results.map((row) => [row.id, selectionFromRow(row)])), meta: result.meta };
 }
 

@@ -1401,8 +1401,7 @@ async function effectiveBatch(request: Request, env: Env, observer?: QueryObserv
     }
     ids = input as number[];
   } catch { return fail("invalid_json"); }
-  const select = () => readSelectionSnapshots(env, ids);
-  const { snapshots, meta } = observer ? await observer.measure("db", select) : await select();
+  const { snapshots, meta } = await readSelectionSnapshots(env, ids, observer);
   observer?.setD1Stats({ query: "effective_batch", scope: "effective_view_only",
     sql_count: 1, rows_read: meta.rows_read, rows_written: meta.rows_written });
   const payload = { version: 1, items: ids.flatMap((id) => {
