@@ -642,8 +642,9 @@ export async function ackSourceRefresh(request: Request, env: Env, id: number): 
 }
 
 // Manual text becomes a durable source before the caller receives success. The
-// old retrieval lease is fenced in the same transaction; reading can claim the
-// new source later, and the classification trigger queues independent work.
+// active retrieval lease is left alone. An expired lease is fenced in the same
+// transaction; reading can claim the new source later, and classification can
+// start from the saved evidence without waiting for reading.
 export async function manualSourceRoute(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body || !text(body.operation_key, 200) || !Number.isSafeInteger(body.expected_revision) ||
@@ -685,7 +686,9 @@ export async function manualSourceRoute(request: Request, env: Env, id: number):
     const results = await env.DB.batch([
       env.DB.prepare(`INSERT INTO manual_source_operations(operation_key,link_id,payload_hash,expected_revision,created_at)
         SELECT ?,id,?,?,? FROM links WHERE id=? AND content_revision=? AND ${xLink}
-        RETURNING operation_key`).bind(key, payloadHash, expected, now, id, expected),
+          AND NOT (enrichment_status='processing' AND enrichment_lease_token IS NOT NULL
+            AND enrichment_lease_until>?)
+        RETURNING operation_key`).bind(key, payloadHash, expected, now, id, expected, now),
       env.DB.prepare(`UPDATE links SET original_text=?,original_language=NULL,source_context_text='',related_links='[]',
           ai_title=NULL,translated_text=NULL,summary=NULL,images='[]',enrichment_model=NULL,enriched_at=NULL,
           enrichment_status='pending',enrichment_attempts=0,enrichment_next_retry_at=NULL,
@@ -718,8 +721,15 @@ export async function manualSourceRoute(request: Request, env: Env, id: number):
         RETURNING result_revision`).bind(id, key, id)
     ]);
     if (!results[0].results.length) {
-      const link = await env.DB.prepare(`SELECT id FROM links WHERE id=?`).bind(id).first();
-      return link ? fail("input_changed") : fail("not_found");
+      const link = await env.DB.prepare(`SELECT enrichment_status, enrichment_lease_token,
+        enrichment_lease_until FROM links WHERE id=?`).bind(id).first<{
+          enrichment_status: string; enrichment_lease_token: string | null;
+          enrichment_lease_until: string | null;
+        }>();
+      if (!link) return fail("not_found");
+      if (link.enrichment_status === "processing" && link.enrichment_lease_token &&
+        link.enrichment_lease_until && link.enrichment_lease_until > now) return fail("lease_conflict");
+      return fail("input_changed");
     }
     if (!results[1].results.length || !results[3].success || !results[4].results.length || !results[5].results.length) {
       throw Error("manual source transaction was incomplete");

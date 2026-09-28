@@ -75,14 +75,23 @@ it("commits manual source before accepting and replays the same operation withou
   expect(await readingClaim.json()).toMatchObject({ id, refresh_epoch: 0 });
 });
 
-it("fences a lease held by an older source worker and leaves human curation intact", async () => {
+it("rejects an active lease, then fences an expired one without losing curation", async () => {
   const id = await link();
   const leased = await call(`enrichment/jobs/${id}/claim`, {});
   const { lease_token } = await leased.json() as { lease_token: string };
   await env.DB.prepare("UPDATE links SET why='human note',curation_status='kept' WHERE id=?").bind(id).run();
-  expect((await call(`enrichment/jobs/${id}/manual-source`, {
+  const body = {
     operation_key: operation, expected_revision: (await state(id))!.content_revision, original_text: "manual text"
-  })).status).toBe(200);
+  };
+  const before = await state(id);
+  const busy = await call(`enrichment/jobs/${id}/manual-source`, body);
+  expect(busy.status).toBe(409);
+  expect(await busy.json()).toMatchObject({ error: "lease_conflict" });
+  expect(await state(id)).toEqual(before);
+  expect(await env.DB.prepare("SELECT COUNT(*) n FROM manual_source_operations").first("n")).toBe(0);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind(new Date(Date.now() - 1000).toISOString(), id).run();
+  expect((await call(`enrichment/jobs/${id}/manual-source`, body)).status).toBe(200);
   expect((await call(`enrichment/jobs/${id}/source`, { lease_token, source: {
     original_text: "stale text", original_language: "en", context_text: "", related_links: [], image_urls: [], model: "fixture"
   } })).status).toBe(409);
@@ -141,6 +150,8 @@ it("requires current content revision and internal credentials", async () => {
 it("rolls back the source, lease fence and receipt when snapshot storage fails", async () => {
   const id = await link();
   const lease = await (await call(`enrichment/jobs/${id}/claim`, {})).json() as { lease_token: string };
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind(new Date(Date.now() - 1000).toISOString(), id).run();
   const before = await state(id);
   await env.DB.prepare(`CREATE TRIGGER reject_manual_source BEFORE INSERT ON enrichment_sources
     BEGIN SELECT RAISE(ABORT, 'injected source failure'); END`).run();
@@ -149,7 +160,6 @@ it("rolls back the source, lease fence and receipt when snapshot storage fails",
   })).rejects.toThrow("injected source failure");
   expect(await state(id)).toEqual(before);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM manual_source_operations").first("n")).toBe(0);
-  expect((await (await call(`enrichment/jobs/${id}/claim`, {})).json() as { error: string }).error).toBe("job_busy");
   expect((await state(id))?.enrichment_lease_token).toBe(lease.lease_token);
 });
 
@@ -160,6 +170,8 @@ it("accepts concurrent replays once and advances provenance when primary bytes a
   expect((await call(`enrichment/jobs/${id}/source`, { lease_token: lease.lease_token, source: {
     original_text: text, original_language: "en", context_text: "", related_links: [], image_urls: [], model: "fixture"
   } })).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind(new Date(Date.now() - 1000).toISOString(), id).run();
   const before = (await state(id))!;
   const body = { operation_key: operation, expected_revision: before.content_revision, original_text: text };
   const responses = await Promise.all(Array.from({ length: 4 }, () => call(`enrichment/jobs/${id}/manual-source`, body)));

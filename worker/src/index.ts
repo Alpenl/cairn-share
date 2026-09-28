@@ -884,9 +884,10 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
             enrichment_updated_at = ?
         WHERE id = (
           SELECT id
-          FROM links
+          FROM links INDEXED BY links_manual_source_priority_idx
           WHERE ${X_LINK_SQL}
             AND curation_status <> 'drop'
+            AND enrichment_status IN ('pending', 'failed', 'processing')
             AND enrichment_attempts < ?
             AND (
               enrichment_status = 'pending'

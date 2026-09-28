@@ -15,4 +15,5 @@ CREATE INDEX manual_source_operations_link_idx ON manual_source_operations(link_
 -- must not silently demote a durable manual request.
 ALTER TABLE links ADD COLUMN manual_source_priority INTEGER NOT NULL DEFAULT 0
   CHECK (manual_source_priority IN (0, 1));
-CREATE INDEX links_manual_source_priority_idx ON links(manual_source_priority DESC, id ASC);
+CREATE INDEX links_manual_source_priority_idx ON links(manual_source_priority DESC, id ASC)
+  WHERE enrichment_status IN ('pending', 'failed', 'processing') AND curation_status <> 'drop';
