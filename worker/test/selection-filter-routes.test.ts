@@ -88,6 +88,31 @@ it('counts reflect effective filters but not pagination or the status facet', as
     expect(result.counts.unsupported,query).toBe(total);
   }
 });
+
+it('counts=0 keeps the filtered cursor and executes no count statement', async () => {
+  const [first, second] = await fixture();
+  const statements: string[] = [];
+  const database = {
+    prepare(sql: string) { statements.push(sql); return env.DB.prepare(sql); },
+    batch(batch: D1PreparedStatement[]) { return env.DB.batch(batch); }
+  } as D1Database;
+  const call = (query: string) => worker.fetch(new Request(`https://test.example/api/enrichment/jobs?${query}`, {
+    headers: { Authorization: 'Bearer internal' }
+  }), { DB: database, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: 'app', CAIRN_ENRICHER_TOKEN: 'internal' });
+
+  const page = await call('topics=eng&limit=1&counts=0');
+  expect(page.status).toBe(200);
+  expect(await page.json()).toMatchObject({ items: [{ id: second }], next_before_id: second });
+  expect(statements.filter(sql => /FROM links\b/.test(sql))).toHaveLength(1);
+  expect(statements.some(sql => /COUNT\(\*\) AS total/.test(sql))).toBe(false);
+  const next = await call(`topics=eng&limit=1&before_id=${second}&counts=0`);
+  const nextBody = await next.json() as Record<string, unknown>;
+  expect(nextBody.items).toMatchObject([{ id: first }]);
+  expect(nextBody).not.toHaveProperty('counts');
+  for (const invalid of ['counts=2', 'counts=', 'counts=0&counts=1']) {
+    expect((await call(invalid)).status).toBe(400);
+  }
+});
 it('filtered cursors count only matching rows and invalid input never reuses cached broad results', async()=>{
   const [first,second]=await fixture();
   await request('links',undefined,'app');

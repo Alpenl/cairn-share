@@ -800,6 +800,11 @@ function bookmarkFilters(url: URL, query?: string): { clauses: string[]; binding
 }
 
 async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): Promise<Response> {
+  const countsOption = url.searchParams.getAll("counts");
+  if (countsOption.length > 1 || (countsOption.length === 1 && !["0", "1"].includes(countsOption[0]))) {
+    return error("invalid_query");
+  }
+  const includeCounts = countsOption[0] !== "0";
   const limit = parseBoundedInt(url.searchParams.get("limit"), DEFAULT_LIMIT, MAX_LIMIT);
   if (limit === null) return error("invalid_limit");
   const beforeId = parseOptionalPositiveInt(url.searchParams.get("before_id"));
@@ -812,8 +817,8 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   if (filters instanceof Response) return filters;
   // Counts are status facets for the filtered collection, independent of the
   // selected status tab and page cursor. Capture before adding those clauses.
-  const countWhere = filters.clauses.length ? `WHERE ${filters.clauses.join(" AND ")}` : "";
-  const countBindings = [...filters.bindings];
+  const countWhere = includeCounts && filters.clauses.length ? `WHERE ${filters.clauses.join(" AND ")}` : "";
+  const countBindings = includeCounts ? [...filters.bindings] : [];
   const { clauses, bindings } = filters;
   if (beforeId !== undefined) {
     clauses.push("id < ?");
@@ -838,8 +843,11 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
       ORDER BY id DESC
       LIMIT ?`
   ).bind(...bindings, pageSize);
-  const countStatement = env.DB.prepare(
-    `SELECT COUNT(*) AS total,
+  let rows: EnrichmentListRow[];
+  let countRow: EnrichmentCountRow | null = null;
+  if (includeCounts) {
+    const countStatement = env.DB.prepare(
+      `SELECT COUNT(*) AS total,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
@@ -847,19 +855,22 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'exhausted' THEN 1 ELSE 0 END), 0) AS exhausted,
             COALESCE(SUM(CASE WHEN NOT ${X_LINK_SQL} THEN 1 ELSE 0 END), 0) AS unsupported
        FROM links ${countWhere}`
-  ).bind(...countBindings);
-
-  // D1 batches are transactional. Do not attach counts read after a
-  // concurrent mutation to a page that predates it.
-  const [listResult, countResult] = await timing.measure("db", () => env.DB.batch([listStatement, countStatement]));
-  const rows = (listResult.results ?? []) as unknown as EnrichmentListRow[];
-  const countRow = (countResult.results?.[0] ?? null) as unknown as EnrichmentCountRow | null;
+    ).bind(...countBindings);
+    // D1 batches are transactional. Do not attach counts read after a
+    // concurrent mutation to a page that predates it.
+    const [listResult, countResult] = await timing.measure("db", () => env.DB.batch([listStatement, countStatement]));
+    rows = (listResult.results ?? []) as unknown as EnrichmentListRow[];
+    countRow = (countResult.results?.[0] ?? null) as unknown as EnrichmentCountRow | null;
+  } else {
+    const listResult = await timing.measure("db", () => listStatement.all());
+    rows = (listResult.results ?? []) as unknown as EnrichmentListRow[];
+  }
   const items = rows.slice(0, limit);
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
   return json({
     items: items.map((row) => ({ ...mapEnrichmentListItem(row, withIdentity), ...(summary ? { content_loaded: false } : {}) })),
     next_before_id: next,
-    counts: mapEnrichmentCounts(countRow),
+    ...(includeCounts ? { counts: mapEnrichmentCounts(countRow) } : {}),
     ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {})
   });
 }
