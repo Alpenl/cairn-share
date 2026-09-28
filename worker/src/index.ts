@@ -11,6 +11,7 @@ export interface Env {
   ENRICHMENT_IMAGES: R2Bucket;
   CAIRN_API_TOKEN: string;
   CAIRN_ENRICHER_TOKEN: string;
+  HISTORY_RETENTION_DAYS?: string;
 }
 
 interface LinkRecord {

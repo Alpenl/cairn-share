@@ -1,8 +1,9 @@
 import { pruneEntityCache } from "./entity-cache";
 import { pruneRerankCache } from "./rerank-cache";
+import { pruneLiveHistory, type HistoryRetentionEnv } from "./history-retention";
 // Durable R2 deletion after the D1 transaction. All work is bounded per tick.
 // Retained numeric tombstones also cover a Worker dying during a late R2 put.
-export interface PrivacyEnv { DB: D1Database; ENRICHMENT_IMAGES: R2Bucket }
+export interface PrivacyEnv extends HistoryRetentionEnv { ENRICHMENT_IMAGES: R2Bucket }
 const RETRY_MS = 5 * 60_000;
 const RECHECK_MS = 24 * 60 * 60_000;
 
@@ -48,4 +49,7 @@ export async function maintainPrivacy(env: PrivacyEnv, now = Date.now()): Promis
   }
   await env.DB.prepare("INSERT INTO privacy_maintenance_state(key,cursor) VALUES ('r2_orphans',?) ON CONFLICT(key) DO UPDATE SET cursor=excluded.cursor")
     .bind(page.truncated ? page.cursor : "").run();
+  // Optional live-history work follows deletion recovery, so a retention
+  // failure cannot delay physical cleanup of an already deleted bookmark.
+  await pruneLiveHistory(env, now);
 }
