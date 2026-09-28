@@ -114,6 +114,7 @@ type ErrorCode =
   | "invalid_token"
   | "auth_not_configured"
   | "lease_conflict"
+  | "lease_released"
   | "job_busy"
   | "not_found"
   | "method_not_allowed"
@@ -366,7 +367,14 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   if (path === "/api/enrichment/jobs/claim") {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
-    return routeMethod(request, ["POST"], () => claimEnrichmentJob(env, timing));
+    return routeMethod(request, ["POST"], () => claimEnrichmentJob(request, env, timing));
+  }
+
+  if (path === "/api/enrichment/source-lease-capability") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => json({ protocol: 1,
+      lease_ms: ENRICHMENT_LEASE_MILLISECONDS, paid_stage_admission: true }));
   }
 
   if (path === "/api/enrichment/jobs") {
@@ -397,17 +405,20 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     return routeMethod(request, ["GET"], () => getEnrichmentImage(request, env, key));
   }
 
-  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(claim|complete|fail|images)$/);
+  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(claim|complete|fail|images|lease-admit)$/);
   if (enrichmentJobMatch !== null) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["POST"], () => {
       const id = Number(enrichmentJobMatch[1]);
       if (enrichmentJobMatch[2] === "claim") {
-        return claimEnrichmentJobById(env, id, timing);
+        return claimEnrichmentJobById(request, env, id, timing);
       }
       if (enrichmentJobMatch[2] === "images") {
         return storeEnrichmentImages(request, env, id, timing);
+      }
+      if (enrichmentJobMatch[2] === "lease-admit") {
+        return admitPaidSourceStage(request, env, id, timing);
       }
       return enrichmentJobMatch[2] === "complete"
         ? completeEnrichmentJob(request, env, id, timing)
@@ -872,16 +883,19 @@ async function updateCuration(request: Request, env: Env, id: number, timing: Ti
   return getEnrichmentJob(env, id, timing);
 }
 
-async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Response> {
+async function claimEnrichmentJob(request: Request, env: Env, timing: TimingCollector): Promise<Response> {
   const now = new Date();
   const nowIso = now.toISOString();
   const leaseToken = crypto.randomUUID();
   const leaseUntil = new Date(now.getTime() + ENRICHMENT_LEASE_MILLISECONDS).toISOString();
+  const guarded = request.headers.get("X-Cairn-Source-Lease-Admission") === "1";
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `UPDATE links
         SET enrichment_status = 'processing',
-            enrichment_attempts = enrichment_attempts + 1,
+            enrichment_attempts = enrichment_attempts + CASE
+              WHEN enrichment_status='processing' AND enrichment_paid_stage_started=0 THEN 0 ELSE 1 END,
+            enrichment_paid_stage_started = ?,
             enrichment_next_retry_at = NULL,
             enrichment_lease_token = ?,
             enrichment_lease_until = ?,
@@ -893,7 +907,9 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
           WHERE ${X_LINK_SQL}
             AND (curation_status <> 'drop' OR manual_priority = 1)
             AND enrichment_status IN ('pending', 'failed', 'processing')
-            AND enrichment_attempts < ?
+            AND (enrichment_attempts < ? OR
+              (enrichment_status='processing' AND enrichment_paid_stage_started=0
+                AND enrichment_lease_until IS NOT NULL AND enrichment_lease_until <= ?))
             AND (
               enrichment_status = 'pending'
               OR (
@@ -912,7 +928,8 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
                   enrichment_lease_token, enrichment_lease_until,
                   CASE WHEN refresh_requested_at IS NOT NULL THEN refresh_epoch ELSE 0 END AS refresh_epoch`
     )
-      .bind(leaseToken, leaseUntil, nowIso, MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso)
+      .bind(guarded ? 0 : 1, leaseToken, leaseUntil, nowIso,
+        MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso, nowIso)
       .first<EnrichmentJobRow>()
   );
 
@@ -924,6 +941,7 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
 }
 
 async function claimEnrichmentJobById(
+  request: Request,
   env: Env,
   id: number,
   timing: TimingCollector
@@ -932,11 +950,13 @@ async function claimEnrichmentJobById(
   const nowIso = now.toISOString();
   const leaseToken = crypto.randomUUID();
   const leaseUntil = new Date(now.getTime() + ENRICHMENT_LEASE_MILLISECONDS).toISOString();
+  const guarded = request.headers.get("X-Cairn-Source-Lease-Admission") === "1";
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `UPDATE links
           SET enrichment_status = 'processing',
               enrichment_attempts = 1,
+              enrichment_paid_stage_started = ?,
               enrichment_next_retry_at = NULL,
               enrichment_lease_token = ?,
               enrichment_lease_until = ?,
@@ -953,7 +973,7 @@ async function claimEnrichmentJobById(
                   enrichment_lease_token, enrichment_lease_until,
                   CASE WHEN refresh_requested_at IS NOT NULL THEN refresh_epoch ELSE 0 END AS refresh_epoch`
     )
-      .bind(leaseToken, leaseUntil, nowIso, id, nowIso)
+      .bind(guarded ? 0 : 1, leaseToken, leaseUntil, nowIso, id, nowIso)
       .first<EnrichmentJobRow>()
   );
   if (row !== null) return json(mapEnrichmentJob(row));
@@ -964,6 +984,55 @@ async function claimEnrichmentJobById(
       .first<{ id: number }>()
   );
   return existing === null ? error("not_found", 404) : error("job_busy", 409);
+}
+
+// Admit one paid stage only while the caller still owns enough lease time for
+// its request deadline and a bounded commit. A short lease is released in the
+// same request. Only a lease that never admitted paid work refunds its claim
+// attempt; otherwise a crashed or unknown provider call must remain counted.
+async function admitPaidSourceStage(
+  request: Request, env: Env, id: number, timing: TimingCollector
+): Promise<Response> {
+  const body = await readEnrichmentBody(request);
+  if (body instanceof Response) return body;
+  const token = readBoundedString(body.lease_token, 1, 100);
+  const minRemaining = body.min_remaining_ms;
+  if (token === null || !Number.isSafeInteger(minRemaining) ||
+      Number(minRemaining) < 1 || Number(minRemaining) > ENRICHMENT_LEASE_MILLISECONDS) {
+    return error("invalid_enrichment");
+  }
+  const now = new Date();
+  const deadline = new Date(now.getTime() + Number(minRemaining)).toISOString();
+  const admitted = await timing.measure("db", () => env.DB.prepare(`UPDATE links
+    SET enrichment_paid_stage_started=1
+    WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+      AND enrichment_lease_until>=?
+    RETURNING enrichment_lease_until`).bind(id, token, deadline)
+    .first<{ enrichment_lease_until: string }>());
+  if (admitted) {
+    return json({ id, status: "admitted",
+      remaining_ms: Math.max(0, Date.parse(admitted.enrichment_lease_until) - Date.now()) });
+  }
+  const current = await timing.measure("db-check", () => env.DB.prepare(`SELECT id,enrichment_status,
+    enrichment_lease_token,enrichment_lease_until FROM links WHERE id=?`).bind(id).first<{
+    id: number; enrichment_status: string; enrichment_lease_token: string | null;
+    enrichment_lease_until: string | null;
+  }>());
+  if (!current) return error("not_found", 404);
+  if (current.enrichment_status !== "processing" || current.enrichment_lease_token !== token ||
+      current.enrichment_lease_until === null) return error("lease_conflict", 409);
+  const released = await timing.measure("db", () => env.DB.prepare(`UPDATE links SET
+    enrichment_status='pending',
+    enrichment_attempts=CASE WHEN enrichment_paid_stage_started=0
+      THEN MAX(0,enrichment_attempts-1) ELSE enrichment_attempts END,
+    enrichment_paid_stage_started=0,
+    enrichment_lease_token=NULL,enrichment_lease_until=NULL,
+    enrichment_next_retry_at=NULL,enrichment_updated_at=?
+    WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+      AND enrichment_lease_until=? AND enrichment_lease_until<?
+    RETURNING id`).bind(now.toISOString(), id, token, current.enrichment_lease_until, deadline)
+    .first<{ id: number }>());
+  return released ? error("lease_released", 409) : error("lease_conflict", 409);
 }
 
 async function completeEnrichmentJob(
