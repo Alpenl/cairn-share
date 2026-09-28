@@ -73,6 +73,20 @@ it("R3-09 exact lost-response replay survives newer results and never reapplies 
   const stale=await entities(id);
   expect(stale.stale).toBe(true);expect(stale.entities).toEqual([]);expect(stale.automatic).toEqual([]);
 });
+
+it("repairs a historical projection gap on exact entity replay without another operation",async()=>{
+  const {id,body}=await setup();
+  expect((await request(`v2/links/${id}/entity-state`,body)).status).toBe(200);
+  await env.DB.prepare("UPDATE current_projections SET effective='{}' WHERE link_id=?").bind(id).run();
+  const replay=await request(`v2/links/${id}/entity-state`,body);
+  expect(replay.status).toBe(200);
+  expect((await replay.json() as {replayed:boolean}).replayed).toBe(true);
+  const cached=await env.DB.prepare("SELECT effective FROM current_projections WHERE link_id=?").bind(id).first<string>("effective");
+  expect(JSON.parse(cached!).entities).toEqual(["AcmeEntity"]);
+  const rows=await env.DB.prepare("SELECT term FROM effective_entity_terms WHERE link_id=?").bind(id).all<{term:string}>();
+  expect(rows.results.map(row=>row.term)).toEqual(["AcmeEntity"]);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM entity_operations WHERE link_id=?").bind(id).first("n")).toBe(1);
+});
 it("R3-09 search and cached projection follow entity accept/reject/reset/set-empty and source staleness",async()=>{
   const {id,body}=await setup();
   expect((await request(`v2/links/${id}/entity-state`,body)).status).toBe(200);

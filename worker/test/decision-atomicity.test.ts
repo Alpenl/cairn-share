@@ -186,6 +186,19 @@ it("R3-12: a concurrent exact retry confirms one stored operation", async () => 
   expect(await count("classification_decision_runs")).toBe(2);
 });
 
+it("repairs a historical projection gap on exact decision replay without a second decision", async () => {
+  const { id, body } = await setup();
+  expect((await call(`v2/links/${id}/decisions`, body)).status).toBe(200);
+  await env.DB.prepare("UPDATE current_projections SET effective='{}' WHERE link_id=?").bind(id).run();
+  await env.DB.prepare("UPDATE link_selections_v2 SET topics='[]' WHERE link_id=?").bind(id).run();
+  const replay = await call(`v2/links/${id}/decisions`, body);
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toMatchObject({ replayed: true });
+  await assertProjection(id, ["llm"]);
+  expect(await count("classification_decisions")).toBe(1);
+  expect(await count("classification_decision_runs")).toBe(2);
+});
+
 it.each(["decision", "human"])("R3-12: projection delayed by a newer %s converges to current effective state", async (change) => {
   const { id, body } = await setup();
   const db = beforeBatch(2, async () => {

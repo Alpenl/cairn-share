@@ -914,6 +914,24 @@ it("confirms identical concurrent and lost-response curation with the same opera
   expect(await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id).first("personal_revision")).toBe(2);
 });
 
+it("repairs a historical projection gap on exact override replay without another event", async () => {
+  const id = await createLink();
+  const body = { field: "topics", term: "llm", action: "accept", operation_key: "repair-override", expected_revision: 0 };
+  expect((await request(`v2/links/${id}/overrides`, body)).status).toBe(200);
+  await env.DB.prepare("UPDATE current_projections SET effective='{}' WHERE link_id=?").bind(id).run();
+  await env.DB.prepare("UPDATE link_selections_v2 SET topics='[]' WHERE link_id=?").bind(id).run();
+  await env.DB.prepare("UPDATE links SET curation=NULL,curation_projection_epoch=curation_projection_epoch+1 WHERE id=?").bind(id).run();
+  const replay = await request(`v2/links/${id}/overrides`, body);
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toMatchObject({ replayed: true, revision: 1 });
+  const cached = await env.DB.prepare("SELECT effective FROM current_projections WHERE link_id=?").bind(id).first<string>("effective");
+  expect(JSON.parse(cached!).topics).toEqual(["llm"]);
+  expect(JSON.parse((await env.DB.prepare("SELECT topics FROM link_selections_v2 WHERE link_id=?").bind(id).first<string>("topics"))!)).toEqual(["llm"]);
+  const curation = await env.DB.prepare("SELECT curation FROM links WHERE id=?").bind(id).first<string>("curation");
+  expect(JSON.parse(curation!).topics).toEqual(["llm"]);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_events WHERE link_id=?").bind(id).first("n")).toBe(1);
+});
+
 
 it("allows only authenticated App curation reads and actions on the Android paths", async () => {
   const id = await createLink();

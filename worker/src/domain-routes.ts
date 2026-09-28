@@ -212,7 +212,10 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
     ? fail("operation_conflict", 409)
     : reply({ id, status: stored.outcome, revision: stored.content_revision, replayed });
   const existing = await receipt();
-  if (existing) return acknowledge(existing, true);
+  if (existing) {
+    if (existing.link_id === id && existing.request_hash === requestHash) await rebuildProjection(env, id);
+    return acknowledge(existing, true);
+  }
   const link = await env.DB.prepare(`SELECT id FROM links WHERE id=?`).bind(id).first();
   if (!link) return fail("not_found", 404);
   if(body.observations!==undefined){
@@ -664,6 +667,10 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
     if (!row) return null;
     const hash = row.payload_version === 0 ? await sha256Hex(canonicalJSON(legacyPayload)) : payloadHash;
     if (row.link_id !== id || row.payload_hash !== hash) return fail("operation_conflict", 409);
+    // An older successful operation may have committed before its separate
+    // projection update. Exact replay repairs the current projection without
+    // appending another decision or applying the old view over newer writes.
+    await rebuildProjection(env, id);
     const view = await computeEffective(env, id);
     return reply({ id, run_ids: parseJSON(row.run_ids ?? JSON.stringify([row.run_id]), []),
       run_references_complete: row.run_references_complete === 1, revision: row.expected_personal_revision,
@@ -810,7 +817,10 @@ async function recordOverride(
       revision: existing.revision, override: existing, replayed });
   };
   const existing = await stored();
-  if (existing) return acknowledge(existing, true);
+  if (existing) {
+    if (existing.link_id === id && existing.payload_hash === payloadHash) await rebuildProjection(env, id);
+    return acknowledge(existing, true);
+  }
   if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || Number(expectedRevision) < 0)) {
     return fail("invalid_expected_revision");
   }
@@ -853,6 +863,7 @@ async function recordOverride(
   const receipt = await stored();
   if (receipt) {
     if (updated.length > 0) await persistEffective(env, id, revision);
+    else if (receipt.link_id === id && receipt.payload_hash === payloadHash) await rebuildProjection(env, id);
     return acknowledge(receipt, updated.length === 0);
   }
   const current = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
