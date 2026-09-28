@@ -690,9 +690,9 @@ export async function refreshSource(request: Request, env: Env, id: number): Pro
   return response(link.content_revision);
 }
 
-// ackSourceRefresh consumes the one-shot refresh intent. It is called by the
-// processor after the fetch attempt, so a failed fetch cannot loop forever
-// while the old readable content and human data are kept (R2-06).
+// ackSourceRefresh consumes an unsuccessful one-shot fetch intent. A successful
+// source checkpoint clears that intent in its own write transaction, so a lost
+// ack response cannot schedule another paid retrieval (R2-06).
 export async function ackSourceRefresh(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body || !Number.isSafeInteger(body.epoch) || !["completed", "failed", "blocked"].includes(String(body.status))) {
@@ -919,11 +919,14 @@ export async function sourceRoute(request: Request, env: Env, id: number,
        AND a.stage='fetch' AND a.state='responded' AND a.http_status=200)
      AND NOT EXISTS (SELECT 1 FROM enrichment_provider_attempts a WHERE a.link_id=links.id
        AND a.lease_hash=? AND a.stage='fetch' AND a.state='reserved')))`;
+  // The successful source write also consumes the matching refresh intent.
+  // A newer refresh cannot be accepted during this live lease; both the source
+  // and this state transition roll back if the following source upsert fails.
   const results = await env.DB.batch([
     env.DB.prepare(`UPDATE links SET original_text=?,original_language=?,source_context_text=?,related_links=?,
       ai_title=NULL,translated_text=NULL,summary=NULL,images=CASE WHEN original_text IS ? THEN images ELSE '[]' END,
       enrichment_paid_uncertain=0,enrichment_paid_stage=NULL,
-      enrichment_updated_at=? WHERE ${paidGuard} RETURNING id`)
+      refresh_requested_at=NULL,enrichment_updated_at=? WHERE ${paidGuard} RETURNING id`)
       .bind(source.original_text, source.original_language || null, source.context_text, JSON.stringify(source.related_links), source.original_text, now, id, body.lease_token, now, leaseHash, leaseHash),
     env.DB.prepare(`INSERT INTO enrichment_sources(link_id,url,original_text,payload,fetched_at)
       SELECT id,url,?,?,? FROM links WHERE ${guard}

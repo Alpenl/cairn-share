@@ -44,7 +44,7 @@ it("requires the internal token for source lease capability negotiation", async 
   expect(valid.status).toBe(200);
   expect(await valid.json()).toEqual({ protocol: 1, lease_ms: 900_000,
     paid_stage_admission: true, provider_result_guard: true, completion_replay: true,
-    provider_attempt_ledger: true });
+    provider_attempt_ledger: true, refresh_source_checkpoint: true });
 });
 
 it("holds a possibly paid call after a short lease instead of automatically paying twice", async () => {

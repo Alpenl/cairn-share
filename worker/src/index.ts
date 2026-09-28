@@ -492,7 +492,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => json({ protocol: 1,
       lease_ms: ENRICHMENT_LEASE_MILLISECONDS, paid_stage_admission: true,
-      provider_result_guard: true, completion_replay: true, provider_attempt_ledger: true }));
+      provider_result_guard: true, completion_replay: true, provider_attempt_ledger: true,
+      refresh_source_checkpoint: true }));
   }
 
   if (path === "/api/enrichment/jobs") {

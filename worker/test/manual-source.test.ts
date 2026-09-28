@@ -156,6 +156,33 @@ it("sets a one-shot fetch intent only for an explicit refresh", async () => {
   expect(await retry.json()).toMatchObject({ id, refresh_epoch: 0 });
 });
 
+it("consumes a refresh intent in the successful source checkpoint transaction", async () => {
+  const id = await link();
+  expect((await call(`enrichment/jobs/${id}/refresh-source`, {})).status).toBe(200);
+  const claimed = await call(`enrichment/jobs/${id}/claim`, {});
+  expect(claimed.status).toBe(200);
+  const job = await claimed.json() as { lease_token: string; refresh_epoch: number };
+  expect(job.refresh_epoch).toBe(1);
+  const body = { lease_token: job.lease_token, source: { original_text: "new source text",
+    original_language: "en", context_text: "", related_links: [], image_urls: [], model: "fixture" } };
+  await env.DB.prepare(`CREATE TRIGGER reject_refresh_source BEFORE INSERT ON enrichment_sources
+    BEGIN SELECT RAISE(ABORT, 'synthetic source insert failure'); END`).run();
+  await expect(call(`enrichment/jobs/${id}/source`, body)).rejects.toThrow("synthetic source insert failure");
+  expect(await env.DB.prepare("SELECT original_text,refresh_requested_at FROM links WHERE id=?")
+    .bind(id).first()).toMatchObject({ original_text: null, refresh_requested_at: expect.any(String) });
+  await env.DB.prepare("DROP TRIGGER reject_refresh_source").run();
+  expect((await call(`enrichment/jobs/${id}/source`, body)).status).toBe(200);
+  expect(await env.DB.prepare("SELECT original_text,refresh_requested_at FROM links WHERE id=?")
+    .bind(id).first()).toEqual({ original_text: "new source text", refresh_requested_at: null });
+  // An identical checkpoint can be retried after its HTTP response is lost.
+  expect((await call(`enrichment/jobs/${id}/source`, body)).status).toBe(200);
+  await env.DB.prepare(`UPDATE links SET enrichment_status='pending',enrichment_lease_token=NULL,
+    enrichment_lease_until=NULL WHERE id=?`).bind(id).run();
+  const next = await call(`enrichment/jobs/${id}/claim`, {});
+  expect(next.status).toBe(200);
+  expect(await next.json()).toMatchObject({ id, refresh_epoch: 0 });
+});
+
 it("claims a newer manual source ahead of an older routine retrieval", async () => {
   const routine = await link("https://x.com/source/status/1");
   const manual = await link("https://x.com/source/status/2");

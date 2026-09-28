@@ -1,0 +1,9 @@
+# B01: atomic refresh intent consumption (2026-09-29)
+
+An explicit source refresh leaves `refresh_requested_at` set while a leased fetch is running. The successful `/api/enrichment/jobs/:id/source` checkpoint now clears that intent in the same D1 batch that stores the source. A failed source upsert rolls both changes back. A second refresh cannot be accepted while this lease is active, and a stale lease cannot pass the source write guard.
+
+The authenticated source-lease capability response advertises `refresh_source_checkpoint: true`. The Go consumer requires it before starting work, so the Worker must be deployed before the new Go build. Older Go builds can still send the separate success acknowledgement; it is harmless after the Worker has already cleared the intent. The unsuccessful-fetch acknowledgement remains a separate idempotent route.
+
+The Worker test injects a source upsert failure and checks that the old text and refresh intent survive. It then saves the source, repeats the same checkpoint as if the HTTP response was lost, and confirms the next claim has `refresh_epoch: 0`. The full Worker suite passed (38 files, 384 tests), as did TypeScript typecheck and Wrangler deployment dry-run. Real local Go-to-Worker/D1 integration also confirmed a lost checkpoint response, exact replay, lease expiry, and the next claim's zero refresh epoch. No remote D1 migration, deployment, or paid provider call was made.
+
+This fixes the successful source checkpoint boundary. An unsuccessful provider fetch still requires a separate acknowledgement; if that acknowledgement remains unavailable after a bounded exact replay, Go now returns the failure instead of reporting the refresh intent as handled. Broader process-restart, provider-billing, and production performance acceptance remain open.
