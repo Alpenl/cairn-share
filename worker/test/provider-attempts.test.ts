@@ -101,6 +101,35 @@ it("keeps a lost provider result charged across lease expiry and deletes private
     .bind(job.id).first<{n:number}>())?.n).toBe(0);
 });
 
+it("lets only the separate operator inspect one permit without exposing source or hashes", async () => {
+  const job = await fixture();
+  const body = first(job);
+  const path = `enrichment/provider-attempts/inspect?operation_key=${body.operation_key}`;
+  expect((await call("enrichment/provider-attempts/reserve", body)).status).toBe(200);
+  expect((await call(path, undefined, "app", "GET")).status).toBe(401);
+  expect((await call(path, undefined, "internal", "GET")).status).toBe(401);
+  expect((await call("enrichment/provider-attempts/inspect?operation_key=bad", undefined, "operator", "GET")).status).toBe(400);
+  expect((await call(path + "&state=all", undefined, "operator", "GET")).status).toBe(400);
+  expect((await call(`enrichment/provider-attempts/inspect?operation_key=${"f".repeat(64)}`,
+    undefined, "operator", "GET")).status).toBe(404);
+  const unknown = await call(path, undefined, "operator", "GET");
+  expect(unknown.status).toBe(200);
+  const unknownBody = await unknown.text();
+  expect(JSON.parse(unknownBody)).toMatchObject({ attempt: {
+    operation_key: body.operation_key, link_id: job.id, content_revision: job.content_revision,
+    state: "reserved", response_id: null, current_paid_unresolved: 1
+  } });
+  expect(unknownBody).not.toContain(job.lease_token);
+  expect(unknownBody).not.toContain(body.request_hash);
+  expect(unknownBody).not.toContain("https://x.com/");
+  expect((await call("enrichment/provider-attempts/settle", settle(body.operation_key))).status).toBe(200);
+  expect(await (await call(path, undefined, "operator", "GET")).json()).toMatchObject({ attempt: {
+    state: "responded", response_id: "resp_test", http_status: 200, input_tokens: 100
+  } });
+  expect((await call(`links/${job.id}`, undefined, "app", "DELETE")).status).toBe(204);
+  expect((await call(path, undefined, "operator", "GET")).status).toBe(404);
+});
+
 it("requires separate operator proof and an expired matching lease before releasing an unknown attempt", async () => {
   const job = await fixture();
   const body = first(job);
@@ -122,6 +151,10 @@ it("requires separate operator proof and an expired matching lease before releas
     .bind("2000-01-01T00:00:00.000Z", job.id).run();
   expect(await (await call(path, reconcile(body.operation_key), "operator")).json())
     .toEqual({ reconciled: true, status: "pending" });
+  const inspected = await call(`enrichment/provider-attempts/inspect?operation_key=${body.operation_key}`,
+    undefined, "operator", "GET");
+  expect(await inspected.json()).toMatchObject({ attempt: { state: "confirmed_not_billed",
+    evidence_kind: "provider_support", current_paid_unresolved: 0 } });
   expect(await env.DB.prepare(`SELECT enrichment_status,enrichment_paid_uncertain,enrichment_attempts,
     enrichment_lease_token FROM links WHERE id=?`).bind(job.id).first())
     .toMatchObject({ enrichment_status: "pending", enrichment_paid_uncertain: 0,

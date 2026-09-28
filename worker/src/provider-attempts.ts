@@ -306,13 +306,35 @@ async function summary(env: Env): Promise<Response> {
       reading: used?.reading ?? 0 } } });
 }
 
+// An operator can inspect one exact permit before querying a stored provider
+// response. Do not expose the prompt hash, lease hash or source bytes. A
+// reserved row without a response ID remains unassociated with any provider
+// response until independent evidence identifies it.
+async function inspect(env: Env, url: URL): Promise<Response> {
+  if (url.searchParams.size !== 1 || !hex(url.searchParams.get("operation_key"))) {
+    return fail("invalid_query");
+  }
+  const row = await env.DB.prepare(`SELECT a.operation_key,a.link_id,a.content_revision,a.stage,a.variant,
+    a.attempt_number,a.model,CASE WHEN r.operation_key IS NULL THEN a.state
+      ELSE 'confirmed_not_billed' END AS state,a.response_id,a.http_status,a.created_at,a.settled_at,
+    a.input_tokens,a.output_tokens,a.total_tokens,a.x_search_calls,a.cost_usd_ticks,
+    l.content_revision AS current_content_revision,
+    l.enrichment_paid_uncertain AS current_paid_unresolved,
+    r.evidence_kind,r.created_at AS reconciled_at
+    FROM enrichment_provider_attempts a LEFT JOIN links l ON l.id=a.link_id
+    LEFT JOIN enrichment_provider_reconciliations r ON r.operation_key=a.operation_key
+    WHERE a.operation_key=?`).bind(url.searchParams.get("operation_key")).first();
+  return row ? json({ attempt: row }) : fail("not_found", 404);
+}
+
 export async function providerAttemptRoute(request: Request, env: Env, path: string): Promise<Response | null> {
   const root = "/api/enrichment/provider-attempts";
-  if (path !== root && !["reserve", "settle", "authorize-fallback", "summary", "reconcile"].some((part) => path === `${root}/${part}`)) {
+  if (path !== root && !["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect"].some((part) => path === `${root}/${part}`)) {
     return null;
   }
   if (path === root) return request.method === "GET" ? list(env, new URL(request.url)) : fail("method_not_allowed", 405);
   if (path === `${root}/summary`) return request.method === "GET" ? summary(env) : fail("method_not_allowed", 405);
+  if (path === `${root}/inspect`) return request.method === "GET" ? inspect(env, new URL(request.url)) : fail("method_not_allowed", 405);
   if (request.method !== "POST") return fail("method_not_allowed", 405);
   if (path.endsWith("/reserve")) return reserve(request, env);
   if (path.endsWith("/settle")) return settle(request, env);
