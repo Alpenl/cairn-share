@@ -125,6 +125,8 @@ it("atomically deletes populated private tables, references, budgets and cached 
   const snapshot=await insert("evidence_snapshots",{link_id:id,content_revision:1,content_hash:"hash",payload:"{}",created_at:"t"});
   const snapshotID=Number(snapshot.meta.last_row_id);
   const run=await insert("classification_runs",{link_id:id,content_revision:1,spec_id:"s",spec_hash:"h",target_generation:0,requested_model:"m",policy_version:"p",answers:"{}",operation_key:"run",created_at:"t",evidence_snapshot_id:snapshotID});
+  await insert("classification_run_tombstones",{link_id:id,run_id:999,operation_key:"expired-run",payload_hash:"a".repeat(64),content_revision:1,spec_id:"s",spec_hash:"h",target_generation:0,requested_model:"m",resolved_model:"m",policy_version:"p",coverage:"complete",evidence_coverage:"",alias_drift:0,attempt:1,created_at:"t",expired_at:"t"});
+  await insert("classification_run_reuse_sources",{run_id:Number(run.meta.last_row_id),source_run_id:Number(run.meta.last_row_id)});
   await insert("classification_decisions",{link_id:id,run_id:Number(run.meta.last_row_id),content_revision:1,policy_version:"p",policy:"{}",automatic:"{}",operation_key:"decision",created_at:"t"});
   await insert("curation_overrides",{link_id:id,field:"topics",term:"llm",action:"accept",source:"human",revision:1,operation_key:"human",created_at:"t"});
   await insert("curation_events",{link_id:id,kind:"why",payload:'{"why":"private"}',revision:1,operation_key:"event",created_at:"t"});
@@ -143,7 +145,7 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("rerank_cache",{cache_key:"private-rank",owner_token:"owner",status:"pending",request_json:"private query",scope_hash:"scope",spec_hash:"spec",model:"model",items:"[]",created_at:1,expires_at:2});
   await insert("rerank_cache_links",{cache_key:"private-rank",link_id:id});
   await insert("entity_cache",{cache_key:"private-entity",link_id:id,evidence_snapshot_id:snapshotID,content_revision:1,content_hash:"hash",source_links:"[]",owner_token:"owner",status:"completed",request_json:"private entity material",candidates:"[]",spec_hash:"spec",answers:"{}",created_at:1,expires_at:Date.now()+86400000});
-  const tables=["entity_cache","enrichment_sources","classification_jobs","evidence_snapshots","classification_runs","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links"];
+  const tables=["entity_cache","enrichment_sources","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links"];
   const schema=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_*'").all<{name:string}>();
   const linked:string[]=[];
   for(const {name} of schema.results) {
@@ -153,12 +155,14 @@ it("atomically deletes populated private tables, references, budgets and cached 
   expect(linked.sort()).toEqual([...tables].sort());
   for(const table of tables) expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first("n"),table).toBe(1);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_decision_runs").first("n")).toBe(1);
+  expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_run_reuse_sources").first("n")).toBe(1);
   const before=await request(`links/${id}`);expect(before.status).toBe(200);expect(before.headers.get("Cache-Control")).toBe("private, no-store");
   await request("links");
   const generation=await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value");
   expect((await request(`links/${id}`,"DELETE")).status).toBe(204);
   for(const table of tables) expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first("n"),table).toBe(0);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_decision_runs").first("n")).toBe(0);
+  expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_run_reuse_sources").first("n")).toBe(0);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM budget_ledger WHERE link_id IS NULL").first("n")).toBe(1);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM rerank_cache").first("n")).toBe(0);
   expect(await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value")).toBeGreaterThan(generation!);

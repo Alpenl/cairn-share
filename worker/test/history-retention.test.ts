@@ -9,13 +9,21 @@ const RECENT = "2026-09-01T00:00:00.000Z";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 
-async function link(): Promise<number> {
+async function link(suffix = "history-retention"): Promise<number> {
   const response = await worker.fetch(new Request("https://test.example/api/links", {
     method: "POST", headers: { Authorization: "Bearer app", "Content-Type": "application/json" },
-    body: JSON.stringify({ url: "https://example.com/history-retention" })
+    body: JSON.stringify({ url: `https://example.com/${suffix}` })
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
   expect(response.status).toBe(201);
   return (await response.json() as { id: number }).id;
+}
+
+async function internal(path: string, method = "GET", body?: unknown): Promise<Response> {
+  return worker.fetch(new Request(`https://test.example/api/${path}`, {
+    method, headers: { Authorization: "Bearer internal", "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES,
+    CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 }
 
 async function count(table: string): Promise<number> {
@@ -119,4 +127,116 @@ it("runs the bounded live-history cleanup from the scheduled Worker entry point"
   await worker.scheduled(controller, { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES,
     CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
   expect(await count("curation_events")).toBe(0);
+});
+
+it("compacts an unreferenced old run, releases its snapshot, and rejects an expired operation retry", async () => {
+  const id = await link();
+  await env.DB.prepare(`INSERT INTO question_specs(spec_id,spec_hash,spec_version,payload,requested_model,created_at)
+    VALUES ('retention-spec','retention-hash',1,'{"questions":[]}','model',?)`).bind(OLD).run();
+  const body = { operation_key: "retention-run", content_revision: 1, spec_id: "retention-spec",
+    spec_hash: "retention-hash", target_generation: 0, policy_version: "policy", answers: { private: "answer" } };
+  const first = await internal(`v2/links/${id}/runs`, "POST", body);
+  expect(first.status).toBe(200);
+  const runID = (await first.json() as { run: { id: number } }).run.id;
+  const snapshot = await env.DB.prepare(`INSERT INTO evidence_snapshots(link_id,content_revision,content_hash,payload,created_at)
+    VALUES (? ,1,'old-hash','{"blocks":["private"]}',?) RETURNING id`).bind(id, OLD).first<number>("id");
+  await env.DB.prepare("UPDATE classification_runs SET created_at=?,evidence_snapshot_id=?,raw_judgments=? WHERE id=?")
+    .bind(OLD, snapshot, '{"wire_state":"private material"}', runID).run();
+  await env.DB.prepare("UPDATE links SET content_revision=2 WHERE id=?").bind(id).run();
+  expect(await pruneLiveHistory({ DB: env.DB }, NOW)).toMatchObject({ runs: 1, snapshots: 1 });
+  expect(await count("classification_runs")).toBe(0);
+  const tombstone = await env.DB.prepare(`SELECT run_id,operation_key,expired_at,payload_hash
+    FROM classification_run_tombstones WHERE run_id=?`).bind(runID).first<{
+      run_id: number; operation_key: string; expired_at: string; payload_hash: string;
+    }>();
+  expect(tombstone).toMatchObject({ run_id: runID, operation_key: "retention-run" });
+  expect(tombstone?.expired_at).toBeTruthy();
+  expect(tombstone?.payload_hash).toHaveLength(64);
+  expect((await internal(`v2/links/${id}/runs`, "POST", body)).status).toBe(410);
+  expect((await internal(`v2/links/${id}/runs`, "POST", { ...body, answers: { private: "changed" } })).status).toBe(409);
+  expect(await count("classification_runs")).toBe(0);
+  expect(await count("evidence_snapshots")).toBe(0);
+  const listed = await (await internal(`v2/links/${id}/runs`)).json() as { runs: Array<{ status: string; raw_judgments: unknown }> };
+  expect(listed.runs[0]).toMatchObject({ status: "expired", raw_judgments: null });
+  await expect(env.DB.prepare(`INSERT INTO classification_runs(link_id,content_revision,spec_id,spec_hash,
+    target_generation,requested_model,policy_version,answers,operation_key,created_at)
+    VALUES (?,2,'spec','hash',0,'model','policy','{}','retention-run',?)`)
+    .bind(id, RECENT).run()).rejects.toThrow("run_operation_expired");
+});
+
+it("backfills reuse references before old runs may expire", async () => {
+  const id = await link();
+  await env.DB.prepare("UPDATE links SET content_revision=3 WHERE id=?").bind(id).run();
+  const source = await env.DB.prepare(`INSERT INTO classification_runs(link_id,content_revision,spec_id,spec_hash,
+    target_generation,requested_model,policy_version,answers,operation_key,created_at,payload_hash,raw_judgments)
+    VALUES (?,1,'spec','hash',0,'model','policy','{}','reuse-source',?,?,'{"judgments":{}}') RETURNING id`)
+    .bind(id, OLD, "a".repeat(64)).first<number>("id");
+  const child = await env.DB.prepare(`INSERT INTO classification_runs(link_id,content_revision,spec_id,spec_hash,
+    target_generation,requested_model,policy_version,answers,operation_key,created_at,payload_hash,raw_judgments)
+    VALUES (?,2,'spec','hash',0,'model','policy','{}','reuse-child',?,?,?) RETURNING id`)
+    .bind(id, OLD, "b".repeat(64), JSON.stringify({ reused_from: { question: source } })).first<number>("id");
+  await env.DB.prepare(`INSERT INTO classification_decisions(link_id,run_id,content_revision,policy_version,
+    policy,automatic,operation_key,created_at) VALUES (?,?,2,'policy','{}','{}','keep-child',?)`)
+    .bind(id, child, OLD).run();
+  await env.DB.prepare("DELETE FROM classification_run_reuse_sources WHERE run_id=?").bind(child).run();
+  await env.DB.prepare("UPDATE privacy_maintenance_state SET cursor='0' WHERE key='run_reuse_backfill'").run();
+  expect(await pruneLiveHistory({ DB: env.DB }, NOW)).toMatchObject({ runs: 0 });
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM classification_run_reuse_sources WHERE source_run_id=?")
+    .bind(source).first("n")).toBe(1);
+  expect(await env.DB.prepare("SELECT status FROM classification_runs WHERE id=?").bind(source).first("status"))
+    .toBe("succeeded");
+  expect(await env.DB.prepare("SELECT status FROM classification_runs WHERE id=?").bind(child).first("status"))
+    .toBe("succeeded");
+});
+
+it("waits for every 100-row reuse backfill page before compaction starts", async () => {
+  const id = await link();
+  await env.DB.prepare("UPDATE links SET content_revision=2 WHERE id=?").bind(id).run();
+  await env.DB.prepare(`WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<101)
+    INSERT INTO classification_runs(link_id,content_revision,spec_id,spec_hash,target_generation,
+      requested_model,policy_version,answers,operation_key,created_at,payload_hash)
+    SELECT ?,1,'spec','hash',0,'model','policy','{}','old-run-'||x,?,
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' FROM n`).bind(id, OLD).run();
+  expect(await pruneLiveHistory({ DB: env.DB }, NOW)).toMatchObject({ runs: 0 });
+  expect(await env.DB.prepare("SELECT cursor FROM privacy_maintenance_state WHERE key='run_reuse_backfill'")
+    .first("cursor")).not.toBe("done");
+  expect(await pruneLiveHistory({ DB: env.DB }, NOW)).toMatchObject({ runs: 100 });
+  expect(await env.DB.prepare("SELECT cursor FROM privacy_maintenance_state WHERE key='run_reuse_backfill'")
+    .first("cursor")).toBe("done");
+  expect(await pruneLiveHistory({ DB: env.DB }, NOW)).toMatchObject({ runs: 1 });
+});
+
+it("keeps the latest run for the current content revision and every decision source", async () => {
+  const id = await link();
+  const latest = await env.DB.prepare(`INSERT INTO classification_runs(link_id,content_revision,spec_id,spec_hash,
+    target_generation,requested_model,policy_version,answers,operation_key,created_at,payload_hash)
+    VALUES (?,1,'spec','hash',0,'model','policy','{}','current-run',?,?) RETURNING id`)
+    .bind(id, OLD, "a".repeat(64)).first<number>("id");
+  expect(await pruneLiveHistory({ DB: env.DB }, NOW)).toMatchObject({ runs: 0 });
+  await env.DB.prepare("UPDATE links SET content_revision=2 WHERE id=?").bind(id).run();
+  await env.DB.prepare(`INSERT INTO classification_decisions(link_id,run_id,content_revision,policy_version,
+    policy,automatic,operation_key,created_at) VALUES (?,?,1,'policy','{}','{}','pinned-decision',?)`)
+    .bind(id, latest, OLD).run();
+  expect(await pruneLiveHistory({ DB: env.DB }, NOW)).toMatchObject({ runs: 0 });
+  expect(await count("classification_run_tombstones")).toBe(0);
+});
+
+it("rolls back a run tombstone and its cursor when deletion fails", async () => {
+  const id = await link();
+  await env.DB.prepare("UPDATE links SET content_revision=2 WHERE id=?").bind(id).run();
+  await env.DB.prepare(`INSERT INTO classification_runs(link_id,content_revision,spec_id,spec_hash,
+    target_generation,requested_model,policy_version,answers,operation_key,created_at,payload_hash)
+    VALUES (?,1,'spec','hash',0,'model','policy','{}','failed-prune',?,?)`)
+    .bind(id, OLD, "a".repeat(64)).run();
+  await env.DB.prepare(`CREATE TRIGGER reject_run_delete BEFORE DELETE ON classification_runs
+    BEGIN SELECT RAISE(ABORT,'synthetic run deletion failure'); END`).run();
+  await expect(pruneLiveHistory({ DB: env.DB }, NOW)).rejects.toThrow("synthetic run deletion failure");
+  expect(await count("classification_runs")).toBe(1);
+  expect(await count("classification_run_tombstones")).toBe(0);
+  expect(await count("privacy_maintenance_state")).toBeGreaterThan(0);
+  expect(await env.DB.prepare("SELECT cursor FROM privacy_maintenance_state WHERE key='live_runs'").first("cursor"))
+    .toBeNull();
+  await env.DB.prepare("DROP TRIGGER reject_run_delete").run();
+  expect(await pruneLiveHistory({ DB: env.DB }, NOW)).toMatchObject({ runs: 1 });
+  expect(await count("classification_run_tombstones")).toBe(1);
 });

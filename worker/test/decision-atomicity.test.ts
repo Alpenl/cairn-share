@@ -267,7 +267,20 @@ it("R3-12: malformed and unbounded references are rejected before any write", as
 it("R3-12: migration preserves known legacy references without inventing a complete set", async () => {
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.slice(0, env.TEST_MIGRATIONS.findIndex(m => m.name.startsWith("0021_"))));
-  const { id, ids, body } = await setup();
+  // Seed the historical schema directly. The current HTTP writer requires
+  // newer migrations, but this fixture must represent data written before 0021.
+  const created = await call("links", { url: "https://x.com/fixture/status/912" }, env.DB, "POST", "app");
+  const { id } = await created.json() as { id: number };
+  const ids: number[] = [];
+  for (const key of ["legacy-run-1", "legacy-run-2"]) {
+    const row = await env.DB.prepare(`INSERT INTO classification_runs(link_id,content_revision,spec_id,spec_hash,
+      target_generation,requested_model,resolved_model,policy_version,answers,operation_key,created_at)
+      VALUES (?,1,'legacy-spec','legacy-hash',0,'model','model','legacy-policy','{}',?,'2026-09-22') RETURNING id`)
+      .bind(id, key).first<number>("id");
+    ids.push(row!);
+  }
+  const body = { operation_key: "decision-1", run_ids: ids, content_revision: 1, policy_version: "legacy-policy",
+    policy: {}, automatic: EMPTY_AUTOMATIC, spec_id: "legacy-spec" };
   const legacyHash = await digest(canonicalJSON({ link_id: id, run_ids: ids, policy_version: body.policy_version,
     policy: body.policy, automatic: body.automatic, spec_id: body.spec_id, requested_model: null }));
   await env.DB.prepare(`INSERT INTO classification_decisions(link_id,run_id,content_revision,policy_version,policy,automatic,operation_key,created_at,payload_hash)

@@ -494,7 +494,13 @@ async function listRuns(env: Env, id: number): Promise<Response> {
     `SELECT id, content_revision, spec_id, spec_hash, target_generation, requested_model, resolved_model,
             policy_version, policy, answers, usage, attempt, operation_key, coverage, evidence_coverage,
             alias_drift, status, created_at, raw_judgments, evidence_snapshot_id, source_hash
-     FROM classification_runs WHERE link_id = ? ORDER BY id`).bind(id).all<RunRow>();
+     FROM classification_runs WHERE link_id = ?
+     UNION ALL
+     SELECT run_id AS id, content_revision, spec_id, spec_hash, target_generation, requested_model, resolved_model,
+            policy_version, '{}' AS policy, '{}' AS answers, '{}' AS usage, attempt, operation_key, coverage,
+            evidence_coverage, alias_drift, 'expired' AS status, created_at, NULL AS raw_judgments,
+            NULL AS evidence_snapshot_id, source_hash
+     FROM classification_run_tombstones WHERE link_id = ? ORDER BY id`).bind(id, id).all<RunRow>();
   return reply({ runs: rows.results.map(runView) });
 }
 
@@ -511,10 +517,6 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
   if (body.policy !== undefined && (typeof body.policy !== "object" || body.policy === null || Array.isArray(body.policy))) {
     return fail("invalid_run");
   }
-  if (!await validRunProvenance(env, id, body.raw_judgments, {
-    specId: String(body.spec_id), specHash: String(body.spec_hash), requestedModel: String(body.requested_model ?? ""),
-    resolvedModel: String(body.resolved_model ?? ""), coverage: body.coverage === "partial" ? "partial" : "complete", answers: body.answers as Record<string, unknown>, usage: body.usage ?? {}
-  })) return fail("invalid_run_provenance");
   const payloadHash = await sha256Hex(canonicalJSON({
     ...(body.raw_judgments === undefined ? {} : { raw_judgments: body.raw_judgments }),
     ...(typeof body.raw_judgments === "object" && body.raw_judgments !== null && "metadata_version" in body.raw_judgments ? { policy: body.policy ?? {}, usage: body.usage ?? {} } : {}),
@@ -525,12 +527,23 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
     requested_model: body.requested_model ?? null, resolved_model: body.resolved_model ?? null,
     coverage: body.coverage ?? "complete"
   }));
-  const existing = await env.DB.prepare(`SELECT id, link_id, payload_hash, coverage, status, created_at FROM classification_runs WHERE operation_key = ?`)
-    .bind(operationKey).first<{ id: number; link_id: number; payload_hash: string; coverage: string; status: string; created_at: string }>();
+  const existing = await env.DB.prepare(`SELECT id, link_id, payload_hash, coverage, status, created_at, 0 AS expired
+    FROM classification_runs WHERE operation_key = ?
+    UNION ALL
+    SELECT run_id AS id, link_id, payload_hash, coverage, 'expired' AS status, created_at, 1 AS expired
+    FROM classification_run_tombstones WHERE operation_key = ? LIMIT 1`)
+    .bind(operationKey, operationKey).first<{ id: number; link_id: number; payload_hash: string; coverage: string; status: string; created_at: string; expired: number }>();
   if (existing) {
     if (existing.link_id !== id || existing.payload_hash !== payloadHash) return fail("operation_conflict", 409);
+    if (existing.expired === 1) return fail("run_expired", 410, { run_id: existing.id });
     return reply({ id, run: { id: existing.id, coverage: existing.coverage, status: existing.status, created_at: existing.created_at }, replayed: true });
   }
+  // A known operation can be acknowledged without revalidating an evidence
+  // snapshot that may have aged out. A new run still needs full provenance.
+  if (!await validRunProvenance(env, id, body.raw_judgments, {
+    specId: String(body.spec_id), specHash: String(body.spec_hash), requestedModel: String(body.requested_model ?? ""),
+    resolvedModel: String(body.resolved_model ?? ""), coverage: body.coverage === "partial" ? "partial" : "complete", answers: body.answers as Record<string, unknown>, usage: body.usage ?? {}
+  })) return fail("invalid_run_provenance");
   const link = await env.DB.prepare(`SELECT content_revision FROM links WHERE id = ?`).bind(id)
     .first<{ content_revision: number }>();
   if (!link) return fail("not_found", 404);
