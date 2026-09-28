@@ -4,6 +4,8 @@ Worker 新增仅供 Enricher token 读取的 `GET /api/enrichment/overview`。�
 
 概览使用 generation 键和 15 分钟的**内部** Cache API 保留时间；每个请求仍读取 generation，写入使下一次请求立即换键。普通列表、详情的内部保留时间仍是 15 秒。所有私人响应对客户端继续返回 `private, no-store`。15 分钟不是最久陈旧时间：缓存可能提前淘汰，写入时旧键虽还存留却不可再命中。
 
+Worker 诊断模式的请求事件给概览固定路由名，并记录 `HIT`/`MISS`/`BYPASS`。缓存未命中时，同一次聚合查询读取 D1 `meta`，记录 `rows_read`/`rows_written`，明确 `scope=aggregate_only`；命中时标 `d1_stats=unavailable`，因为 generation 的单行读取仍用 `.first()`，没有元数据。普通日志关闭不因这些字段增加平台事件。Cache API 的 `match()` 对缺失和过期都返回 `undefined`，不能从请求事件精确还原淘汰原因；真实命中率必须在各缓存位置的同负载观察中核对。[Cloudflare Cache API 文档](https://developers.cloudflare.com/workers/runtime-apis/cache/)。
+
 本地 D1 的 2,000 条样本：概览缓存未命中执行一次聚合，`rows_read=4,001`；旧六个 `COUNT` 合计 `rows_read=6,001`。连续 21 次概览请求只执行一次聚合，其余为缓存命中。按无写入、缓存未被淘汰、单个缓存位置及每 30 秒轮询做模型估算，一小时 120 次请求需要约 4 次聚合和 120 次 generation 读取，即约 16,124 行；旧方案约 720,120 行。该估算只说明设计有达到十分之一目标的空间，不能代替同负载实测；频繁写入、多位置缓存、提前淘汰都可能改变结果。仍需报告生产等价负载的 `rows_read`、命中率、p95、Worker 内存和八小时浏览器缓存。
 
-本轮尚未发布的 `0012` 迁移删除无使用者的 `search_text` 列、索引、回填及维护触发器；新迁移测试检查最终 schema 中不存在这些对象。本地迁移、六视图对旧列表逐项比对、整理/URL 写入后的缓存失效、内部 900 秒与客户端 `no-store` 均已验证。Worker 完整测试 35 文件、359 项，类型检查和 Wrangler dry-run 通过；本地 Wrangler 实际应用迁移并由 Go 经 HTTP 验证概览。远端 D1 未迁移，Worker 未部署，性能目标未签收。
+本轮尚未发布的 `0012` 迁移删除无使用者的 `search_text` 列、索引、回填及维护触发器；新迁移测试检查最终 schema 中不存在这些对象。本地迁移、六视图对旧列表逐项比对、整理/URL 写入后的缓存失效、内部 900 秒与客户端 `no-store` 均已验证。Worker 完整测试 35 文件、360 项，类型检查和 Wrangler dry-run 通过；本地 Wrangler 实际应用迁移并由 Go 经 HTTP 验证概览。远端 D1 未迁移，Worker 未部署，性能目标未签收。

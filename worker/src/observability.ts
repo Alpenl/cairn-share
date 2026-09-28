@@ -138,7 +138,8 @@ export async function publishPolicy(request: Request, db: D1Database): Promise<R
 }
 
 function routeTemplate(path: string): string {
-  if (path === "/api/links" || path === "/api/enrichment/jobs" || path === "/health") return path;
+  if (path === "/api/links" || path === "/api/enrichment/jobs" ||
+    path === "/api/enrichment/overview" || path === "/health") return path;
   if (path === "/api/enrichment/provider-attempts") return path;
   if (["reserve", "settle", "authorize-fallback", "summary", "reconcile"].some((action) =>
     path === `/api/enrichment/provider-attempts/${action}`)) return path;
@@ -151,7 +152,15 @@ function routeTemplate(path: string): string {
   return "other";
 }
 
-export function emitRequest(policy: Policy, request: Request, response: Response | null, durationMS: number): void {
+export interface RequestD1Stats {
+  query: "overview_aggregate";
+  rows_read: number;
+  rows_written: number;
+  scope: "aggregate_only";
+}
+
+export function emitRequest(policy: Policy, request: Request, response: Response | null, durationMS: number,
+  d1Stats?: RequestD1Stats): void {
   const mode = effective(policy);
   if (mode === "off" || (mode === "basic" && response !== null && response.status < 400 && request.method === "GET")) return;
   const path = new URL(request.url).pathname;
@@ -172,12 +181,16 @@ export function emitRequest(policy: Policy, request: Request, response: Response
   const method = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(request.method) ? request.method : "OTHER";
   const contentLength = response?.headers.get("content-length");
   const responseBytes = contentLength && /^\d{1,12}$/.test(contentLength) ? Number(contentLength) : null;
+  const headerCacheState = response?.headers.get("X-Cairn-Cache");
+  const cacheState = headerCacheState === "HIT" || headerCacheState === "MISS" || headerCacheState === "BYPASS"
+    ? headerCacheState : null;
   // Platform logs cannot promise deletion by bookmark. Never include raw URL,
   // IDs, request/response bodies, SQL text, tokens or trace identifiers here.
   console.log(JSON.stringify({ schema: 1, kind: "worker_request", config_version: policy.version,
     route: routeTemplate(path), method, status: response?.status ?? null,
     error_type: response === null ? "unhandled" : response.status >= 400 ? `http_${response.status}` : null,
-    duration_ms: Math.round(durationMS), response_bytes: responseBytes, d1_stats: "unavailable" }));
+    duration_ms: Math.round(durationMS), response_bytes: responseBytes, cache_state: cacheState,
+    d1_stats: d1Stats ?? "unavailable" }));
 }
 
 export function resetObservabilityCacheForTest(): void {

@@ -119,4 +119,18 @@ describe("application observability control", () => {
       method: "POST", status: 400 });
     expect(JSON.stringify(event)).not.toMatch(/private|prompt|operation_key/);
   });
+
+  it("records overview cache state and scoped D1 cost in diagnostics", async () => {
+    const until = Date.now() + 60_000;
+    expect((await publish({ version: 0, logs: "diagnostic", fallback_logs: "off", diagnostic_until: until })).status).toBe(200);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    expect((await request("/api/enrichment/overview?", { method: "GET" })).status).toBe(200);
+    const miss = JSON.parse(String(log.mock.calls[0][0]));
+    expect(miss).toMatchObject({ route: "/api/enrichment/overview", cache_state: "MISS",
+      d1_stats: { query: "overview_aggregate", scope: "aggregate_only", rows_written: 0 } });
+    expect(miss.d1_stats.rows_read).toBeGreaterThanOrEqual(0);
+    expect((await request("/api/enrichment/overview", { method: "GET" })).status).toBe(200);
+    const hit = JSON.parse(String(log.mock.calls[1][0]));
+    expect(hit).toMatchObject({ route: "/api/enrichment/overview", cache_state: "HIT", d1_stats: "unavailable" });
+  });
 });

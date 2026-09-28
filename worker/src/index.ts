@@ -6,7 +6,7 @@ import { computeEffective, domainRoute, persistSelectionOverrides } from "./doma
 import { applyV1Write } from "./taxonomy-v2";
 import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
 import { readSelectionSnapshot } from "./selection-state";
-import { emitRequest, policyReadAvailable, publishPolicy, requestPolicy } from "./observability";
+import { emitRequest, policyReadAvailable, publishPolicy, requestPolicy, type RequestD1Stats } from "./observability";
 import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
 
 export interface Env {
@@ -231,6 +231,7 @@ class TimingCollector {
   private readonly started = performance.now();
   private readonly entries: Array<{ name: string; duration: number }> = [];
   private cacheState: CacheState | null = null;
+  private d1Stats: RequestD1Stats | undefined;
 
   async measure<T>(name: string, operation: () => Promise<T>): Promise<T> {
     const started = performance.now();
@@ -243,6 +244,15 @@ class TimingCollector {
 
   setCacheState(cacheState: CacheState): void {
     this.cacheState = cacheState;
+  }
+
+  setD1Stats(stats: RequestD1Stats): void {
+    if (Number.isSafeInteger(stats.rows_read) && stats.rows_read >= 0 &&
+      Number.isSafeInteger(stats.rows_written) && stats.rows_written >= 0) this.d1Stats = stats;
+  }
+
+  requestD1Stats(): RequestD1Stats | undefined {
+    return this.d1Stats;
   }
 
   headerValue(): string {
@@ -278,7 +288,7 @@ export default {
       else if (policy.version === -1) response.headers.set("X-Cairn-Observability-Status", "unconfigured");
       return response;
     } finally {
-      try { emitRequest(policy, request, response, performance.now() - started); } catch { /* optional logs never fail business */ }
+      try { emitRequest(policy, request, response, performance.now() - started, timing.requestD1Stats()); } catch { /* optional logs never fail business */ }
     }
   }
 };
@@ -925,8 +935,11 @@ async function getEnrichmentOverview(request: Request, url: URL, env: Env, timin
       )
       SELECT * FROM view_counts CROSS JOIN status_counts
     `).bind(...bindings);
-    const row = await timing.measure("db", () => statement.first<EnrichmentOverviewRow>());
-    if (row === null) throw new Error("overview aggregate returned no row");
+    const result = await timing.measure("db", () => statement.all<EnrichmentOverviewRow>());
+    const row = result.results[0];
+    if (row === undefined) throw new Error("overview aggregate returned no row");
+    timing.setD1Stats({ query: "overview_aggregate", rows_read: result.meta.rows_read,
+      rows_written: result.meta.rows_written, scope: "aggregate_only" });
     const counts = mapEnrichmentCounts(row);
     return { version: 1, views: {
       all: counts.total, inbox: row.view_inbox, kept: row.view_kept,
