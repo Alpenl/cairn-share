@@ -63,6 +63,71 @@ it("grants one durable permit, rejects replay and binds to the current lease and
   expect(row!.lease_hash).not.toBe(job.lease_token);
 });
 
+it("separates durable reservation from reported provider settlement in safe events", async () => {
+  const job = await fixture();
+  const body = first(job);
+  expect((await call("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const reservePath = "enrichment/provider-attempts/reserve";
+    const settlePath = "enrichment/provider-attempts/settle";
+    expect(await (await call(reservePath, body)).json()).toEqual({ granted: true, reason: "reserved" });
+    expect(await (await call(reservePath, body)).json()).toEqual({ granted: false, reason: "already_reserved" });
+    expect((await call(reservePath, { ...body, request_hash: "c".repeat(64) })).status).toBe(409);
+    expect((await call(reservePath, { ...body, operation_key: "e".repeat(64) })).status).toBe(409);
+    expect((await call(reservePath, { ...body, operation_key: "invalid" })).status).toBe(400);
+    expect((await call(settlePath, settle(body.operation_key))).status).toBe(200);
+    expect((await call(settlePath, settle(body.operation_key))).status).toBe(200);
+    expect((await call(settlePath, settle(body.operation_key, 502))).status).toBe(409);
+    const canary = { operation_key: "f".repeat(64), request_hash: "d".repeat(64),
+      model: "grok-test", stage: "canary", variant: "canary", attempt_number: 1 };
+    expect((await call(reservePath, canary)).status).toBe(200);
+    expect((await call(settlePath, { operation_key: canary.operation_key, http_status: 502,
+      response_id: null, input_tokens: null, output_tokens: null, total_tokens: null,
+      x_search_calls: null, cost_usd_ticks: null })).status).toBe(200);
+    await env.DB.prepare("UPDATE enrichment_provider_daily_usage SET total=? WHERE day=?")
+      .bind(500, new Date().toISOString().slice(0, 10)).run();
+    expect((await call(reservePath, { ...canary, operation_key: "8".repeat(64) })).status).toBe(429);
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(entries.filter((entry) => entry.kind === "provider_attempt")).toEqual([
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",
+        stage: "fetch", outcome: "reserved", status: 200 },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",
+        stage: "fetch", outcome: "already_reserved", status: 200 },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",
+        stage: "fetch", outcome: "rejected", status: 409, reason: "operation_conflict" },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",
+        stage: "fetch", outcome: "rejected", status: 409, reason: "lease_conflict" },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",
+        stage: "unknown", outcome: "rejected", status: 400, reason: "invalid_request" },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "settle",
+        stage: "fetch", outcome: "responded", status: 200,
+        provider_status: 200, response_id_present: true },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "settle",
+        stage: "fetch", outcome: "replay", status: 200,
+        provider_status: 200, response_id_present: true },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "settle",
+        stage: "fetch", outcome: "rejected", status: 409, reason: "operation_conflict" },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",
+        stage: "canary", outcome: "reserved", status: 200 },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "settle",
+        stage: "canary", outcome: "responded", status: 200,
+        provider_status: 502, response_id_present: false },
+      { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",
+        stage: "canary", outcome: "rejected", status: 429, reason: "budget_exhausted" }
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(body.operation_key);
+    expect(JSON.stringify(entries)).not.toContain(body.request_hash);
+    expect(JSON.stringify(entries)).not.toContain(job.lease_token);
+    expect((await call("internal/observability", { version: 2, logs: "off" })).status).toBe(200);
+    const count = log.mock.calls.length;
+    expect((await call(settlePath, settle(body.operation_key))).status).toBe(200);
+    expect(log.mock.calls.length).toBe(count);
+  } finally {
+    log.mockRestore();
+  }
+});
+
 it("requires a settled first response and explicit fallback authorization before a second POST", async () => {
   const job = await fixture();
   const initial = first(job);

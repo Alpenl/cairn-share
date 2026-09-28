@@ -185,7 +185,13 @@ export type WorkerBusinessEvent =
   | { kind: "manual_request"; action: "source" | "process";
       outcome: "accepted" | "replay" | "rejected" | "failed"; status: number }
   | { kind: "source_claim"; origin: "scheduled" | "by_id";
-      outcome: "claimed"; status: 200 };
+      outcome: "claimed"; status: 200 }
+  | { kind: "provider_attempt"; action: "reserve" | "settle";
+      stage: "fetch" | "reading" | "canary" | "unknown";
+      outcome: "reserved" | "already_reserved" | "responded" | "replay" | "rejected" | "failed";
+      status: number; provider_status?: number; response_id_present?: boolean;
+      reason?: "operation_conflict" | "budget_exhausted" | "lease_conflict" | "invalid_request" |
+        "not_found" | "unclassified" };
 
 function takeLogSlot(mode: Exclude<LogMode, "off">): boolean {
   const minute = Math.floor(Date.now() / 60_000);

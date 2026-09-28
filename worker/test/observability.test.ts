@@ -153,11 +153,14 @@ describe("application observability control", () => {
       method: "POST", body: JSON.stringify({ secret: "private-prompt" })
     });
     expect(response.status).toBe(400);
-    expect(log).toHaveBeenCalledOnce();
-    const event = JSON.parse(String(log.mock.calls[0][0]));
+    expect(log).toHaveBeenCalledTimes(2);
+    const attempt = JSON.parse(String(log.mock.calls[0][0]));
+    expect(attempt).toMatchObject({ kind: "provider_attempt", action: "reserve",
+      stage: "unknown", outcome: "rejected", status: 400, reason: "invalid_request" });
+    const event = JSON.parse(String(log.mock.calls[1][0]));
     expect(event).toMatchObject({ route: "/api/enrichment/provider-attempts/reserve",
       method: "POST", status: 400 });
-    expect(JSON.stringify(event)).not.toMatch(/private|prompt|operation_key/);
+    expect(JSON.stringify([attempt, event])).not.toMatch(/private|prompt|operation_key/);
   });
 
   it("records overview cache state and scoped D1 cost in diagnostics", async () => {

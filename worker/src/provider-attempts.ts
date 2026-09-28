@@ -1,5 +1,5 @@
 import type { Env } from "./index";
-import type { ProviderRecoveryEvent } from "./observability";
+import type { ProviderRecoveryEvent, WorkerBusinessEvent } from "./observability";
 import { canonicalJSON, contentHash, objectivePayload, type EvidenceSnapshot } from "./domain";
 import { validEnrichmentSource } from "./source-validation";
 
@@ -70,15 +70,24 @@ function validReserve(value: Record<string, unknown>): value is Reserve {
     (value.stage === "reading" && value.variant === "reading" && value.attempt_number === 1);
 }
 
-async function reserve(request: Request, env: Env): Promise<Response> {
+async function reserve(request: Request, env: Env,
+  onResolved: (event: WorkerBusinessEvent) => void): Promise<Response> {
   const value = await readBody(request);
   if (value instanceof Response) return value;
   if (!validReserve(value)) return fail("invalid_reservation");
   const payloadHash = await digest(canonicalJSON(value));
   const old = await env.DB.prepare("SELECT reservation_hash FROM enrichment_provider_attempts WHERE operation_key=?")
     .bind(value.operation_key).first<{ reservation_hash: string }>();
-  if (old) return old.reservation_hash === payloadHash
-    ? json({ granted: false, reason: "already_reserved" }) : fail("operation_conflict", 409);
+  if (old) {
+    if (old.reservation_hash === payloadHash) {
+      onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
+        outcome: "already_reserved", status: 200 });
+      return json({ granted: false, reason: "already_reserved" });
+    }
+    onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
+      outcome: "rejected", status: 409, reason: "operation_conflict" });
+    return fail("operation_conflict", 409);
+  }
   const now = new Date();
   const nowISO = now.toISOString();
   const start = nowISO.slice(0, 10) + "T00:00:00.000Z";
@@ -128,11 +137,23 @@ async function reserve(request: Request, env: Env): Promise<Response> {
         value.attempt_number, leaseHash, leaseHash).run();
   }
   // D1 includes the marker trigger's UPDATE in changes for link attempts.
-  if (result.meta.changes > 0) return json({ granted: true, reason: "reserved" });
+  if (result.meta.changes > 0) {
+    onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
+      outcome: "reserved", status: 200 });
+    return json({ granted: true, reason: "reserved" });
+  }
   const raced = await env.DB.prepare("SELECT reservation_hash FROM enrichment_provider_attempts WHERE operation_key=?")
     .bind(value.operation_key).first<{ reservation_hash: string }>();
-  if (raced) return raced.reservation_hash === payloadHash
-    ? json({ granted: false, reason: "already_reserved" }) : fail("operation_conflict", 409);
+  if (raced) {
+    if (raced.reservation_hash === payloadHash) {
+      onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
+        outcome: "already_reserved", status: 200 });
+      return json({ granted: false, reason: "already_reserved" });
+    }
+    onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
+      outcome: "rejected", status: 409, reason: "operation_conflict" });
+    return fail("operation_conflict", 409);
+  }
   const counts = await env.DB.prepare(`SELECT
     (SELECT total FROM enrichment_provider_daily_usage WHERE day=?) AS total,
     (SELECT canary FROM enrichment_provider_daily_usage WHERE day=?) AS canary,
@@ -142,8 +163,12 @@ async function reserve(request: Request, env: Env): Promise<Response> {
   if (counts && ((counts.total ?? 0) >= PROVIDER_ATTEMPT_LIMITS.daily_total ||
       value.stage === "canary" && (counts.canary ?? 0) >= PROVIDER_ATTEMPT_LIMITS.daily_canary ||
       value.stage !== "canary" && counts.item >= PROVIDER_ATTEMPT_LIMITS.daily_item)) {
+    onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
+      outcome: "rejected", status: 429, reason: "budget_exhausted" });
     return fail("budget_exhausted", 429);
   }
+  onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
+    outcome: "rejected", status: 409, reason: "lease_conflict" });
   return fail("lease_conflict", 409);
 }
 
@@ -160,7 +185,8 @@ function validSettle(value: Record<string, unknown>): value is Settle {
       value.response_id.length <= 200 && /^[a-zA-Z0-9_-]+$/.test(value.response_id))) &&
     keys.slice(3).every((key) => value[key] === null || integer(value[key]));
 }
-async function settle(request: Request, env: Env): Promise<Response> {
+async function settle(request: Request, env: Env,
+  onResolved: (event: WorkerBusinessEvent) => void): Promise<Response> {
   const value = await readBody(request);
   if (value instanceof Response) return value;
   if (!validSettle(value)) return fail("invalid_settlement");
@@ -170,15 +196,31 @@ async function settle(request: Request, env: Env): Promise<Response> {
     total_tokens=?,x_search_calls=?,cost_usd_ticks=?,settlement_hash=?,settled_at=?
     WHERE operation_key=? AND state='reserved'
       AND NOT EXISTS (SELECT 1 FROM enrichment_provider_reconciliations r
-        WHERE r.operation_key=enrichment_provider_attempts.operation_key)`)
+        WHERE r.operation_key=enrichment_provider_attempts.operation_key)
+    RETURNING stage`)
     .bind(value.http_status, value.response_id, value.input_tokens, value.output_tokens,
       value.total_tokens, value.x_search_calls, value.cost_usd_ticks, settlementHash,
       new Date().toISOString(), value.operation_key).run();
-  if (result.meta.changes === 1) return json({ settled: true });
-  const old = await env.DB.prepare("SELECT settlement_hash FROM enrichment_provider_attempts WHERE operation_key=?")
-    .bind(value.operation_key).first<{ settlement_hash: string | null }>();
+  const updated = result.results[0] as { stage: "fetch" | "reading" | "canary" } | undefined;
+  if (updated) {
+    onResolved({ kind: "provider_attempt", action: "settle", stage: updated.stage,
+      outcome: "responded", status: 200, provider_status: value.http_status,
+      response_id_present: value.response_id !== null });
+    return json({ settled: true });
+  }
+  const old = await env.DB.prepare("SELECT settlement_hash,stage FROM enrichment_provider_attempts WHERE operation_key=?")
+    .bind(value.operation_key).first<{ settlement_hash: string | null;
+      stage: "fetch" | "reading" | "canary" }>();
   if (!old) return fail("not_found", 404);
-  return old.settlement_hash === settlementHash ? json({ settled: true }) : fail("operation_conflict", 409);
+  if (old.settlement_hash === settlementHash) {
+    onResolved({ kind: "provider_attempt", action: "settle", stage: old.stage,
+      outcome: "replay", status: 200, provider_status: value.http_status,
+      response_id_present: value.response_id !== null });
+    return json({ settled: true });
+  }
+  onResolved({ kind: "provider_attempt", action: "settle", stage: old.stage,
+    outcome: "rejected", status: 409, reason: "operation_conflict" });
+  return fail("operation_conflict", 409);
 }
 
 async function authorizeFallback(request: Request, env: Env): Promise<Response> {
@@ -553,7 +595,8 @@ async function recoverReading(request: Request, env: Env,
 }
 
 export async function providerAttemptRoute(request: Request, env: Env, path: string,
-  onRecovery?: (event: ProviderRecoveryEvent) => void): Promise<Response | null> {
+  onRecovery?: (event: ProviderRecoveryEvent) => void,
+  onBusiness?: (event: WorkerBusinessEvent) => void): Promise<Response | null> {
   const root = "/api/enrichment/provider-attempts";
   if (path !== root && !["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect", "recover-source", "recover-reading"].some((part) => path === `${root}/${part}`)) {
     return null;
@@ -562,8 +605,23 @@ export async function providerAttemptRoute(request: Request, env: Env, path: str
   if (path === `${root}/summary`) return request.method === "GET" ? summary(env) : fail("method_not_allowed", 405);
   if (path === `${root}/inspect`) return request.method === "GET" ? inspect(env, new URL(request.url)) : fail("method_not_allowed", 405);
   if (request.method !== "POST") return fail("method_not_allowed", 405);
-  if (path.endsWith("/reserve")) return reserve(request, env);
-  if (path.endsWith("/settle")) return settle(request, env);
+  if (path.endsWith("/reserve") || path.endsWith("/settle")) {
+    const action = path.endsWith("/reserve") ? "reserve" : "settle";
+    let event: WorkerBusinessEvent | undefined;
+    try {
+      const response = action === "reserve"
+        ? await reserve(request, env, (resolved) => { event = resolved; })
+        : await settle(request, env, (resolved) => { event = resolved; });
+      onBusiness?.(event ?? { kind: "provider_attempt", action, stage: "unknown",
+        outcome: response.status >= 400 ? "rejected" : "failed", status: response.status,
+        reason: response.status === 400 || response.status === 413 ? "invalid_request" :
+          response.status === 404 ? "not_found" : "unclassified" });
+      return response;
+    } catch (cause) {
+      onBusiness?.({ kind: "provider_attempt", action, stage: "unknown", outcome: "failed", status: 500 });
+      throw cause;
+    }
+  }
   if (path.endsWith("/reconcile")) return reconcile(request, env);
   if (path.endsWith("/recover-source") || path.endsWith("/recover-reading")) {
     const stage = path.endsWith("/recover-source") ? "source" : "reading";

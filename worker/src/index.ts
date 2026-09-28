@@ -463,7 +463,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authResult = operatorOnly
       ? requireBearerToken(request, env.CAIRN_OPERATOR_TOKEN!) : requireEnricherToken(request, env);
     if (authResult !== null) return authResult;
-    return await providerAttemptRoute(request, env, path, (event) => timing.setRecoveryEvent(event)) ??
+    return await providerAttemptRoute(request, env, path, (event) => timing.setRecoveryEvent(event),
+      (event) => timing.addBusinessEvent(event)) ??
       error("not_found", 404);
   }
 
