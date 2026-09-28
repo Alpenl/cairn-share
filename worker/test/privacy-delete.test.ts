@@ -134,13 +134,14 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("evidence_requests",{id:"request",link_id:id,content_revision:1,scope:"external",dedupe_key:"dedupe",created_at:"t",evidence_snapshot_id:snapshotID});
   await insert("link_selections_v2",{link_id:id,taxonomy_version:"v",revised_at:"t"});
   await insert("classification_operations",{link_id:id,operation_key:"complete",payload_hash:"h",status:"completed",response:"{}",created_at:"t"});
+  await insert("manual_source_operations",{link_id:id,operation_key:"manual",payload_hash:"h",expected_revision:1,result_revision:1,created_at:"t"});
   await insert("legacy_curation_history",{link_id:id,payload:"{}",revision:1,provenance:"legacy_unknown",created_at:"t"});
   await insert("budget_ledger",{link_id:id,scope:"evidence",operation_key:"budget",created_at:"t"});
   await insert("budget_ledger",{scope:"batch",operation_key:"global-budget",created_at:"t"});
   await insert("rerank_cache",{cache_key:"private-rank",owner_token:"owner",status:"pending",request_json:"private query",scope_hash:"scope",spec_hash:"spec",model:"model",items:"[]",created_at:1,expires_at:2});
   await insert("rerank_cache_links",{cache_key:"private-rank",link_id:id});
   await insert("entity_cache",{cache_key:"private-entity",link_id:id,evidence_snapshot_id:snapshotID,content_revision:1,content_hash:"hash",source_links:"[]",owner_token:"owner",status:"completed",request_json:"private entity material",candidates:"[]",spec_hash:"spec",answers:"{}",created_at:1,expires_at:Date.now()+86400000});
-  const tables=["entity_cache","enrichment_sources","classification_jobs","evidence_snapshots","classification_runs","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","legacy_curation_history","budget_ledger","rerank_cache_links"];
+  const tables=["entity_cache","enrichment_sources","classification_jobs","evidence_snapshots","classification_runs","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","legacy_curation_history","budget_ledger","rerank_cache_links"];
   const schema=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_*'").all<{name:string}>();
   const linked:string[]=[];
   for(const {name} of schema.results) {

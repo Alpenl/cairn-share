@@ -2,7 +2,8 @@ import { CLASSIFICATION_LIMITS, classificationBudgetAvailable, classificationWin
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { record, taxonomy, validateClassification } from "./curation";
-import { objectiveUseAllowed, validAssessment, type AutomaticView } from "./domain";
+import { contentHash, objectivePayload, objectiveUseAllowed, validAssessment,
+  type AutomaticView, type EvidenceSnapshot } from "./domain";
 import { decisionInsertStatement, rebuildProjection, runInsertStatement, type WriteGuard } from "./domain-routes";
 
 const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
@@ -603,19 +604,18 @@ export async function classificationRoute(request: Request, env: Env, path: stri
 // curation until a new source actually arrives, and does not call a model
 // itself (F13).
 export async function refreshSource(env: Env, id: number): Promise<Response> {
-  const link = await env.DB.prepare(`SELECT id, content_revision, enrichment_status FROM links WHERE id = ?`).bind(id)
-    .first<{ id: number; content_revision: number; enrichment_status: string }>();
-  if (!link) return fail("not_found");
-  if (link.enrichment_status === "processing") {
-    // Never preempt an active retrieval lease; the caller can retry later.
-    return fail("lease_conflict");
-  }
   const now = new Date().toISOString();
-  await env.DB.prepare(
+  const link = await env.DB.prepare(
     `UPDATE links SET enrichment_status='pending', enrichment_attempts=0, enrichment_next_retry_at=NULL,
-       enrichment_lease_token=NULL, enrichment_lease_until=NULL, enrichment_error=NULL, enrichment_updated_at=?
-     WHERE id=? AND enrichment_status<>'processing'`
-  ).bind(now, id).run();
+       enrichment_lease_token=NULL, enrichment_lease_until=NULL, enrichment_error=NULL, enrichment_updated_at=?,
+       refresh_epoch=refresh_epoch+1, refresh_requested_at=?,manual_source_priority=0
+     WHERE id=? AND enrichment_status<>'processing'
+     RETURNING content_revision`
+  ).bind(now, now, id).first<{ content_revision: number }>();
+  if (!link) {
+    const exists = await env.DB.prepare(`SELECT id FROM links WHERE id=?`).bind(id).first();
+    return fail(exists ? "lease_conflict" : "not_found");
+  }
   return reply({
     id, status: "pending", action: "refresh_source", content_revision: link.content_revision,
     preserves: ["original_text", "translated_text", "summary", "images", "curation", "why", "classification"]
@@ -639,6 +639,98 @@ export async function ackSourceRefresh(request: Request, env: Env, id: number): 
   ).bind(String(body.status), reason, id, epoch).first();
   if (!row) return fail("not_found");
   return reply({ id, status: body.status, epoch });
+}
+
+// Manual text becomes a durable source before the caller receives success. The
+// old retrieval lease is fenced in the same transaction; reading can claim the
+// new source later, and the classification trigger queues independent work.
+export async function manualSourceRoute(request: Request, env: Env, id: number): Promise<Response> {
+  const body = await bodyOf(request);
+  if (!body || !text(body.operation_key, 200) || !Number.isSafeInteger(body.expected_revision) ||
+    Number(body.expected_revision) < 0 || !text(body.original_text, 100_000)) return fail("invalid_source");
+  // bodyOf bounds the incoming JSON to 1 MiB. This endpoint has the smaller
+  // dashboard request limit and uses byte length, not JavaScript characters.
+  const sourceText = body.original_text.trim();
+  if (!sourceText || new TextEncoder().encode(sourceText).byteLength > 100_000 ||
+    new TextEncoder().encode(JSON.stringify(body)).byteLength > (128 << 10)) return fail("invalid_source");
+  const key = body.operation_key;
+  const expected = Number(body.expected_revision);
+  const payloadHash = await sha256Hex(JSON.stringify({ id, expected, sourceText }));
+  const existing = async () => env.DB.prepare(
+    `SELECT link_id, payload_hash, result_revision FROM manual_source_operations WHERE operation_key=?`
+  ).bind(key).first<{ link_id: number; payload_hash: string; result_revision: number | null }>();
+  const replay = (row: { link_id: number; payload_hash: string; result_revision: number | null } | null) => {
+    if (!row) return null;
+    if (row.link_id !== id || row.payload_hash !== payloadHash || row.result_revision === null) return fail("operation_conflict");
+    return reply({ id, status: "source_saved", content_revision: row.result_revision });
+  };
+  const prior = replay(await existing());
+  if (prior) return prior;
+
+  const now = new Date().toISOString();
+  const source = { original_text: sourceText, original_language: "", context_text: "",
+    related_links: [] as string[], image_urls: [] as string[], model: "manual" };
+  const snapshot: EvidenceSnapshot = {
+    blocks: [{ id: "primary-1", role: "primary", text: sourceText, acquired: "manual" }],
+    fetched_at: now, retrieval: "manual", truncation: { truncated: false }
+  };
+  const evidenceHash = await contentHash(snapshot);
+  const xLink = `(
+    lower(url) LIKE 'https://x.com/%' OR lower(url) LIKE 'http://x.com/%'
+    OR lower(url) LIKE 'https://www.x.com/%' OR lower(url) LIKE 'http://www.x.com/%'
+    OR lower(url) LIKE 'https://twitter.com/%' OR lower(url) LIKE 'http://twitter.com/%'
+    OR lower(url) LIKE 'https://www.twitter.com/%' OR lower(url) LIKE 'http://www.twitter.com/%'
+  )`;
+  try {
+    const results = await env.DB.batch([
+      env.DB.prepare(`INSERT INTO manual_source_operations(operation_key,link_id,payload_hash,expected_revision,created_at)
+        SELECT ?,id,?,?,? FROM links WHERE id=? AND content_revision=? AND ${xLink}
+        RETURNING operation_key`).bind(key, payloadHash, expected, now, id, expected),
+      env.DB.prepare(`UPDATE links SET original_text=?,original_language=NULL,source_context_text='',related_links='[]',
+          ai_title=NULL,translated_text=NULL,summary=NULL,images='[]',enrichment_model=NULL,enriched_at=NULL,
+          enrichment_status='pending',enrichment_attempts=0,enrichment_next_retry_at=NULL,
+          enrichment_lease_token=NULL,enrichment_lease_until=NULL,enrichment_error=NULL,
+          enrichment_updated_at=?,refresh_epoch=refresh_epoch+1,refresh_requested_at=NULL,
+          manual_source_priority=1
+        WHERE id=? AND content_revision=? AND EXISTS
+          (SELECT 1 FROM manual_source_operations WHERE operation_key=? AND link_id=?)
+        RETURNING id`).bind(sourceText, now, id, expected, key, id),
+      // A deliberate manual submission changes objective provenance even when
+      // the primary bytes match. The regular content trigger already bumps a
+      // changed text/context/links; this statement bumps only the equal case.
+      env.DB.prepare(`UPDATE links SET content_revision=content_revision+1
+        WHERE id=? AND content_revision=? AND EXISTS
+          (SELECT 1 FROM manual_source_operations WHERE operation_key=? AND link_id=?)`)
+        .bind(id, expected, key, id),
+      env.DB.prepare(`INSERT INTO enrichment_sources(link_id,url,original_text,payload,fetched_at)
+        SELECT l.id,l.url,?,?,? FROM links l JOIN manual_source_operations o ON o.link_id=l.id
+        WHERE o.operation_key=? AND l.id=?
+        ON CONFLICT(link_id) DO UPDATE SET url=excluded.url,original_text=excluded.original_text,
+          payload=excluded.payload,fetched_at=excluded.fetched_at`)
+        .bind(sourceText, JSON.stringify(source), now, key, id),
+      env.DB.prepare(`INSERT INTO evidence_snapshots(link_id,content_revision,content_hash,payload,truncated,completeness,created_at)
+        SELECT l.id,l.content_revision,?,?,0,'complete',? FROM links l
+        JOIN manual_source_operations o ON o.link_id=l.id
+        WHERE o.operation_key=? AND l.id=? RETURNING id`)
+        .bind(evidenceHash, objectivePayload(snapshot), now, key, id),
+      env.DB.prepare(`UPDATE manual_source_operations SET result_revision=
+        (SELECT content_revision FROM links WHERE id=?) WHERE operation_key=? AND link_id=?
+        RETURNING result_revision`).bind(id, key, id)
+    ]);
+    if (!results[0].results.length) {
+      const link = await env.DB.prepare(`SELECT id FROM links WHERE id=?`).bind(id).first();
+      return link ? fail("input_changed") : fail("not_found");
+    }
+    if (!results[1].results.length || !results[3].success || !results[4].results.length || !results[5].results.length) {
+      throw Error("manual source transaction was incomplete");
+    }
+    const revision = (results[5].results[0] as { result_revision: number }).result_revision;
+    return reply({ id, status: "source_saved", content_revision: revision });
+  } catch (error) {
+    const raced = replay(await existing());
+    if (raced) return raced;
+    throw error;
+  }
 }
 
 // (the evidence read by snapshot id lives in domain-routes; see latestSnapshot)

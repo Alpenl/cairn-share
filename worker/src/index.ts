@@ -1,7 +1,7 @@
 import { cleanupDeletedImages, maintainPrivacy } from "./privacy";
 import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
-import { ackSourceRefresh, classificationRoute, refreshSource, sourceRoute } from "./classification";
+import { ackSourceRefresh, classificationRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
 import { applyV1Write } from "./taxonomy-v2";
 import { taxonomyV2Route } from "./taxonomy-routes";
@@ -304,9 +304,10 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   }
 
   const sourceMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/source$/);
+  const manualSourceMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/manual-source$/);
   const refreshMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/refresh-source$/);
   const refreshAckMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/refresh-source\/ack$/);
-  if (sourceMatch || refreshMatch || refreshAckMatch || path.startsWith("/api/enrichment/classifications/")) {
+  if (sourceMatch || manualSourceMatch || refreshMatch || refreshAckMatch || path.startsWith("/api/enrichment/classifications/")) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     if (refreshAckMatch) {
@@ -316,6 +317,10 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     if (refreshMatch) {
       if (request.method !== "POST") return error("method_not_allowed", 405);
       return refreshSource(env, Number(refreshMatch[1]));
+    }
+    if (manualSourceMatch) {
+      if (request.method !== "POST") return error("method_not_allowed", 405);
+      return manualSourceRoute(request, env, Number(manualSourceMatch[1]));
     }
     return sourceMatch ? sourceRoute(request, env, Number(sourceMatch[1])) : classificationRoute(request, env, path);
   }
@@ -410,7 +415,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () =>
-      getEnrichmentJob(env, Number(enrichmentJobDetailMatch[1]), timing)
+      getEnrichmentJob(env, Number(enrichmentJobDetailMatch[1]), timing,
+        url.searchParams.get("include_cache_identity") === "1")
     );
   }
 
@@ -595,6 +601,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
   if (urlChanged) {
     updates.push(
       "enrichment_status = 'pending'",
+      "manual_source_priority = 0",
       "enrichment_attempts = 0",
       "enrichment_next_retry_at = NULL",
       "enrichment_lease_token = NULL",
@@ -776,14 +783,14 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   });
 }
 
-async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): Promise<Response> {
+async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, withIdentity = false): Promise<Response> {
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
               enrichment_next_retry_at, ai_title, original_language, original_text,
               translated_text, summary, related_links, images, enrichment_model,
               enrichment_error, enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
-              CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable
+              CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable${cacheIdentityColumns(withIdentity)}
          FROM links
         WHERE id = ?`
     )
@@ -791,7 +798,7 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): 
       .first<EnrichmentDetailRow>()
   );
   if (row === null) return error("not_found", 404);
-  return json(mapEnrichmentListItem(row));
+  return json(mapEnrichmentListItem(row, withIdentity));
 }
 
 async function updateCuration(request: Request, env: Env, id: number, timing: TimingCollector, app = false): Promise<Response> {
@@ -892,11 +899,12 @@ async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Re
                 AND (enrichment_lease_until IS NULL OR enrichment_lease_until <= ?)
               )
             )
-          ORDER BY id ASC
+          ORDER BY manual_source_priority DESC, id ASC
           LIMIT 1
         )
         RETURNING id, url, note, created_at, enrichment_attempts,
-                  enrichment_lease_token, enrichment_lease_until, refresh_epoch`
+                  enrichment_lease_token, enrichment_lease_until,
+                  CASE WHEN refresh_requested_at IS NOT NULL THEN refresh_epoch ELSE 0 END AS refresh_epoch`
     )
       .bind(leaseToken, leaseUntil, nowIso, MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso)
       .first<EnrichmentJobRow>()
@@ -936,7 +944,8 @@ async function claimEnrichmentJobById(
             OR enrichment_lease_until <= ?
           )
         RETURNING id, url, note, created_at, enrichment_attempts,
-                  enrichment_lease_token, enrichment_lease_until, refresh_epoch`
+                  enrichment_lease_token, enrichment_lease_until,
+                  CASE WHEN refresh_requested_at IS NOT NULL THEN refresh_epoch ELSE 0 END AS refresh_epoch`
     )
       .bind(leaseToken, leaseUntil, nowIso, id, nowIso)
       .first<EnrichmentJobRow>()
@@ -989,6 +998,7 @@ async function completeEnrichmentJob(
     env.DB.prepare(
       `UPDATE links
         SET enrichment_status = 'completed',
+            manual_source_priority = 0,
             enrichment_next_retry_at = NULL,
             enrichment_lease_token = NULL,
             enrichment_lease_until = NULL,
