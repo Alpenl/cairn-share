@@ -1,6 +1,7 @@
 import { readSelectionSnapshot } from "./selection-state";
 import type { Env } from "./index";
-import { computeEffective, persistSelectionOverrides } from "./domain-routes";
+import { computeEffective, persistSelectionOverrides, rebuildProjection, selectionOperationReceipt } from "./domain-routes";
+import { canonicalJSON } from "./domain";
 import {
   applyV1Write, findTerm, proposalImpact, projectV1, taxonomyV2, validateTaxonomy, validateV2Selection,
   type TaxonomyProposal, type V2Selection
@@ -21,6 +22,24 @@ async function bodyOf(request: Request): Promise<Record<string, unknown> | null>
 
 const text = (value: unknown, max: number): value is string =>
   typeof value === "string" && value.trim().length > 0 && value.length <= max;
+
+async function selectionOperation(
+  env: Env, id: number, protocol: "v1" | "v2", body: Record<string, unknown>
+): Promise<{ key: string; payloadHash: string } | Response | null> {
+  if (body.operation_key === undefined) return null;
+  if (!text(body.operation_key, 200)) return fail("invalid_operation_key");
+  const key = body.operation_key;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalJSON({ id, protocol, body })));
+  const payloadHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const receipt = await selectionOperationReceipt(env, key);
+  if (!receipt) return { key, payloadHash };
+  if (receipt.link_id !== id || receipt.payload_hash !== payloadHash) return fail("operation_conflict", 409);
+  await rebuildProjection(env, id);
+  const selection = JSON.parse(receipt.selection) as V2Selection;
+  return protocol === "v2"
+    ? reply({ id, revision: receipt.revision, selection, v1_projection: projectV1(selection) })
+    : reply({ id, revision: receipt.revision, v1_projection: projectV1(selection), preserved_hidden: true });
+}
 
 const EMPTY_SELECTION: V2Selection = { topics: [], content_functions: [], carriers: [], affordances: [], form: "", use: "" };
 
@@ -222,6 +241,8 @@ async function loadSelection(env: Env, id: number): Promise<V2Selection> {
 async function patchSelection(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
+  const operation = await selectionOperation(env, id, "v2", body);
+  if (operation instanceof Response) return operation;
   const link = await env.DB.prepare(`SELECT id FROM links WHERE id = ?`).bind(id).first<{ id: number }>();
   if (!link) return fail("not_found", 404);
   const existing = await loadSelection(env, id);
@@ -241,14 +262,11 @@ async function patchSelection(request: Request, env: Env, id: number): Promise<R
   const result = await persistSelectionOverrides(env, id, validated, {
     source: "human", operationPrefix: typeof body.operation_key === "string" ? body.operation_key : `patch-${id}-${Date.now()}`,
     expectedRevision: Number.isSafeInteger(body.expected_revision) ? Number(body.expected_revision) : undefined,
-    rejectAutomaticExtras: true
+    rejectAutomaticExtras: true, operation: operation ?? undefined
   });
+  if ("operationConflict" in result) return fail("operation_conflict", 409);
   if ("conflict" in result) return fail("revision_conflict", 409, { revision: result.conflict });
-  const { view } = await computeEffective(env, id);
-  const selection: V2Selection = {
-    topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
-    affordances: view.affordances, form: view.form, use: view.use
-  };
+  const selection = result.selection;
   return reply({ id, revision: result.revision, selection, v1_projection: projectV1(selection) });
 }
 
@@ -258,6 +276,8 @@ async function patchSelection(request: Request, env: Env, id: number): Promise<R
 async function patchSelectionV1(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
+  const operation = await selectionOperation(env, id, "v1", body);
+  if (operation instanceof Response) return operation;
   if (Object.keys(body).some((key) => !["topics", "form", "use", "operation_key"].includes(key))) return fail("invalid_v1_selection");
   const link = await env.DB.prepare(`SELECT id FROM links WHERE id = ?`).bind(id).first<{ id: number }>();
   if (!link) return fail("not_found", 404);
@@ -281,10 +301,11 @@ async function patchSelectionV1(request: Request, env: Env, id: number): Promise
   if (!validated) return fail("invalid_v1_selection");
   const result = await persistSelectionOverrides(env, id, validated, {
     source: "legacy_unknown", operationPrefix: typeof body.operation_key === "string" ? body.operation_key : `patch-v1-${id}-${Date.now()}`,
-    rejectAutomaticExtras: true
+    rejectAutomaticExtras: true, operation: operation ?? undefined
   });
+  if ("operationConflict" in result) return fail("operation_conflict", 409);
   if ("conflict" in result) return fail("revision_conflict", 409, { revision: result.conflict });
-  return reply({ id, revision: result.revision, v1_projection: projectV1(validated), preserved_hidden: true });
+  return reply({ id, revision: result.revision, v1_projection: projectV1(result.selection), preserved_hidden: true });
 }
 
 // --- Taxonomy proposals -----------------------------------------------------

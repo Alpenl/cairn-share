@@ -7,7 +7,7 @@ import { rerankCacheRoute } from "./rerank-cache";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
-import { taxonomyV2 } from "./taxonomy-v2";
+import { taxonomyV2, type V2Selection } from "./taxonomy-v2";
 import { storedClassification, taxonomy, type Classification } from "./curation";
 import {
   canonicalJSON, contentHash, effectiveView, EMPTY_AUTOMATIC, normalizeField, objectivePayload,
@@ -901,6 +901,18 @@ async function recordOverride(
 // field-level override actions the effective view is built from. It is the
 // bridge that lets a legacy whole-object client and the new field-level UI
 // write through the same, single truth (F04).
+type SelectionReceipt = { link_id: number; payload_hash: string; revision: number; selection: string };
+
+export async function selectionOperationReceipt(env: Env, operationKey: string): Promise<SelectionReceipt | null> {
+  return env.DB.prepare(`SELECT link_id,payload_hash,revision,selection FROM selection_operations WHERE operation_key=?`)
+    .bind(operationKey).first<SelectionReceipt>();
+}
+
+function selectionFromView(view: EffectiveView): V2Selection {
+  return { topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
+    affordances: view.affordances, form: view.form, use: view.use };
+}
+
 export async function persistSelectionOverrides(
   env: Env,
   id: number,
@@ -915,8 +927,19 @@ export async function persistSelectionOverrides(
     // how the legacy `classification: null` ("restore automatic") is expressed
     // without clearing hidden v2 dimensions or the user's intent.
     resetFields?: OverrideField[];
+    operation?: { key: string; payloadHash: string };
   }
-): Promise<{ revision: number } | { conflict: number }> {
+): Promise<{ revision: number; selection: V2Selection } | { conflict: number } | { operationConflict: true }> {
+  const operation = options.operation;
+  const receipt = async (): Promise<{ revision: number; selection: V2Selection } | { operationConflict: true } | null> => {
+    if (!operation) return null;
+    const stored = await selectionOperationReceipt(env, operation.key);
+    if (!stored) return null;
+    if (stored.link_id !== id || stored.payload_hash !== operation.payloadHash) return { operationConflict: true };
+    return { revision: stored.revision, selection: JSON.parse(stored.selection) as V2Selection };
+  };
+  const prior = await receipt();
+  if (prior) return prior;
   const snapshot = await readSelectionSnapshot(env, id);
   if (!snapshot) return { conflict: 0 };
   if (options.expectedRevision !== undefined && options.expectedRevision !== snapshot.link.personal_revision) {
@@ -973,8 +996,33 @@ export async function persistSelectionOverrides(
     else actions.push({ field, term: wanted, action: "accept" });
   }
   if (actions.length === 0) {
+    if (operation) {
+      const guard = projectionInputGuard(id, snapshot);
+      const selection = selectionFromView(snapshot.view);
+      try {
+        const results = await env.DB.batch([
+          env.DB.prepare(`INSERT INTO selection_operations(operation_key,link_id,payload_hash,revision,selection,created_at)
+            SELECT ?,?,?,?,?,? WHERE ${guard.sql} RETURNING operation_key`)
+            .bind(operation.key, id, operation.payloadHash, snapshot.link.personal_revision,
+              canonicalJSON(selection), new Date().toISOString(), ...guard.bindings),
+          ...projectionWrites(env, id, snapshot.link.personal_revision, snapshot.view, snapshot.automatic,
+            snapshot.projected, snapshot.contentRevision, snapshot.stale, snapshot.decisionId,
+            snapshot.projectionInput.classification, guard)
+        ]);
+        if (results[0].results.length) return { revision: snapshot.link.personal_revision, selection };
+      } catch (error) {
+        const concurrent = await receipt();
+        if (concurrent) return concurrent;
+        throw error;
+      }
+      const concurrent = await receipt();
+      if (concurrent) return concurrent;
+      const current = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id=?`).bind(id)
+        .first<{ personal_revision: number }>();
+      return { conflict: current?.personal_revision ?? snapshot.link.personal_revision };
+    }
     await rebuildProjection(env, id);
-    return { revision: snapshot.link.personal_revision };
+    return { revision: snapshot.link.personal_revision, selection: selectionFromView(snapshot.view) };
   }
   const now = new Date().toISOString();
   const revision = snapshot.link.personal_revision + 1;
@@ -987,31 +1035,45 @@ export async function persistSelectionOverrides(
   const payload = JSON.stringify(changes);
   const inputGuard = projectionInputGuard(id, snapshot);
   const futureView = effectiveView(snapshot.automatic, [...snapshot.projectionInput.overrides, ...changes]);
+  const selection = selectionFromView(futureView);
   const projectedGuard = selectionProjectionGuard(id, snapshot, revision, changes.map((entry) => entry.operation_key));
-  const results = await env.DB.batch([
-    env.DB.prepare(`INSERT INTO curation_overrides(link_id,field,term,action,source,confirmed,revision,operation_key,created_at)
-      SELECT ?,json_extract(j.value,'$.field'),json_extract(j.value,'$.term'),json_extract(j.value,'$.action'),
-        json_extract(j.value,'$.source'),json_extract(j.value,'$.confirmed'),json_extract(j.value,'$.revision'),
-        json_extract(j.value,'$.operation_key'),json_extract(j.value,'$.created_at')
-      FROM json_each(?) j WHERE ${inputGuard.sql} ORDER BY CAST(j.key AS INTEGER)`)
-      .bind(id, payload, ...inputGuard.bindings),
-    env.DB.prepare(`INSERT INTO curation_events(link_id,kind,payload,revision,operation_key,created_at)
-      SELECT ?,json_extract(j.value,'$.action'),json_extract(j.value,'$.event_payload'),
-        json_extract(j.value,'$.revision'),json_extract(j.value,'$.event_key'),json_extract(j.value,'$.created_at')
-      FROM json_each(?) j WHERE ${inputGuard.sql} ORDER BY CAST(j.key AS INTEGER)`)
-      .bind(id, payload, ...inputGuard.bindings),
-    env.DB.prepare(`UPDATE links SET personal_revision=personal_revision+1 WHERE id=? AND ${inputGuard.sql}
-      RETURNING personal_revision`).bind(id, ...inputGuard.bindings),
-    ...projectionWrites(env, id, revision, futureView, snapshot.automatic, snapshot.projected,
-      snapshot.contentRevision, snapshot.stale, snapshot.decisionId, snapshot.projectionInput.classification, projectedGuard)
-  ]);
+  let results: D1Result[];
+  try {
+    results = await env.DB.batch([
+      env.DB.prepare(`INSERT INTO curation_overrides(link_id,field,term,action,source,confirmed,revision,operation_key,created_at)
+        SELECT ?,json_extract(j.value,'$.field'),json_extract(j.value,'$.term'),json_extract(j.value,'$.action'),
+          json_extract(j.value,'$.source'),json_extract(j.value,'$.confirmed'),json_extract(j.value,'$.revision'),
+          json_extract(j.value,'$.operation_key'),json_extract(j.value,'$.created_at')
+        FROM json_each(?) j WHERE ${inputGuard.sql} ORDER BY CAST(j.key AS INTEGER)`)
+        .bind(id, payload, ...inputGuard.bindings),
+      env.DB.prepare(`INSERT INTO curation_events(link_id,kind,payload,revision,operation_key,created_at)
+        SELECT ?,json_extract(j.value,'$.action'),json_extract(j.value,'$.event_payload'),
+          json_extract(j.value,'$.revision'),json_extract(j.value,'$.event_key'),json_extract(j.value,'$.created_at')
+        FROM json_each(?) j WHERE ${inputGuard.sql} ORDER BY CAST(j.key AS INTEGER)`)
+        .bind(id, payload, ...inputGuard.bindings),
+      env.DB.prepare(`UPDATE links SET personal_revision=personal_revision+1 WHERE id=? AND ${inputGuard.sql}
+        RETURNING personal_revision`).bind(id, ...inputGuard.bindings),
+      ...(operation ? [env.DB.prepare(`INSERT INTO selection_operations(operation_key,link_id,payload_hash,revision,selection,created_at)
+        SELECT ?,?,?,?,?,? WHERE ${projectedGuard.sql} RETURNING operation_key`)
+        .bind(operation.key, id, operation.payloadHash, revision, canonicalJSON(selection), now,
+          ...projectedGuard.bindings)] : []),
+      ...projectionWrites(env, id, revision, futureView, snapshot.automatic, snapshot.projected,
+        snapshot.contentRevision, snapshot.stale, snapshot.decisionId, snapshot.projectionInput.classification, projectedGuard)
+    ]);
+  } catch (error) {
+    const concurrent = await receipt();
+    if (concurrent) return concurrent;
+    throw error;
+  }
   const updated = results[2].results as unknown[];
   if (updated.length === 0) {
+    const concurrent = await receipt();
+    if (concurrent) return concurrent;
     const current = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
       .first<{ personal_revision: number }>();
     return { conflict: current?.personal_revision ?? snapshot.link.personal_revision };
   }
-  return { revision };
+  return { revision, selection };
 }
 
 // --- Effective view ---------------------------------------------------------

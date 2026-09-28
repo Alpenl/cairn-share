@@ -76,7 +76,13 @@ The final transaction checks the personal revision, content revision, target and
 
 GET decisions returns the complete known `run_ids` and its completeness flag alongside the compatibility `run_id`. A replay acknowledgement identifies the stored decision and its accepted revision; its `effective` field is the current human-resolved view, not a fabricated historical UI snapshot. Exact concurrent submissions create one decision. No model run or source record is created by a pure policy replay.
 
-Cache rebuilding pins personal revision, content revision and latest decision ID for all projection writes. A superseded computation cannot overwrite a newer cache; a missed guard re-reads current state with at most three attempts. The automatic input used for v1 projection comes from the same computation as the effective view. References prevent retention from deleting a secondary input run; deleting the bookmark cascades its decisions and references along with the existing private history.
+Cache rebuilding pins personal revision, content revision, latest decision ID, entity revision, legacy history and the classification input used to calculate the view. A superseded computation cannot overwrite a newer cache; a missed guard re-reads current state with at most three attempts. The automatic input used for v1 projection comes from the same computation as the effective view. References prevent retention from deleting a secondary input run; deleting the bookmark cascades its decisions and references along with the existing private history.
+
+## 2026-09-28: atomic projection and whole-selection receipts
+
+Classification completion, an explicit decision, a single field action, a whole-selection write, and an entity-state write now commit their business rows and effective projections in the same D1 transaction. The precomputed view is pinned to the relevant personal/content/decision/entity/legacy inputs; a changed input rejects the stale batch. Existing 0008 triggers advance the cache generation inside that transaction. Exact retries of decisions, single actions and entity states can rebuild a damaged historical projection from current authority before confirming the stored operation.
+
+Migration 0035 adds `selection_operations` for v1/v2 whole-selection writes with an explicit `operation_key`. The receipt stores the request hash, accepted revision and confirmed selection inside the same transaction as field actions and projection. A retry returns that original selection even if another write has since changed the current view; a changed payload or link conflicts. A no-action write records the same kind of receipt. Exact retries rebuild the current projection before returning the historical confirmation. Bookmark deletion cascades these private receipts. A legacy whole-selection write without an operation key keeps its prior protocol; it cannot promise response-loss idempotency.
 
 
 ## 2026-09-22 R3-06: owned evidence execution
