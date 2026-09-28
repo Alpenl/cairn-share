@@ -5,6 +5,7 @@ import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSource
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
 import { applyV1Write } from "./taxonomy-v2";
 import { taxonomyV2Route } from "./taxonomy-routes";
+import { emitRequest, policyReadAvailable, publishPolicy, requestPolicy } from "./observability";
 
 export interface Env {
   DB: D1Database;
@@ -257,8 +258,22 @@ export default {
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const timing = new TimingCollector();
-    const response = await handleRequest(request, env, timing);
-    return withServerTiming(response, timing);
+    const path = new URL(request.url).pathname;
+    if (path === "/api/internal/observability" || request.method === "OPTIONS") {
+      return withServerTiming(await handleRequest(request, env, timing), timing);
+    }
+    const policy = await requestPolicy(env.DB);
+    const started = performance.now();
+    let response: Response | null = null;
+    try {
+      response = withServerTiming(await handleRequest(request, env, timing), timing);
+      response.headers.set("X-Cairn-Observability-Version", String(policy.version));
+      if (!policyReadAvailable(policy)) response.headers.set("X-Cairn-Observability-Status", "unavailable");
+      else if (policy.version === -1) response.headers.set("X-Cairn-Observability-Status", "unconfigured");
+      return response;
+    } finally {
+      try { emitRequest(policy, request, response, performance.now() - started); } catch { /* optional logs never fail business */ }
+    }
   }
 };
 
@@ -269,6 +284,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   const url = new URL(request.url);
   const path = trimTrailingSlash(url.pathname);
+
+  if (path === "/api/internal/observability") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["POST"], () => publishPolicy(request, env.DB));
+  }
 
   if (path === "/" || path === "/debug") {
     return routeMethod(request, ["GET"], () => html(apiDebugHtml()));
