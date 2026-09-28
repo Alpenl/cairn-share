@@ -47,31 +47,3 @@ CREATE TABLE evidence_requests (
   created_at TEXT NOT NULL,
   UNIQUE(dedupe_key)
 );
-
--- Search index for the expanded v2 fields. D1 has no FTS prerequisite, so a
--- maintained text column plus an index keeps search parameterised and bounded.
--- A trigger keeps it correct for every write path (create, edit, enrichment)
--- without threading the value through each statement.
-ALTER TABLE links ADD COLUMN search_text TEXT NOT NULL DEFAULT '';
-CREATE INDEX links_search_text_idx ON links(search_text);
-
-UPDATE links SET search_text = lower(
-  COALESCE(url,'') || char(0) || COALESCE(note,'') || char(0) || COALESCE(original_text,'') || char(0) ||
-  COALESCE(translated_text,'') || char(0) || COALESCE(summary,'') || char(0) || COALESCE(ai_title,'') || char(0) || COALESCE(why,'')
-);
-
-CREATE TRIGGER links_search_text_refresh_insert AFTER INSERT ON links
-BEGIN
-  UPDATE links SET search_text = lower(
-    COALESCE(NEW.url,'') || char(0) || COALESCE(NEW.note,'') || char(0) || COALESCE(NEW.original_text,'') || char(0) ||
-    COALESCE(NEW.translated_text,'') || char(0) || COALESCE(NEW.summary,'') || char(0) || COALESCE(NEW.ai_title,'') || char(0) || COALESCE(NEW.why,'')
-  ) WHERE id = NEW.id;
-END;
-
-CREATE TRIGGER links_search_text_refresh_update AFTER UPDATE OF url, note, original_text, translated_text, summary, ai_title, why ON links
-BEGIN
-  UPDATE links SET search_text = lower(
-    COALESCE(NEW.url,'') || char(0) || COALESCE(NEW.note,'') || char(0) || COALESCE(NEW.original_text,'') || char(0) ||
-    COALESCE(NEW.translated_text,'') || char(0) || COALESCE(NEW.summary,'') || char(0) || COALESCE(NEW.ai_title,'') || char(0) || COALESCE(NEW.why,'')
-  ) WHERE id = NEW.id;
-END;

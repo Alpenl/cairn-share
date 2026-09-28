@@ -178,7 +178,9 @@ const MAX_MODEL_LENGTH = 200;
 const MAX_ENRICHMENT_ERROR_LENGTH = 2_000;
 const ENRICHMENT_RETRY_DELAYS_MILLISECONDS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
 const READ_CACHE_TTL_SECONDS = 15;
-const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}, s-maxage=${READ_CACHE_TTL_SECONDS}`;
+// The overview is polled every 30s. Its generation key changes on writes, so
+// retain an unchanged snapshot across polls without delaying invalidation.
+const OVERVIEW_CACHE_TTL_SECONDS = 15 * 60;
 const CACHE_VERSION = "4";
 const CACHE_ORIGIN = "https://cairn-share-cache.internal";
 const LINKS_CACHE_GENERATION_KEY = "links_generation";
@@ -425,6 +427,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => listEnrichmentJobs(url, env, timing));
+  }
+
+  if (path === "/api/enrichment/overview") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => getEnrichmentOverview(request, url, env, timing));
   }
 
   if (path === "/api/enrichment/taxonomy") {
@@ -873,6 +881,58 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
     ...(includeCounts ? { counts: mapEnrichmentCounts(countRow) } : {}),
     ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {})
   });
+}
+
+interface EnrichmentOverviewRow extends EnrichmentCountRow {
+  view_inbox: number;
+  view_kept: number;
+  view_compiled: number;
+  view_drop: number;
+  view_uncertain: number;
+}
+
+async function getEnrichmentOverview(request: Request, url: URL, env: Env, timing: TimingCollector): Promise<Response> {
+  if ([...url.searchParams.keys()].length > 0) return error("invalid_query");
+  return cachedJson(request, env, timing, generation => enrichmentOverviewCacheUrl(url, generation), async () => {
+    // Reuse the list's predicates, including the exact uncertain projection
+    // rule. The fixed views keep all user-controlled text out of SQL source.
+    const viewFilters = [
+      ["inbox", "curation_status=inbox"], ["kept", "curation_status=kept"],
+      ["compiled", "curation_status=compiled"], ["drop", "curation_status=drop"],
+      ["uncertain", "uncertain=true"]
+    ] as const;
+    const bindings: Array<string | number> = [];
+    const columns = viewFilters.map(([name, query]) => {
+      const filter = bookmarkFilters(new URL(`https://cairn.invalid/api/enrichment/jobs?${query}`));
+      if (filter instanceof Response) throw new Error("invalid fixed overview filter");
+      bindings.push(...filter.bindings);
+      return `COALESCE(SUM(CASE WHEN ${filter.clauses.join(" AND ") || "1"} THEN 1 ELSE 0 END),0) AS view_${name}`;
+    });
+    const statusColumns = ["pending", "processing", "completed", "failed", "exhausted"].map(status =>
+      `COALESCE(SUM(CASE WHEN is_x=1 AND enrichment_status='${status}' THEN n ELSE 0 END),0) AS ${status}`);
+    const statement = env.DB.prepare(`
+      WITH view_counts AS (
+        SELECT COUNT(*) AS total, ${columns.join(", ")}
+        FROM links
+      ), status_groups AS (
+        SELECT is_x, enrichment_status, COUNT(*) AS n
+        FROM links INDEXED BY links_is_x_status_idx
+        GROUP BY is_x, enrichment_status
+      ), status_counts AS (
+        SELECT ${statusColumns.join(", ")},
+          COALESCE(SUM(CASE WHEN is_x=0 THEN n ELSE 0 END),0) AS unsupported
+        FROM status_groups
+      )
+      SELECT * FROM view_counts CROSS JOIN status_counts
+    `).bind(...bindings);
+    const row = await timing.measure("db", () => statement.first<EnrichmentOverviewRow>());
+    if (row === null) throw new Error("overview aggregate returned no row");
+    const counts = mapEnrichmentCounts(row);
+    return { version: 1, views: {
+      all: counts.total, inbox: row.view_inbox, kept: row.view_kept,
+      compiled: row.view_compiled, drop: row.view_drop, uncertain: row.view_uncertain
+    }, counts, attention: counts.failed + counts.exhausted, queued: counts.pending + counts.processing };
+  }, OVERVIEW_CACHE_TTL_SECONDS);
 }
 
 async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, withIdentity = false): Promise<Response> {
@@ -1687,7 +1747,8 @@ async function cachedJson(
   env: Env,
   timing: TimingCollector,
   cacheUrlForGeneration: (generation: number) => string,
-  producer: () => Promise<unknown | null>
+  producer: () => Promise<unknown | null>,
+  ttlSeconds = READ_CACHE_TTL_SECONDS
 ): Promise<Response> {
   if (shouldBypassReadCache(request)) {
     timing.setCacheState("BYPASS");
@@ -1702,14 +1763,14 @@ async function cachedJson(
   const cached = await timing.measure("cache", () => caches.default.match(cacheRequest));
   if (cached !== undefined) {
     timing.setCacheState("HIT");
-    return withCacheHeader(cached, "HIT");
+    return withCacheHeader(cached, "HIT", ttlSeconds);
   }
 
   timing.setCacheState("MISS");
   const body = await producer();
   if (body === null) return error("not_found", 404);
 
-  const response = cacheableJson(body, "MISS");
+  const response = cacheableJson(body, "MISS", ttlSeconds);
   await timing.measure("cache-put", () => caches.default.put(cacheRequest, response.clone()));
   return response;
 }
@@ -1770,16 +1831,16 @@ function constantTimeEquals(left: string, right: string): boolean {
   return diff === 0;
 }
 
-function cacheableJson(body: unknown, cacheState: CacheState): Response {
+function cacheableJson(body: unknown, cacheState: CacheState, ttlSeconds: number): Response {
   return json(body, 200, {
-    "Cache-Control": READ_CACHE_CONTROL,
+    "Cache-Control": cacheControlFor(ttlSeconds),
     "X-Cairn-Cache": cacheState
   });
 }
 
-function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS"): Response {
+function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS", ttlSeconds: number): Response {
   const headers = new Headers(response.headers);
-  headers.set("Cache-Control", READ_CACHE_CONTROL);
+  headers.set("Cache-Control", cacheControlFor(ttlSeconds));
   headers.set("X-Cairn-Cache", cacheState);
   return new Response(response.body, {
     status: response.status,
@@ -1788,11 +1849,15 @@ function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS"): Resp
   });
 }
 
+function cacheControlFor(ttlSeconds: number): string {
+  return `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds}`;
+}
+
 function withServerTiming(response: Response, timing: TimingCollector): Response {
   const headers = new Headers(response.headers);
   headers.set("Server-Timing", timing.headerValue());
-  // Internal generation-keyed cache entries expire after 15s. Never expose
-  // those public caching headers for authenticated private content to clients.
+  // Never expose internal generation-keyed cache headers for authenticated
+  // private content to clients.
   headers.set("Cache-Control", "private, no-store");
   return new Response(response.body, {
     status: response.status,
@@ -1850,6 +1915,14 @@ function listCacheUrl(
     const value = requestUrl.searchParams.get(key);
     if (value) url.searchParams.set(key, value);
   }
+  url.searchParams.set("host", requestUrl.host);
+  return url.toString();
+}
+
+function enrichmentOverviewCacheUrl(requestUrl: URL, generation: number): string {
+  const url = new URL("/api/enrichment/overview", CACHE_ORIGIN);
+  url.searchParams.set("v", CACHE_VERSION);
+  url.searchParams.set("g", String(generation));
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
 }
