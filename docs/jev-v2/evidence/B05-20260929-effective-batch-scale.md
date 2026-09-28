@@ -6,9 +6,12 @@
 10,000 links, then reads the last 500 links through ten consecutive 50-ID
 Worker HTTP requests. At each size it runs once with no history/body, then
 with 20 human override rows and an 8 KiB stored article body per exported
-link. A D1 binding proxy counts every `prepare` on these ten requests,
-including the observability-policy refresh. The test checks all 500 IDs,
-bounded response size, zero writes, and absence of the stored article body.
+link. For the 20-history cases it also reads the same 500 views through the
+old single-ID Worker HTTP route in groups of four, matching Go's former
+concurrency. Every old view must equal its batched counterpart. A D1 binding
+proxy counts every `prepare` on these requests, including the
+observability-policy refresh. The test checks all 500 IDs, bounded response
+size, zero writes, and absence of the stored article body.
 No paid model call or remote D1 migration is involved.
 
 The figures below are one local Workerd/D1 run. `effective_rows_read` is the
@@ -20,17 +23,20 @@ lookup on the singleton policy row; the identical SELECT with `.all()`
 reported one row read. This bounds the missing control lookup in this fixture
 without adding a query to production requests.
 
-| Library links | History/link | Body/link | Effective SQL | Policy SQL | Effective rows read | Response bytes | Ten-request elapsed | Slowest batch |
+| Library links | History/link | Body/link | Batch / old view SQL | Policy SQL | Batch rows read | Batch response | Batch elapsed | Old 500-request elapsed |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2,000 | 0 | 0 | 10 | 1 | 2,000 | 179,240 | 63 ms | 12 ms |
-| 2,000 | 20 | 8 KiB | 10 | 1 | 12,499 | 179,750 | 63 ms | 14 ms |
-| 10,000 | 0 | 0 | 10 | 1 | 2,000 | 179,241 | 60 ms | 12 ms |
-| 10,000 | 20 | 8 KiB | 10 | 1 | 12,499 | 179,751 | 49 ms | 7 ms |
+| 2,000 | 0 | 0 | 10 / — | 1 | 2,000 | 179,240 B | 59 ms | — |
+| 2,000 | 20 | 8 KiB | 10 / 500 | 1 each | 12,499 | 179,750 B | 73 ms | 2,227 ms |
+| 10,000 | 0 | 0 | 10 / — | 1 | 2,000 | 179,241 B | 41 ms | — |
+| 10,000 | 20 | 8 KiB | 10 / 500 | 1 each | 12,499 | 179,751 B | 84 ms | 2,159 ms |
 
-The near-constant response size confirms that the stored body and history are
-not serialized. The higher D1 read count with history remains a real scaling
-cost. These local, single-run times vary with warmup and cannot establish
-production p95/p99 or a performance improvement against the old path.
+The near-constant batch response size confirms that the stored body and
+history are not serialized. The higher D1 read count with history remains a
+real scaling cost. The old route uses `.first()`, so comparable D1 row metadata
+are unavailable. Both local elapsed figures include Worker HTTP dispatch and
+JSON parsing but exclude Go rendering and external network latency. The
+batched route ran first; warmup and execution order affect these single-run
+times. They cannot establish production p95/p99.
 
 ## Remaining acceptance
 

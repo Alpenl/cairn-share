@@ -55,6 +55,7 @@ it("keeps 500 exported views bounded in 2,000 and 10,000-link libraries", async 
       let rowsRead = 0;
       const durations: number[] = [];
       const seen = new Set<number>();
+      const batchItems = new Map<number, unknown>();
       for (let first = size - 499; first <= size; first += 50) {
         const ids = Array.from({ length: 50 }, (_, offset) => first + offset);
         const started = performance.now();
@@ -62,21 +63,21 @@ it("keeps 500 exported views bounded in 2,000 and 10,000-link libraries", async 
           method: "POST", headers: { Authorization: "Bearer internal", "Content-Type": "application/json" },
           body: JSON.stringify({ ids })
         }), { ...env, DB: countedDB, CAIRN_ENRICHER_TOKEN: "internal", CAIRN_API_TOKEN: "app" } satisfies Env);
-        durations.push(performance.now() - started);
-        expect(response.status).toBe(200);
         const wire = await response.text();
-        expect(wire).not.toContain("x".repeat(100)); // stored article bodies stay private
-        bytes += new TextEncoder().encode(wire).length;
         const body = JSON.parse(wire) as {
           items: Array<{ id: number }>;
           missing_ids: number[];
           d1: { scope: string; sql_count: number; rows_read: number; rows_written: number };
         };
+        durations.push(performance.now() - started);
+        expect(response.status).toBe(200);
+        expect(wire).not.toContain("x".repeat(100)); // stored article bodies stay private
+        bytes += new TextEncoder().encode(wire).length;
         expect(body.items.map((item) => item.id)).toEqual(ids);
         expect(body.missing_ids).toEqual([]);
         expect(body.d1).toMatchObject({ scope: "effective_view_only", sql_count: 1, rows_written: 0 });
         rowsRead += body.d1.rows_read;
-        body.items.forEach((item) => seen.add(item.id));
+        body.items.forEach((item) => { seen.add(item.id); batchItems.set(item.id, item); });
       }
       expect(seen.size).toBe(500);
       expect(bytes).toBeLessThan(250_000);
@@ -85,13 +86,42 @@ it("keeps 500 exported views bounded in 2,000 and 10,000-link libraries", async 
       expect({ effectivePrepares, policyPrepares, otherPrepares }).toEqual({
         effectivePrepares: 10, policyPrepares: 1, otherPrepares: 0
       });
+      let oldElapsed = 0;
+      let oldSQL = 0;
+      if (history > 0) {
+        resetObservabilityCacheForTest();
+        effectivePrepares = 0;
+        policyPrepares = 0;
+        otherPrepares = 0;
+        for (let first = size - 499; first <= size; first += 4) {
+          const ids = Array.from({ length: Math.min(4, size + 1 - first) }, (_, offset) => first + offset);
+          const started = performance.now();
+          const responses = await Promise.all(ids.map((id) => worker.fetch(
+            new Request(`https://test/api/v2/links/${id}/effective`, {
+              headers: { Authorization: "Bearer internal" }
+            }), { ...env, DB: countedDB, CAIRN_ENRICHER_TOKEN: "internal", CAIRN_API_TOKEN: "app" } satisfies Env
+          )));
+          const oldBodies = await Promise.all(responses.map((response) => response.json()));
+          oldElapsed += performance.now() - started;
+          for (let index = 0; index < ids.length; index++) {
+            expect(responses[index].status).toBe(200);
+            expect(oldBodies[index]).toEqual(batchItems.get(ids[index]));
+          }
+        }
+        oldElapsed = Math.round(oldElapsed * 100) / 100;
+        oldSQL = effectivePrepares;
+        expect({ effectivePrepares, policyPrepares, otherPrepares }).toEqual({
+          effectivePrepares: 500, policyPrepares: 1, otherPrepares: 0
+        });
+      }
       measurements.push({ library_size: size, history_per_exported_link: history,
         body_bytes_per_exported_link: history > 0 ? 8192 : 0,
         export_items: seen.size, request_count: durations.length,
-        effective_sql: effectivePrepares, policy_sql: policyPrepares,
+        effective_sql: 10, policy_sql: 1, old_effective_sql: oldSQL,
         effective_rows_read: rowsRead, response_bytes: bytes,
         total_ms: Math.round(durations.reduce((sum, value) => sum + value, 0) * 100) / 100,
-        max_batch_ms: Math.round(Math.max(...durations) * 100) / 100 });
+        max_batch_ms: Math.round(Math.max(...durations) * 100) / 100,
+        old_500_request_ms: oldElapsed });
     }
   }
   const policySQL = "SELECT version, logs, fallback_logs, diagnostic_until FROM observability_policy WHERE singleton = 1";
