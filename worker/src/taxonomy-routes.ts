@@ -207,13 +207,21 @@ async function applyProposal(request: Request, env: Env, id: string): Promise<Re
 async function getSelection(env: Env, id: number, params: URLSearchParams): Promise<Response> {
   const snapshot = await readSelectionSnapshot(env, id);
   if (!snapshot) return fail("not_found", 404);
+  return reply(selectionPayload(snapshot, id, params));
+}
+
+type SelectionSnapshot = NonNullable<Awaited<ReturnType<typeof readSelectionSnapshot>>>;
+
+// Reuse the exact selection contract for a combined reading snapshot. It must
+// be derived from the row that supplied the article, not fetched afterward.
+export function selectionPayload(snapshot: SelectionSnapshot, id: number, params: URLSearchParams) {
   const { link, view, automatic, projected, stale, state } = snapshot;
   const includeAutomatic = params.get("include_automatic") === "1";
   const selection: V2Selection = {
     topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
     affordances: view.affordances, form: view.form, use: view.use
   };
-  return reply({
+  return {
     id, revision: link.personal_revision, selection,
     ...(params.get("include_state") === "1" ? { state } : {}),
     // This is the same baseline used to derive view, before human overrides.
@@ -225,7 +233,7 @@ async function getSelection(env: Env, id: number, params: URLSearchParams): Prom
     v1_only: !projected,
     v1_projection: projectV1(selection),
     empty: view.empty, why: link.why, curation_status: link.curation_status
-  });
+  };
 }
 
 // loadSelection reads the effective view. It exists for the v1 compatibility

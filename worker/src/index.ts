@@ -4,7 +4,8 @@ import { bookmarkSource, record, storedClassification, taxonomy, validCurationSt
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
 import { applyV1Write } from "./taxonomy-v2";
-import { taxonomyV2Route } from "./taxonomy-routes";
+import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
+import { readSelectionSnapshot } from "./selection-state";
 import { emitRequest, policyReadAvailable, publishPolicy, requestPolicy } from "./observability";
 import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
 
@@ -490,6 +491,14 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
       getEnrichmentJobIdentity(env, Number(enrichmentIdentityMatch[1]), timing));
   }
 
+  const enrichmentReadingMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/reading$/);
+  if (enrichmentReadingMatch !== null) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () =>
+      getEnrichmentReading(env, Number(enrichmentReadingMatch[1]), timing, url.searchParams));
+  }
+
   const linkIdMatch = path.match(/^\/api\/links\/(\d+)$/);
   if (linkIdMatch !== null) {
     const authError = requireApiToken(request, env);
@@ -889,6 +898,59 @@ async function getEnrichmentJobIdentity(env: Env, id: number, timing: TimingColl
       body_revision: row.app_body_revision, personal_revision: row.personal_revision,
       latest_decision_id: row.cache_decision_id,
       latest_entity_revision: row.cache_entity_revision } });
+}
+
+// One SQLite statement supplies article text, the effective selection and
+// entity state. A sequence of detail/selection/entity reads can combine
+// different revisions when another client writes between requests.
+async function getEnrichmentReading(env: Env, id: number, timing: TimingCollector, params: URLSearchParams): Promise<Response> {
+  if (params.getAll("body_revision").length > 1) return error("invalid_query");
+  const rawRevision = params.get("body_revision");
+  if (rawRevision !== null && (!/^(0|[1-9][0-9]*)$/.test(rawRevision) ||
+      !Number.isSafeInteger(Number(rawRevision)))) return error("invalid_query");
+  const knownBodyRevision = rawRevision === null ? -1 : Number(rawRevision);
+  const snapshot = await timing.measure("db", () => readSelectionSnapshot(env, id, true, knownBodyRevision));
+  if (!snapshot) return error("not_found", 404);
+  const row = snapshot.link as unknown as EnrichmentDetailRow;
+  const bodyUnchanged = knownBodyRevision >= 0 && row.app_body_revision === knownBodyRevision;
+  const processable = /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\//i.test(row.url) ? 1 : 0;
+  const detail = mapEnrichmentListItem({ ...row, processable,
+    cache_decision_id: snapshot.decisionId,
+    cache_entity_revision: snapshot.entity?.revision ?? 0 }, true);
+  const selection = selectionPayload(snapshot, id,
+    new URLSearchParams({ include_automatic: "1", include_state: "1" }));
+  const accepted = new Set<string>();
+  for (const entry of snapshot.overrides) {
+    if (entry.field !== "entities") continue;
+    if (entry.action === "set_empty" || (entry.action === "reset" && entry.term === "")) accepted.clear();
+    else if (entry.action === "accept") accepted.add(entry.term);
+    else accepted.delete(entry.term);
+  }
+  const entity = snapshot.entity;
+  const observations = snapshot.state.entities.observations;
+  let archivedEntities: string[] = [];
+  if (entity) {
+    try {
+      const stored: unknown = JSON.parse(entity.entities);
+      if (Array.isArray(stored)) archivedEntities = stored.filter((value): value is string => typeof value === "string");
+    } catch { /* Match the existing entity read's empty fallback for damaged history. */ }
+  }
+  const entities = {
+    id, state: entity?.state ?? "not_run", state_content_revision: entity?.content_revision ?? 0,
+    evidence_snapshot_id: entity?.evidence_snapshot_id ?? 0,
+    content_hash: entity?.content_hash ?? "", stale: snapshot.entityStale,
+    updated_at: entity?.updated_at ?? null,
+    automatic: snapshot.automatic.entities,
+    archived_entities: archivedEntities,
+    observations,
+    effective_observations: observations.filter((entry) => entry.effective),
+    entities: snapshot.view.entities,
+    human: snapshot.view.entities.filter((term) => accepted.has(term)),
+    overrides: snapshot.overrides.filter((entry) => entry.field === "entities"),
+    revision: snapshot.link.personal_revision
+  };
+  return json({ version: 1, body_unchanged: bodyUnchanged, detail,
+    selection: { available: true, ...selection }, entities });
 }
 
 async function updateCuration(request: Request, env: Env, id: number, timing: TimingCollector, app = false): Promise<Response> {

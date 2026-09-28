@@ -12,12 +12,24 @@ type Decision = { id: number; content_revision: number; automatic: string; polic
   run_references_complete: number; runs: Array<{ coverage: string; evidence_coverage: string }> };
 type Legacy = { id: number; payload: string | null; revision: number; provenance: string };
 type Entity = { state: string; content_revision: number; content_hash: string; evidence_snapshot_id: number;
-  entities: string; observations: string; revision: number; snapshot_matches: number };
+  entities: string; observations: string; revision: number; updated_at: string; snapshot_matches: number };
 type Queue = { status: string; content_revision: number };
 type Evidence = { id: number; content_hash: string; truncated: number; completeness: string };
 type Row = { personal_revision: number; content_revision: number; classification: string | null;
   why: string | null; curation_status: string | null; decision: string | null; overrides: string;
   legacy: string | null; entity: string | null; queue: string | null; evidence: string | null };
+
+// The reading endpoint extends the same statement that folds the effective
+// selection. Keep these columns explicit: links also holds private source and
+// lease material which a detail read must not fetch or expose.
+const readingColumns = `,l.id,l.url,l.note,l.created_at,l.enrichment_status,l.enrichment_attempts,
+  l.enrichment_next_retry_at,l.enrichment_paid_uncertain,l.enrichment_paid_stage,
+  l.ai_title,l.original_language,
+  CASE WHEN l.app_body_revision=? THEN NULL ELSE l.original_text END AS original_text,
+  CASE WHEN l.app_body_revision=? THEN NULL ELSE l.translated_text END AS translated_text,
+  l.summary,l.related_links,
+  l.images,l.enrichment_model,l.enrichment_error,l.enrichment_updated_at,l.enriched_at,
+  l.app_body_revision`;
 
 function legacyOverrides(source: Legacy | null): Override[] {
   if (!source || source.provenance !== "legacy_unknown") return [];
@@ -37,7 +49,7 @@ function legacyOverrides(source: Legacy | null): Override[] {
 // One SQLite statement gives every value and its identity the same read
 // snapshot. Separate awaited SELECTs can attach revision N+1 to values from N,
 // even when every individual query is correct. Never read mutable projections.
-export async function readSelectionSnapshot(env: Env, id: number) {
+export async function readSelectionSnapshot(env: Env, id: number, includeReading = false, knownBodyRevision = -1) {
   const link = await env.DB.prepare(`SELECT l.personal_revision,l.content_revision,l.classification,l.why,l.curation_status,
     (SELECT json_object('id',d.id,'content_revision',d.content_revision,'automatic',d.automatic,'policy_version',d.policy_version,
       'run_references_complete',d.run_references_complete,'runs',
@@ -51,12 +63,14 @@ export async function readSelectionSnapshot(env: Env, id: number) {
       FROM legacy_curation_history h WHERE h.link_id=l.id ORDER BY h.id DESC LIMIT 1) AS legacy,
     (SELECT json_object('state',e.state,'content_revision',e.content_revision,'content_hash',e.content_hash,
       'evidence_snapshot_id',e.evidence_snapshot_id,'entities',e.entities,'observations',e.observations,'revision',e.revision,
+      'updated_at',e.updated_at,
       'snapshot_matches',CASE WHEN s.link_id=e.link_id AND s.content_revision=e.content_revision AND s.content_hash=e.content_hash THEN 1 ELSE 0 END)
       FROM entity_states e LEFT JOIN evidence_snapshots s ON s.id=e.evidence_snapshot_id WHERE e.link_id=l.id) AS entity,
     (SELECT json_object('status',j.status,'content_revision',j.content_revision) FROM classification_jobs j WHERE j.link_id=l.id) AS queue,
     (SELECT json_object('id',s.id,'content_hash',s.content_hash,'truncated',s.truncated,'completeness',s.completeness)
       FROM evidence_snapshots s WHERE s.link_id=l.id AND s.content_revision=l.content_revision) AS evidence
-    FROM links l WHERE l.id=?`).bind(id).first<Row>();
+    ${includeReading ? readingColumns : ""}
+    FROM links l WHERE l.id=?`).bind(...(includeReading ? [knownBodyRevision, knownBodyRevision, id] : [id])).first<Row>();
   if (!link) return null;
   const decision = parse<Decision | null>(link.decision, null);
   const entity = parse<Entity | null>(link.entity, null);
@@ -117,6 +131,7 @@ export async function readSelectionSnapshot(env: Env, id: number) {
   }));
   return {
     link, view, automatic, decisionId: decision?.id ?? 0, projected: decision !== null, stale, contentRevision: link.content_revision,
+    entity, entityStale, overrides: layered,
     projectionInput: {
       overrides: layered,
       decisionId: decision?.id ?? 0,
