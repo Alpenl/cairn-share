@@ -2,12 +2,15 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it } from "vitest";
 import worker from "../src/index";
 import { taxonomy } from "../src/curation";
+import { settleFixtureAttempt } from "./provider-attempt-fixture";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 
 async function request(path: string, body?: unknown, method = "POST", token = "internal"): Promise<Response> {
   return worker.fetch(new Request(`https://test.example/api/${path}`, {
-    method, headers: { "X-Cairn-Classification-Budget": "1", Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method, headers: { "X-Cairn-Classification-Budget": "1", Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json", "X-Cairn-Provider-Attempt-Ledger": "1",
+      ...(path.endsWith("/claim") && path.startsWith("enrichment/jobs/") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 }
@@ -17,6 +20,7 @@ async function setup() {
   const { id } = await create.json() as { id: number };
   const leased = await request(`enrichment/jobs/${id}/claim`);
   const { lease_token } = await leased.json() as { lease_token: string };
+  await settleFixtureAttempt((path, body) => request(path, body), id, lease_token, "fetch");
   const source = { original_text: "A guide to evaluating LLMs", original_language: "en", context_text: "A related comment",
     related_links: [], image_urls: [], model: "grok-test" };
   expect((await request(`enrichment/jobs/${id}/source`, { lease_token, source })).status).toBe(200);

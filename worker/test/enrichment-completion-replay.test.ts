@@ -8,6 +8,7 @@ beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST
 function call(path: string, body: unknown, token = "internal", method = "POST") {
   return worker.fetch(new Request(`https://test/api/${path}`, {
     method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json",
+      "X-Cairn-Provider-Attempt-Ledger": "1",
       ...(path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: JSON.stringify(body)
   }), bindings());
@@ -24,6 +25,18 @@ async function fixture() {
   expect((await call(`enrichment/jobs/${id}/source`, { lease_token, source })).status).toBe(200);
   expect((await call(`enrichment/jobs/${id}/lease-admit`, {
     lease_token, stage: "reading", min_remaining_ms: 210_000
+  })).status).toBe(200);
+  const revision = await env.DB.prepare("SELECT content_revision FROM links WHERE id=?")
+    .bind(id).first<{ content_revision: number }>();
+  expect((await call("enrichment/provider-attempts/reserve", {
+    operation_key: "a".repeat(64), request_hash: "b".repeat(64), model: "fixture",
+    stage: "reading", variant: "reading", attempt_number: 1,
+    link_id: id, lease_token, content_revision: revision!.content_revision, min_remaining_ms: 210_000
+  })).status).toBe(200);
+  expect((await call("enrichment/provider-attempts/settle", {
+    operation_key: "a".repeat(64), http_status: 200, response_id: null,
+    input_tokens: null, output_tokens: null, total_tokens: null,
+    x_search_calls: null, cost_usd_ticks: null
   })).status).toBe(200);
   const completion = { lease_token, original_text: source.original_text, ai_title: "title",
     original_language: "en", translated_text: "translation", summary: "summary", model: "fixture",

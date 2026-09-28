@@ -13,6 +13,7 @@ async function call(path: string, body?: unknown, token = "internal", method?: s
     method: method ?? (body === undefined ? "GET" : "POST"),
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json",
       "X-Cairn-Classification-Budget": "1",
+      "X-Cairn-Provider-Attempt-Ledger": "1",
       ...(path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), bindings());

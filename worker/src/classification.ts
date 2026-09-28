@@ -897,18 +897,29 @@ export async function sourceRoute(request: Request, env: Env, id: number): Promi
     return fail("invalid_source");
   }
   const now = new Date().toISOString();
+  const leaseHash = await sha256Hex(body.lease_token);
   const guard = "id=? AND enrichment_status='processing' AND enrichment_lease_token=? AND enrichment_lease_until>?";
+  const paidGuard = `${guard} AND (enrichment_paid_stage IS NULL OR
+    (enrichment_paid_stage='fetch' AND EXISTS
+      (SELECT 1 FROM enrichment_provider_attempts a WHERE a.link_id=links.id
+       AND a.lease_hash=? AND a.content_revision=links.content_revision
+       AND a.stage='fetch' AND a.state='responded' AND a.http_status=200)
+     AND NOT EXISTS (SELECT 1 FROM enrichment_provider_attempts a WHERE a.link_id=links.id
+       AND a.lease_hash=? AND a.stage='fetch' AND a.state='reserved')))`;
   const results = await env.DB.batch([
     env.DB.prepare(`UPDATE links SET original_text=?,original_language=?,source_context_text=?,related_links=?,
       ai_title=NULL,translated_text=NULL,summary=NULL,images=CASE WHEN original_text IS ? THEN images ELSE '[]' END,
       enrichment_paid_uncertain=0,enrichment_paid_stage=NULL,
-      enrichment_updated_at=? WHERE ${guard} RETURNING id`)
-      .bind(source.original_text, source.original_language || null, source.context_text, JSON.stringify(source.related_links), source.original_text, now, id, body.lease_token, now),
+      enrichment_updated_at=? WHERE ${paidGuard} RETURNING id`)
+      .bind(source.original_text, source.original_language || null, source.context_text, JSON.stringify(source.related_links), source.original_text, now, id, body.lease_token, now, leaseHash, leaseHash),
     env.DB.prepare(`INSERT INTO enrichment_sources(link_id,url,original_text,payload,fetched_at)
       SELECT id,url,?,?,? FROM links WHERE ${guard}
+        AND enrichment_paid_stage IS NULL AND original_text IS ?
+        AND source_context_text IS ? AND json(related_links)=json(?)
       ON CONFLICT(link_id) DO UPDATE SET url=excluded.url,original_text=excluded.original_text,
         payload=excluded.payload,fetched_at=excluded.fetched_at`)
-      .bind(source.original_text, JSON.stringify(source), now, id, body.lease_token, now)
+      .bind(source.original_text, JSON.stringify(source), now, id, body.lease_token, now,
+        source.original_text, source.context_text, JSON.stringify(source.related_links))
   ]);
   return results[0].results.length ? reply({ id, status: "source_saved" }) : conflict();
 }

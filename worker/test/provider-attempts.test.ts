@@ -1,0 +1,194 @@
+import { applyD1Migrations, env, reset } from "cloudflare:test";
+import { beforeEach, expect, it } from "vitest";
+import worker from "../src/index";
+
+const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
+beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
+
+function call(path: string, body?: unknown, token = "internal", method = "POST") {
+  return worker.fetch(new Request(`https://test/api/${path}`, {
+    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json",
+      "X-Cairn-Provider-Attempt-Ledger": "1",
+      ...(path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  }), bindings());
+}
+
+async function fixture() {
+  const created = await call("links", { url: "https://x.com/u/status/100" }, "app");
+  const { id } = await created.json() as { id: number };
+  const claimed = await call("enrichment/jobs/claim", {});
+  expect(claimed.status).toBe(200);
+  const job = await claimed.json() as { lease_token: string; content_revision: number };
+  expect((await call(`enrichment/jobs/${id}/lease-admit`, {
+    lease_token: job.lease_token, stage: "fetch", min_remaining_ms: 210_000
+  })).status).toBe(200);
+  return { id, ...job };
+}
+
+function first(job: Awaited<ReturnType<typeof fixture>>) {
+  return { operation_key: "a".repeat(64), request_hash: "b".repeat(64), model: "grok-test",
+    stage: "fetch", variant: "fetch_thread", attempt_number: 1,
+    link_id: job.id, lease_token: job.lease_token, content_revision: job.content_revision,
+    min_remaining_ms: 210_000 };
+}
+const settle = (operation_key: string, http_status = 200) => ({ operation_key, http_status,
+  response_id: "resp_test", input_tokens: 100, output_tokens: 20, total_tokens: 120,
+  x_search_calls: 1, cost_usd_ticks: 1234 });
+
+it("grants one durable permit, rejects replay and binds to the current lease and content", async () => {
+  const job = await fixture();
+  const body = first(job);
+  const path = "enrichment/provider-attempts/reserve";
+  expect((await call(path, body, "app")).status).toBe(401);
+  const firstResponse = await call(path, body);
+  expect(firstResponse.status).toBe(200);
+  expect(await firstResponse.json()).toEqual({ granted: true, reason: "reserved" });
+  expect(await (await call(path, body)).json()).toEqual({ granted: false, reason: "already_reserved" });
+  expect((await call(path, { ...body, request_hash: "c".repeat(64) })).status).toBe(409);
+  expect((await call(path, { ...body, operation_key: "d".repeat(64) })).status).toBe(409);
+  expect((await call(path, { ...body, operation_key: "e".repeat(64), content_revision: 99 })).status).toBe(409);
+  const row = await env.DB.prepare(`SELECT lease_hash,content_revision,state FROM enrichment_provider_attempts
+    WHERE operation_key=?`).bind(body.operation_key).first<{lease_hash:string;content_revision:number;state:string}>();
+  expect(row).toMatchObject({ content_revision: job.content_revision, state: "reserved" });
+  expect(row!.lease_hash).toMatch(/^[a-f0-9]{64}$/);
+  expect(row!.lease_hash).not.toBe(job.lease_token);
+});
+
+it("requires a settled first response and explicit fallback authorization before a second POST", async () => {
+  const job = await fixture();
+  const initial = first(job);
+  const fallback = { ...initial, operation_key: "c".repeat(64), request_hash: "d".repeat(64),
+    variant: "fetch_post", attempt_number: 2 };
+  const path = "enrichment/provider-attempts/reserve";
+  expect((await call(path, initial)).status).toBe(200);
+  expect((await call(path, fallback)).status).toBe(409);
+  expect(await (await call("enrichment/provider-attempts/settle", settle(initial.operation_key))).json())
+    .toEqual({ settled: true });
+  expect((await call(path, fallback)).status).toBe(409);
+  expect((await call("enrichment/provider-attempts/authorize-fallback", { operation_key: initial.operation_key })).status).toBe(200);
+  expect(await (await call(path, fallback)).json()).toEqual({ granted: true, reason: "reserved" });
+  expect(await (await call(path, fallback)).json()).toEqual({ granted: false, reason: "already_reserved" });
+  expect((await call("enrichment/provider-attempts/settle", settle(initial.operation_key, 502))).status).toBe(409);
+  expect((await call("enrichment/provider-attempts/settle", settle(fallback.operation_key))).status).toBe(200);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_attempts WHERE link_id=?")
+    .bind(job.id).first<{n:number}>())?.n).toBe(2);
+});
+
+it("keeps a lost provider result charged across lease expiry and deletes private rows with the link", async () => {
+  const job = await fixture();
+  const body = first(job);
+  expect((await call("enrichment/provider-attempts/reserve", body)).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind("2000-01-01T00:00:00.000Z", job.id).run();
+  expect((await call("enrichment/provider-attempts/reserve", { ...body,
+    operation_key: "c".repeat(64) })).status).toBe(409);
+  const listed = await call("enrichment/provider-attempts?state=reserved", undefined, "internal", "GET");
+  expect(listed.status).toBe(200);
+  expect(await listed.json()).toMatchObject({ items: [{ operation_key: body.operation_key, state: "reserved" }] });
+  const summary = await call("enrichment/provider-attempts/summary", undefined, "internal", "GET");
+  expect(summary.status).toBe(200);
+  expect(await summary.json()).toMatchObject({ unknown: { count: 1 },
+    budget: { used: { total: 1, fetch_first: 1, fetch_fallback: 0, reading: 0 } } });
+  expect((await call("enrichment/provider-attempts/summary", undefined, "app", "GET")).status).toBe(401);
+  expect((await call("enrichment/provider-attempts?state=reserved", undefined, "app", "GET")).status).toBe(401);
+  expect((await call(`links/${job.id}`, undefined, "app", "DELETE")).status).toBe(204);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_provider_attempts WHERE link_id=?")
+    .bind(job.id).first<{n:number}>())?.n).toBe(0);
+});
+
+it("budgets startup canaries independently even across unique operations", async () => {
+  const path = "enrichment/provider-attempts/reserve";
+  for (let n = 0; n < 4; n++) {
+    const body = { operation_key: n.toString(16).repeat(64), request_hash: "f".repeat(64),
+      model: "grok-test", stage: "canary", variant: "canary", attempt_number: 1 };
+    expect(await (await call(path, body)).json()).toEqual({ granted: true, reason: "reserved" });
+  }
+  const excess = { operation_key: "f".repeat(64), request_hash: "f".repeat(64),
+    model: "grok-test", stage: "canary", variant: "canary", attempt_number: 1 };
+  const rejected = await call(path, excess);
+  expect(rejected.status).toBe(429);
+  expect(await rejected.json()).toEqual({ error: "budget_exhausted" });
+});
+
+it("defers a budget-denied stage without charging a job attempt or losing its priority", async () => {
+  const job = await fixture();
+  await env.DB.prepare(`WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<500)
+    INSERT INTO enrichment_provider_attempts
+      (operation_key,stage,variant,attempt_number,request_hash,reservation_hash,model,created_at)
+    SELECT printf('%064x',x),'canary','canary',1,?,?,'fixture',? FROM n`)
+    .bind("a".repeat(64), "b".repeat(64), new Date().toISOString()).run();
+  const denied = await call("enrichment/provider-attempts/reserve", first(job));
+  expect(denied.status).toBe(429);
+  expect(await denied.json()).toEqual({ error: "budget_exhausted" });
+  const deferred = await call(`enrichment/jobs/${job.id}/budget-defer`, {
+    lease_token: job.lease_token, stage: "fetch" });
+  expect(deferred.status).toBe(200);
+  expect(await deferred.json()).toMatchObject({ id: job.id, status: "deferred" });
+  expect(await env.DB.prepare(`SELECT enrichment_status,enrichment_attempts,enrichment_paid_uncertain,
+    enrichment_next_retry_at FROM links WHERE id=?`).bind(job.id).first())
+    .toMatchObject({ enrichment_status: "pending", enrichment_attempts: 0, enrichment_paid_uncertain: 0 });
+  expect((await call("enrichment/jobs/claim", {})).status).toBe(204);
+  await env.DB.prepare("DELETE FROM enrichment_provider_attempts WHERE link_id IS NULL").run();
+  await env.DB.prepare("UPDATE links SET enrichment_next_retry_at='2000-01-01T00:00:00.000Z' WHERE id=?")
+    .bind(job.id).run();
+  const resumed = await call("enrichment/jobs/claim", {});
+  expect(resumed.status).toBe(200);
+  expect(await resumed.json()).toMatchObject({ id: job.id, attempt: 1 });
+});
+
+it("cannot release a lease after a paid permit wins the race", async () => {
+  const job = await fixture();
+  expect((await call("enrichment/provider-attempts/reserve", first(job))).status).toBe(200);
+  expect((await call(`enrichment/jobs/${job.id}/budget-defer`, {
+    lease_token: job.lease_token, stage: "fetch" })).status).toBe(409);
+  expect(await env.DB.prepare(`SELECT enrichment_status,enrichment_attempts,
+    enrichment_paid_uncertain,enrichment_lease_token FROM links WHERE id=?`)
+    .bind(job.id).first()).toMatchObject({ enrichment_status: "processing",
+      enrichment_attempts: 1, enrichment_paid_uncertain: 1,
+      enrichment_lease_token: job.lease_token });
+});
+
+it("does not checkpoint fetched source until its provider attempt has a known response", async () => {
+  const job = await fixture();
+  const source = { original_text: "saved source", original_language: "en", context_text: "",
+    related_links: [], image_urls: [], model: "grok-test" };
+  const save = () => call(`enrichment/jobs/${job.id}/source`, { lease_token: job.lease_token, source });
+  expect((await save()).status).toBe(409);
+  expect((await call("enrichment/provider-attempts/reserve", first(job))).status).toBe(200);
+  expect((await save()).status).toBe(409);
+  expect((await env.DB.prepare("SELECT original_text FROM links WHERE id=?")
+    .bind(job.id).first<{original_text:string|null}>())?.original_text).toBeNull();
+  expect((await call("enrichment/provider-attempts/settle", settle(first(job).operation_key))).status).toBe(200);
+  expect((await save()).status).toBe(200);
+  expect((await env.DB.prepare("SELECT original_text,enrichment_paid_uncertain FROM links WHERE id=?")
+    .bind(job.id).first<{original_text:string;enrichment_paid_uncertain:number}>()))
+    .toEqual({ original_text: source.original_text, enrichment_paid_uncertain: 0 });
+});
+
+it("does not complete reading without a settled reading attempt", async () => {
+  const job = await fixture();
+  expect((await call("enrichment/provider-attempts/reserve", first(job))).status).toBe(200);
+  expect((await call("enrichment/provider-attempts/settle", settle(first(job).operation_key))).status).toBe(200);
+  const source = { original_text: "saved source", original_language: "en", context_text: "",
+    related_links: [], image_urls: [], model: "grok-test" };
+  expect((await call(`enrichment/jobs/${job.id}/source`, { lease_token: job.lease_token, source })).status).toBe(200);
+  expect((await call(`enrichment/jobs/${job.id}/lease-admit`, {
+    lease_token: job.lease_token, stage: "reading", min_remaining_ms: 210_000
+  })).status).toBe(200);
+  const completion = { lease_token: job.lease_token, original_text: source.original_text,
+    ai_title: "标题", original_language: "en", translated_text: "译文", summary: "摘要",
+    related_links: [], images: [], model: "grok-test" };
+  const complete = () => call(`enrichment/jobs/${job.id}/complete`, completion);
+  expect((await complete()).status).toBe(409);
+  const revision = await env.DB.prepare("SELECT content_revision FROM links WHERE id=?")
+    .bind(job.id).first<{content_revision:number}>();
+  const reading = { ...first(job), operation_key: "e".repeat(64), request_hash: "f".repeat(64),
+    stage: "reading", variant: "reading", attempt_number: 1, content_revision: revision!.content_revision };
+  expect((await call("enrichment/provider-attempts/reserve", reading)).status).toBe(200);
+  expect((await complete()).status).toBe(409);
+  expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_completion_receipts WHERE link_id=?")
+    .bind(job.id).first<{n:number}>())?.n).toBe(0);
+  expect((await call("enrichment/provider-attempts/settle", settle(reading.operation_key))).status).toBe(200);
+  expect((await complete()).status).toBe(200);
+});

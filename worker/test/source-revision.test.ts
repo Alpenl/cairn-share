@@ -1,14 +1,16 @@
 import {applyD1Migrations,env,reset} from "cloudflare:test";
 import {beforeEach,expect,it} from "vitest";
 import worker from "../src/index";
+import { settleFixtureAttempt } from "./provider-attempt-fixture";
 const bindings=()=>({...env,CAIRN_API_TOKEN:"app",CAIRN_ENRICHER_TOKEN:"internal"});
 beforeEach(async()=>{await reset();await applyD1Migrations(env.DB,env.TEST_MIGRATIONS);});
 async function call(path:string,body?:unknown,token="internal"){
- return worker.fetch(new Request("https://test/api/"+path,{method:body===undefined?"GET":"POST",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:body===undefined?undefined:JSON.stringify(body)}),bindings());
+ return worker.fetch(new Request("https://test/api/"+path,{method:body===undefined?"GET":"POST",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json","X-Cairn-Provider-Attempt-Ledger":"1",...(path.endsWith("/claim")?{"X-Cairn-Source-Lease-Admission":"1"}:{})},body:body===undefined?undefined:JSON.stringify(body)}),bindings());
 }
 async function setup(){
  const created=await(await call("links",{url:"https://x.com/source/status/42"},"app")).json() as {id:number};
  const lease=await(await call(`enrichment/jobs/${created.id}/claim`,{})).json() as {lease_token:string};
+ await settleFixtureAttempt((path,body)=>call(path,body),created.id,lease.lease_token,"fetch");
  const source={original_text:"synthetic primary",original_language:"en",context_text:"first context",related_links:["https://example.com/first"],image_urls:[],model:"fixture"};
  const save=async(value=source)=>call(`enrichment/jobs/${created.id}/source`,{lease_token:lease.lease_token,source:value});
  const revision=()=>env.DB.prepare("SELECT content_revision FROM links WHERE id=?").bind(created.id).first<number>("content_revision");

@@ -1,6 +1,7 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it } from "vitest";
 import worker from "../src/index";
+import { settleFixtureAttempt } from "./provider-attempt-fixture";
 
 // B10 integration: migration shape, cross-protocol reads/writes, privacy
 // cascade and the synthetic-failure budget invariant. These run against the
@@ -10,7 +11,9 @@ beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST
 
 async function request(path: string, body?: unknown, method = "POST", token = "internal"): Promise<Response> {
   return worker.fetch(new Request(`https://test.example/api/${path}`, {
-    method, headers: { "X-Cairn-Classification-Budget": "1", Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method, headers: { "X-Cairn-Classification-Budget": "1", Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json", "X-Cairn-Provider-Attempt-Ledger": "1",
+      ...(path.endsWith("/claim") && path.startsWith("enrichment/jobs/") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 }
@@ -65,6 +68,7 @@ it("classifies independently of reading and preserves source on reading failure"
   const id = await createLink();
   const claim = await request(`enrichment/jobs/${id}/claim`);
   const { lease_token } = await claim.json() as { lease_token: string };
+  await settleFixtureAttempt((path, body) => request(path, body), id, lease_token, "fetch");
   const source = { original_text: "archived text", original_language: "en", context_text: "", related_links: [], image_urls: [], model: "grok" };
   expect((await request(`enrichment/jobs/${id}/source`, { lease_token, source })).status).toBe(200);
   // Reading fails, but the source remains readable and classification can run.

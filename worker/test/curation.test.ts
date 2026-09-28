@@ -2,6 +2,7 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { storedClassification, validateClassification, taxonomy, type Classification } from "../src/curation";
+import { settleFixtureAttempt } from "./provider-attempt-fixture";
 
 const token = "curation-test-token";
 const appToken = "curation-app-token";
@@ -13,7 +14,9 @@ beforeEach(async () => {
 
 async function request(path: string, method = "GET", body?: unknown, bearer = token): Promise<Response> {
   return worker.fetch(new Request(`https://test.example${path}`, {
-    method, headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+    method, headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json",
+      "X-Cairn-Provider-Attempt-Ledger": "1",
+      ...(path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: appToken, CAIRN_ENRICHER_TOKEN: token });
 }
@@ -30,11 +33,16 @@ function classification(extra: Partial<Classification> = {}): Classification {
 
 async function complete(id: number, value: unknown = classification()): Promise<Response> {
   const claim = await worker.fetch(new Request(`https://test.example/api/enrichment/jobs/${id}/claim`, {
-    method: "POST", headers: { Authorization: `Bearer ${token}`, "X-Cairn-Source-Lease-Admission": "1" }
+    method: "POST", headers: { Authorization: `Bearer ${token}`, "X-Cairn-Source-Lease-Admission": "1",
+      "X-Cairn-Provider-Attempt-Ledger": "1" }
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES,
     CAIRN_API_TOKEN: appToken, CAIRN_ENRICHER_TOKEN: token });
   expect(claim.status).toBe(200);
   const job = await claim.json() as { lease_token: string };
+  if (validateClassification(value) !== null) {
+    await settleFixtureAttempt((path, body) => request(`/api/${path}`, "POST", body),
+      id, job.lease_token, "reading");
+  }
   return request(`/api/enrichment/jobs/${id}/complete`, "POST", {
     lease_token: job.lease_token, original_text: "KV cache original-only 100%_literal", summary: "中文部署摘要",
     related_links: [], images: [], model: "fixture", classification: value
@@ -81,6 +89,8 @@ describe("bookmark curation", () => {
   it("preserves human labels and intent while an in-flight enrichment completes", async () => {
     const id = await create();
     const claim = await (await request(`/api/enrichment/jobs/${id}/claim`, "POST")).json() as { lease_token: string };
+    await settleFixtureAttempt((path, body) => request(`/api/${path}`, "POST", body),
+      id, claim.lease_token, "reading");
     const edit = { why: "  用于项目评审  ", curation_status: "kept", classification: { topics: ["eng"], form: "method", use: "quote" } };
     expect((await request(`/api/enrichment/jobs/${id}/curation`, "PATCH", edit)).status).toBe(200);
     expect((await request(`/api/enrichment/jobs/${id}/complete`, "POST", {

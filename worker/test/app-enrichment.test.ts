@@ -2,6 +2,7 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { taxonomy } from "../src/curation";
+import { settleFixtureAttempt } from "./provider-attempt-fixture";
 
 const appToken = "app-enrichment-test";
 const enricherToken = "enricher-test";
@@ -15,7 +16,9 @@ afterEach(() => vi.restoreAllMocks());
 
 async function request(path: string, method = "GET", body?: unknown, token = appToken): Promise<Response> {
   return worker.fetch(new Request(`https://app.example${path}`, {
-    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json",
+      "X-Cairn-Provider-Attempt-Ledger": "1",
+      ...(path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), bindings());
 }
@@ -28,6 +31,8 @@ async function seed(): Promise<number> {
 async function complete(id: number): Promise<void> {
   const claim = await request(`/api/enrichment/jobs/${id}/claim`, "POST", undefined, enricherToken);
   const { lease_token } = await claim.json() as { lease_token: string };
+  await settleFixtureAttempt((path, body) => request(`/api/${path}`, "POST", body, enricherToken),
+    id, lease_token, "reading");
   const response = await request(`/api/enrichment/jobs/${id}/complete`, "POST", {
     lease_token, ai_title: "用于同步验证的中文标题", original_language: "en",
     original_text: "source-only-keyword " + "original ".repeat(6000), translated_text: "译文".repeat(10000),

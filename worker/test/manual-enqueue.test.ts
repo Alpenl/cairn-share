@@ -7,7 +7,8 @@ beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST
 
 async function call(path: string, body: unknown = {}, token = "internal") {
   return worker.fetch(new Request(`https://test/api/${path}`, {
-    method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json",
+      "X-Cairn-Provider-Attempt-Ledger": "1" },
     body: JSON.stringify(body)
   }), bindings());
 }

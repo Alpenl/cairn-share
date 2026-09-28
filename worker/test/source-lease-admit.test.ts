@@ -8,6 +8,7 @@ beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST
 async function post(path: string, body: unknown = {}, token = "internal", guarded = true) {
   return worker.fetch(new Request(`https://test/api/${path}`, {
     method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json",
+      ...(guarded ? { "X-Cairn-Provider-Attempt-Ledger": "1" } : {}),
       ...(guarded && path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: JSON.stringify(body)
   }), bindings());
@@ -18,11 +19,20 @@ async function claimed(guarded = true) {
   const id = (await created.json() as { id: number }).id;
   const response = await post("enrichment/jobs/claim", {}, "internal", guarded);
   expect(response.status).toBe(200);
-  return { id, job: await response.json() as { lease_token: string; attempt: number } };
+  return { id, job: await response.json() as { lease_token: string; attempt: number; content_revision: number } };
 }
 
 const admit = (id: number, lease_token: string, min_remaining_ms = 210_000, stage = "fetch") =>
   post(`enrichment/jobs/${id}/lease-admit`, { lease_token, min_remaining_ms, stage });
+const reserve = (id: number, lease_token: string, content_revision: number, stage = "fetch") =>
+  post("enrichment/provider-attempts/reserve", { operation_key: (stage === "fetch" ? "a" : "b").repeat(64),
+    request_hash: "c".repeat(64), model: "grok-test", stage,
+    variant: stage === "fetch" ? "fetch_thread" : "reading", attempt_number: 1,
+    link_id: id, lease_token, content_revision, min_remaining_ms: 210_000 });
+const settle = (stage = "fetch") => post("enrichment/provider-attempts/settle", {
+  operation_key: (stage === "fetch" ? "a" : "b").repeat(64), http_status: 200,
+  response_id: null, input_tokens: null, output_tokens: null, total_tokens: null,
+  x_search_calls: null, cost_usd_ticks: null });
 
 it("requires the internal token for source lease capability negotiation", async () => {
   const path = "https://test/api/enrichment/source-lease-capability";
@@ -33,7 +43,8 @@ it("requires the internal token for source lease capability negotiation", async 
     headers: { Authorization: "Bearer internal" } }), bindings());
   expect(valid.status).toBe(200);
   expect(await valid.json()).toEqual({ protocol: 1, lease_ms: 900_000,
-    paid_stage_admission: true, provider_result_guard: true, completion_replay: true });
+    paid_stage_admission: true, provider_result_guard: true, completion_replay: true,
+    provider_attempt_ledger: true });
 });
 
 it("holds a possibly paid call after a short lease instead of automatically paying twice", async () => {
@@ -41,6 +52,7 @@ it("holds a possibly paid call after a short lease instead of automatically payi
   const ready = await admit(id, job.lease_token);
   expect(ready.status).toBe(200);
   expect(await ready.json()).toMatchObject({ id, status: "admitted" });
+  expect((await reserve(id, job.lease_token, job.content_revision)).status).toBe(200);
   await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
     .bind(new Date(Date.now() + 1000).toISOString(), id).run();
   const short = await admit(id, job.lease_token);
@@ -59,6 +71,7 @@ it("holds a possibly paid call after a short lease instead of automatically payi
 it("does not retry a failed job whose provider result is unresolved", async () => {
   const { id, job } = await claimed();
   expect((await admit(id, job.lease_token)).status).toBe(200);
+  expect((await reserve(id, job.lease_token, job.content_revision)).status).toBe(200);
   const duplicate = await admit(id, job.lease_token);
   expect(duplicate.status).toBe(409);
   expect(await duplicate.json()).toEqual({ error: "provider_result_unknown" });
@@ -88,6 +101,7 @@ it("does not retry a failed job whose provider result is unresolved", async () =
 it("allows a new URL objective after an unresolved call for the old URL", async () => {
   const { id, job } = await claimed();
   expect((await admit(id, job.lease_token)).status).toBe(200);
+  expect((await reserve(id, job.lease_token, job.content_revision)).status).toBe(200);
   const changed = await worker.fetch(new Request(`https://test/api/links/${id}`, {
     method: "PATCH", headers: { Authorization: "Bearer app", "Content-Type": "application/json" },
     body: JSON.stringify({ url: "https://x.com/u/status/2" })
@@ -122,16 +136,14 @@ it("reclaims an expired unused lease without consuming the last allowed attempt"
   expect(await reclaimed.json()).toMatchObject({ id, attempt: 5 });
 });
 
-it("treats an old client without admission capability as possibly paid", async () => {
-  const { id, job } = await claimed(false);
-  expect(await env.DB.prepare("SELECT enrichment_paid_stage_started,enrichment_paid_uncertain,enrichment_paid_stage FROM links WHERE id=?")
-    .bind(id).first()).toEqual({ enrichment_paid_stage_started: 1,
-      enrichment_paid_uncertain: 1, enrichment_paid_stage: "legacy_unknown" });
-  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
-    .bind(new Date(Date.now() + 1000).toISOString(), id).run();
-  expect((await admit(id, job.lease_token)).status).toBe(409);
-  expect(await env.DB.prepare("SELECT enrichment_attempts FROM links WHERE id=?")
-    .bind(id).first()).toEqual({ enrichment_attempts: 1 });
+it("refuses a new lease to a client without the per-attempt ledger", async () => {
+  const created = await post("links", { url: "https://x.com/u/status/1" }, "app");
+  const { id } = await created.json() as { id: number };
+  const oldClient = await post("enrichment/jobs/claim", {}, "internal", false);
+  expect(oldClient.status).toBe(409);
+  expect(await oldClient.json()).toEqual({ error: "capability_mismatch" });
+  expect(await env.DB.prepare("SELECT enrichment_status,enrichment_attempts FROM links WHERE id=?")
+    .bind(id).first()).toEqual({ enrichment_status: "pending", enrichment_attempts: 0 });
 });
 
 it("marks an already leased historical job as possibly paid during migration", async () => {
@@ -149,12 +161,17 @@ it("marks an already leased historical job as possibly paid during migration", a
 it("clears a fetch marker only after the source checkpoint, then guards reading separately", async () => {
   const { id, job } = await claimed();
   expect((await admit(id, job.lease_token)).status).toBe(200);
+  expect((await reserve(id, job.lease_token, job.content_revision)).status).toBe(200);
+  expect((await settle()).status).toBe(200);
   const source = { original_text: "saved source", original_language: "en", context_text: "",
     related_links: [], image_urls: [], model: "fixture" };
   expect((await post(`enrichment/jobs/${id}/source`, { lease_token: job.lease_token, source })).status).toBe(200);
   expect(await env.DB.prepare("SELECT enrichment_paid_uncertain,enrichment_paid_stage FROM links WHERE id=?")
     .bind(id).first()).toEqual({ enrichment_paid_uncertain: 0, enrichment_paid_stage: null });
   expect((await admit(id, job.lease_token, 210_000, "reading")).status).toBe(200);
+  const current = await env.DB.prepare("SELECT content_revision FROM links WHERE id=?")
+    .bind(id).first<{ content_revision: number }>();
+  expect((await reserve(id, job.lease_token, current!.content_revision, "reading")).status).toBe(200);
   await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
     .bind(new Date(Date.now() - 1000).toISOString(), id).run();
   expect((await post("enrichment/jobs/claim")).status).toBe(204);

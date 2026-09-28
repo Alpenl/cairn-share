@@ -911,13 +911,13 @@ async function patchRaw(id: number, body: string): Promise<Response> {
 
 async function claimEnrichment(): Promise<Response> {
   return dispatchEnrichment("/api/enrichment/jobs/claim", {
-    method: "POST", headers: { "X-Cairn-Source-Lease-Admission": "1" }
+    method: "POST", headers: { "X-Cairn-Source-Lease-Admission": "1", "X-Cairn-Provider-Attempt-Ledger": "1" }
   });
 }
 
 async function claimEnrichmentByID(id: number): Promise<Response> {
   return dispatchEnrichment(`/api/enrichment/jobs/${id}/claim`, {
-    method: "POST", headers: { "X-Cairn-Source-Lease-Admission": "1" }
+    method: "POST", headers: { "X-Cairn-Source-Lease-Admission": "1", "X-Cairn-Provider-Attempt-Ledger": "1" }
   });
 }
 
