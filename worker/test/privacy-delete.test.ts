@@ -153,7 +153,7 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("rerank_cache",{cache_key:"private-rank",owner_token:"owner",status:"pending",request_json:"private query",scope_hash:"scope",spec_hash:"spec",model:"model",items:"[]",created_at:1,expires_at:2});
   await insert("rerank_cache_links",{cache_key:"private-rank",link_id:id});
   await insert("entity_cache",{cache_key:"private-entity",link_id:id,evidence_snapshot_id:snapshotID,content_revision:1,content_hash:"hash",source_links:"[]",owner_token:"owner",status:"completed",request_json:"private entity material",candidates:"[]",spec_hash:"spec",answers:"{}",created_at:1,expires_at:Date.now()+86400000});
-  const tables=["entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links"];
+  const tables=["entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links"];
   const schema=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_*'").all<{name:string}>();
   const linked:string[]=[];
   for(const {name} of schema.results) {
@@ -164,7 +164,7 @@ it("atomically deletes populated private tables, references, budgets and cached 
   // Recovery rows require a settled permit and expired lease. The real route
   // and its deletion are exercised in provider-attempts.test.ts.
   for(const table of tables) expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first("n"),table)
-    .toBe(table==="enrichment_provider_source_recoveries"?0:1);
+    .toBe(table==="enrichment_provider_source_recoveries" || table==="enrichment_provider_reading_recoveries"?0:1);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_decision_runs").first("n")).toBe(1);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_run_reuse_sources").first("n")).toBe(1);
   const before=await request(`links/${id}`);expect(before.status).toBe(200);expect(before.headers.get("Cache-Control")).toBe("private, no-store");

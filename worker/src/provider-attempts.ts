@@ -398,9 +398,144 @@ async function recoverSource(request: Request, env: Env): Promise<Response> {
   }
 }
 
+type RecoveredReading = {
+  ai_title: string; original_language: string; translated_text: string;
+  summary: string; model: string;
+};
+
+function validRecoveredReading(value: unknown): value is RecoveredReading {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const reading = value as Record<string, unknown>;
+  const limits: Record<string, number> = { ai_title: 200, original_language: 32,
+    translated_text: 100_000, summary: 4_000, model: 200 };
+  const title = reading.ai_title;
+  if (typeof title !== "string" || Array.from(title).length < 8 ||
+      Array.from(title).length > 32 || !/\p{Script=Han}/u.test(title)) return false;
+  return Object.keys(reading).length === Object.keys(limits).length &&
+    Object.entries(limits).every(([key, limit]) => typeof reading[key] === "string" &&
+      (reading[key] as string).trim().length > 0 &&
+      (reading[key] as string).length <= limit &&
+      (reading[key] as string) === (reading[key] as string).trim());
+}
+
+// R2 image names are deterministic for their source URL and content type.
+// A paid reading attempt starts only after StoreImages has completed. Require
+// exactly one matching object for every current source URL; missing or
+// ambiguous objects keep the permit blocked rather than guessing a reference.
+async function recoveredImages(env: Env, id: number, imageURLs: string[]): Promise<
+  { key: string; content_type: string }[] | null> {
+  const types = [
+    ["image/jpeg", "jpg"], ["image/png", "png"], ["image/webp", "webp"],
+    ["image/gif", "gif"], ["image/avif", "avif"]
+  ] as const;
+  const images: { key: string; content_type: string }[] = [];
+  for (const url of new Set(imageURLs)) {
+    const hash = await digest(url);
+    const candidates = await Promise.all(types.map(async ([type, extension]) => {
+      const key = `enrichment/${id}/${hash}.${extension}`;
+      const object = await env.ENRICHMENT_IMAGES.head(key);
+      return object && object.customMetadata?.source_url === url &&
+        object.httpMetadata?.contentType === type && object.size > 0 && object.size <= (15 << 20)
+        ? { key, content_type: type } : null;
+    }));
+    const matching = candidates.flatMap((image) => image === null ? [] : [image]);
+    if (matching.length !== 1) return null;
+    images.push(matching[0]);
+  }
+  return images;
+}
+
+async function verifiedCurrentImages(env: Env, id: number, payload: string): Promise<boolean> {
+  let value: unknown;
+  try { value = JSON.parse(payload); } catch { return false; }
+  if (!Array.isArray(value) || value.length > 8) return false;
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const image = item as Record<string, unknown>;
+    if (Object.keys(image).length !== 2 || typeof image.key !== "string" ||
+        typeof image.content_type !== "string" ||
+        !new RegExp(`^enrichment/${id}/[0-9a-f]{64}\\.(jpg|png|webp|gif|avif)$`).test(image.key) ||
+        seen.has(image.key)) return false;
+    seen.add(image.key);
+    const object = await env.ENRICHMENT_IMAGES.head(image.key);
+    if (!object || object.httpMetadata?.contentType !== image.content_type ||
+        object.size < 1 || object.size > (15 << 20)) return false;
+  }
+  return true;
+}
+
+async function recoverReading(request: Request, env: Env): Promise<Response> {
+  const value = await readBody(request, 512 * 1024);
+  if (value instanceof Response) return value;
+  const keys = ["operation_key", "response_id", "actor", "reading"];
+  if (Object.keys(value).length !== keys.length || Object.keys(value).some((key) => !keys.includes(key)) ||
+      !hex(value.operation_key) || typeof value.response_id !== "string" ||
+      value.response_id.length < 1 || value.response_id.length > 200 ||
+      !/^[A-Za-z0-9_-]+$/.test(value.response_id) ||
+      typeof value.actor !== "string" || !/^[A-Za-z0-9._@-]{3,80}$/.test(value.actor) ||
+      !validRecoveredReading(value.reading)) return fail("invalid_recovery");
+  const reading = value.reading;
+  const payloadHash = await digest(canonicalJSON({ response_id: value.response_id, reading }));
+  const readReceipt = () => env.DB.prepare(`SELECT payload_hash,response
+    FROM enrichment_provider_reading_recoveries WHERE operation_key=?`)
+    .bind(value.operation_key).first<{ payload_hash: string; response: string }>();
+  const replay = (row: { payload_hash: string; response: string } | null) => row
+    ? row.payload_hash === payloadHash ? json(JSON.parse(row.response)) : fail("operation_conflict", 409)
+    : null;
+  const prior = replay(await readReceipt());
+  if (prior) return prior;
+
+  const current = await env.DB.prepare(`SELECT a.link_id,a.lease_hash,l.enrichment_lease_token,
+    l.url,l.original_text,l.images,s.url AS source_url,s.original_text AS source_text,
+    s.payload AS source_payload
+    FROM enrichment_provider_attempts a JOIN links l ON l.id=a.link_id
+    JOIN enrichment_sources s ON s.link_id=l.id WHERE a.operation_key=?`)
+    .bind(value.operation_key).first<{ link_id: number; lease_hash: string | null;
+      enrichment_lease_token: string | null; url: string; original_text: string | null; images: string;
+      source_url: string; source_text: string; source_payload: string }>();
+  if (!current?.lease_hash || !current.enrichment_lease_token ||
+      await digest(current.enrichment_lease_token) !== current.lease_hash ||
+      current.url !== current.source_url || current.original_text !== current.source_text) {
+    return fail("attempt_not_eligible", 409);
+  }
+  let source: unknown;
+  try { source = JSON.parse(current.source_payload); } catch { return fail("attempt_not_eligible", 409); }
+  if (!validEnrichmentSource(source) || source.original_text !== current.original_text) {
+    return fail("attempt_not_eligible", 409);
+  }
+  const images = source.image_urls.length > 0
+    ? await recoveredImages(env, current.link_id, source.image_urls) : [];
+  if (images === null || source.image_urls.length === 0 &&
+      !await verifiedCurrentImages(env, current.link_id, current.images)) {
+    return fail("stored_images_unavailable", 409);
+  }
+  const now = new Date().toISOString();
+  try {
+    await env.DB.prepare(`INSERT INTO enrichment_provider_reading_recoveries
+      (operation_key,link_id,response_id,actor,payload_hash,reading_payload,source_payload,
+       images_payload,lease_token,lease_hash,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(value.operation_key, current.link_id, value.response_id, value.actor, payloadHash,
+        JSON.stringify(reading), current.source_payload,
+        source.image_urls.length > 0 ? JSON.stringify(images) : null,
+        current.enrichment_lease_token, current.lease_hash, now).run();
+    const stored = await readReceipt();
+    if (!stored) return fail("attempt_not_eligible", 409);
+    return replay(stored)!;
+  } catch (cause) {
+    const raced = replay(await readReceipt());
+    if (raced) return raced;
+    if (String(cause).includes("provider_reading_recovery_ineligible")) {
+      return fail("attempt_not_eligible", 409);
+    }
+    throw cause;
+  }
+}
+
 export async function providerAttemptRoute(request: Request, env: Env, path: string): Promise<Response | null> {
   const root = "/api/enrichment/provider-attempts";
-  if (path !== root && !["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect", "recover-source"].some((part) => path === `${root}/${part}`)) {
+  if (path !== root && !["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect", "recover-source", "recover-reading"].some((part) => path === `${root}/${part}`)) {
     return null;
   }
   if (path === root) return request.method === "GET" ? list(env, new URL(request.url)) : fail("method_not_allowed", 405);
@@ -411,5 +546,6 @@ export async function providerAttemptRoute(request: Request, env: Env, path: str
   if (path.endsWith("/settle")) return settle(request, env);
   if (path.endsWith("/reconcile")) return reconcile(request, env);
   if (path.endsWith("/recover-source")) return recoverSource(request, env);
+  if (path.endsWith("/recover-reading")) return recoverReading(request, env);
   return authorizeFallback(request, env);
 }

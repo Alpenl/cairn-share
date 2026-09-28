@@ -415,7 +415,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   if (path.startsWith("/api/enrichment/provider-attempts")) {
     const operatorOnly = path === "/api/enrichment/provider-attempts/reconcile" ||
       path === "/api/enrichment/provider-attempts/inspect" ||
-      path === "/api/enrichment/provider-attempts/recover-source";
+      path === "/api/enrichment/provider-attempts/recover-source" ||
+      path === "/api/enrichment/provider-attempts/recover-reading";
     if (operatorOnly && (!env.CAIRN_OPERATOR_TOKEN?.trim() ||
         env.CAIRN_OPERATOR_TOKEN.trim() === env.CAIRN_ENRICHER_TOKEN?.trim() ||
         env.CAIRN_OPERATOR_TOKEN.trim() === env.CAIRN_API_TOKEN?.trim())) {
