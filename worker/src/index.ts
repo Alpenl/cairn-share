@@ -403,7 +403,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     if (path.startsWith("/api/v2/taxonomy") || /^\/api\/v2\/links\/\d+\/selection/.test(path)) {
       return taxonomyV2Route(request, env, path);
     }
-    return domainRoute(request, env, path);
+    return domainRoute(request, env, path, timing);
   }
 
   if (path === "/api/enrichment/jobs/claim") {
@@ -939,7 +939,7 @@ async function getEnrichmentOverview(request: Request, url: URL, env: Env, timin
     const result = await timing.measure("db", () => statement.all<EnrichmentOverviewRow>());
     const row = result.results[0];
     if (row === undefined) throw new Error("overview aggregate returned no row");
-    timing.setD1Stats({ query: "overview_aggregate", rows_read: result.meta.rows_read,
+    timing.setD1Stats({ query: "overview_aggregate", sql_count: 1, rows_read: result.meta.rows_read,
       rows_written: result.meta.rows_written, scope: "aggregate_only" });
     const counts = mapEnrichmentCounts(row);
     return { version: 1, views: {

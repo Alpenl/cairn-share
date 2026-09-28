@@ -173,4 +173,31 @@ describe("application observability control", () => {
     const hit = JSON.parse(String(log.mock.calls[1][0]));
     expect(hit).toMatchObject({ route: "/api/enrichment/overview", cache_state: "HIT", d1_stats: "unavailable" });
   });
+
+  it("records each effective export batch cost and can switch logging off", async () => {
+    expect((await publish({ version: 0, logs: "basic" })).status).toBe(200);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const send = () => request("/api/v2/links/effective-batch", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [123] })
+    });
+    const response = await send();
+    expect(response.status).toBe(200);
+    const wire = await response.text();
+    const bytes = new TextEncoder().encode(wire).length;
+    const event = JSON.parse(String(log.mock.calls[0][0]));
+    expect(event).toMatchObject({ route: "/api/v2/links/effective-batch", method: "POST",
+      status: 200, response_bytes: bytes,
+      d1_stats: { query: "effective_batch", scope: "effective_view_only",
+        sql_count: 1, rows_written: 0 } });
+    expect(event.d1_stats.rows_read).toBeGreaterThanOrEqual(0);
+    expect(event.d1_stats.rows_read).toBe((JSON.parse(wire) as { d1: { rows_read: number } }).d1.rows_read);
+    expect(response.headers.get("Server-Timing")).toMatch(/db;dur=/);
+    expect(log).toHaveBeenCalledOnce();
+
+    expect((await publish({ version: 1, logs: "off" })).status).toBe(200);
+    const quiet = await send();
+    expect(quiet.status).toBe(200);
+    expect(log).toHaveBeenCalledOnce();
+    expect((await quiet.json() as { d1: { sql_count: number } }).d1.sql_count).toBe(1);
+  });
 });

@@ -167,12 +167,12 @@ function routeTemplate(path: string): string {
   return "other";
 }
 
-export interface RequestD1Stats {
-  query: "overview_aggregate";
+export type RequestD1Stats = {
+  sql_count: 1;
   rows_read: number;
   rows_written: number;
-  scope: "aggregate_only";
-}
+} & ({ query: "overview_aggregate"; scope: "aggregate_only" } |
+  { query: "effective_batch"; scope: "effective_view_only" });
 
 export function emitRequest(policy: Policy, request: Request, response: Response | null, durationMS: number,
   d1Stats?: RequestD1Stats): void {

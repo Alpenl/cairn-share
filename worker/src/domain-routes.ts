@@ -2,6 +2,7 @@ import { entityCacheRoute } from "./entity-cache";
 import {validEntityObservations,type EntityBlock} from "./entity-judgments";
 import { classificationBudgetRoute } from "./classification-budget";
 import { readSelectionSnapshot, readSelectionSnapshots } from "./selection-state";
+import type { RequestD1Stats } from "./observability";
 import { extensionBudgetRoute } from "./extension-budget";
 import { rerankCacheRoute } from "./rerank-cache";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
@@ -39,9 +40,14 @@ async function sha256Hex(value: string): Promise<string> {
 
 // Internal v2 API. Every route requires the enricher token (enforced by the
 // caller); management-only mutations are additionally documented as such.
-export async function domainRoute(request: Request, env: Env, path: string): Promise<Response> {
+type QueryObserver = {
+  measure<T>(name: string, operation: () => Promise<T>): Promise<T>;
+  setD1Stats(stats: RequestD1Stats): void;
+};
+
+export async function domainRoute(request: Request, env: Env, path: string, observer?: QueryObserver): Promise<Response> {
   if (path === "/api/v2/links/effective-batch") {
-    return request.method === "POST" ? effectiveBatch(request, env) : fail("method_not_allowed", 405);
+    return request.method === "POST" ? effectiveBatch(request, env, observer) : fail("method_not_allowed", 405);
   }
   const entityCached = await entityCacheRoute(request, env, path);
   if (entityCached) return entityCached;
@@ -1364,7 +1370,7 @@ function effectivePayload(snapshot: NonNullable<Awaited<ReturnType<typeof readSe
 
 // Export is an internal, read-only operation. A fixed 50-ID cap stays well
 // below D1's 100 binding parameters and bounds response size and JS memory.
-async function effectiveBatch(request: Request, env: Env): Promise<Response> {
+async function effectiveBatch(request: Request, env: Env, observer?: QueryObserver): Promise<Response> {
   if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
     return fail("invalid_content_type");
   }
@@ -1395,7 +1401,10 @@ async function effectiveBatch(request: Request, env: Env): Promise<Response> {
     }
     ids = input as number[];
   } catch { return fail("invalid_json"); }
-  const { snapshots, meta } = await readSelectionSnapshots(env, ids);
+  const select = () => readSelectionSnapshots(env, ids);
+  const { snapshots, meta } = observer ? await observer.measure("db", select) : await select();
+  observer?.setD1Stats({ query: "effective_batch", scope: "effective_view_only",
+    sql_count: 1, rows_read: meta.rows_read, rows_written: meta.rows_written });
   const payload = { version: 1, items: ids.flatMap((id) => {
     const snapshot = snapshots.get(id);
     return snapshot ? [effectivePayload(snapshot)] : [];
