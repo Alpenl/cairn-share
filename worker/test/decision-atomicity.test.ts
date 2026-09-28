@@ -199,14 +199,54 @@ it("repairs a historical projection gap on exact decision replay without a secon
   expect(await count("classification_decision_runs")).toBe(2);
 });
 
-it.each(["decision", "human"])("R3-12: projection delayed by a newer %s converges to current effective state", async (change) => {
+it("a replay repair cannot overwrite an entity result committed after its snapshot read", async () => {
   const { id, body } = await setup();
-  const db = beforeBatch(2, async () => {
+  expect((await call(`v2/links/${id}/decisions`, body)).status).toBe(200);
+  const source = await env.DB.prepare("SELECT id,content_revision,content_hash FROM evidence_snapshots WHERE link_id=? ORDER BY id DESC LIMIT 1")
+    .bind(id).first<{id:number;content_revision:number;content_hash:string}>();
+  const db = beforeBatch(1, async () => {
+    const result = await call(`v2/links/${id}/entity-state`, {
+      operation_key: "entity-after-repair-read", state: "completed_nonempty", entities: ["Acme"],
+      evidence_snapshot_id: source!.id, content_revision: source!.content_revision, content_hash: source!.content_hash
+    });
+    expect(result.status).toBe(200);
+  });
+  expect((await call(`v2/links/${id}/decisions`, body, db)).status).toBe(200);
+  const cached = await env.DB.prepare("SELECT effective FROM current_projections WHERE link_id=?").bind(id).first<string>("effective");
+  expect(JSON.parse(cached!).entities).toEqual(["Acme"]);
+  expect((await (await call(`v2/links/${id}/effective`, undefined, env.DB, "GET")).json() as {effective:{entities:string[]}})
+    .effective.entities).toEqual(["Acme"]);
+});
+
+it("rolls back the decision, projection and generation when an in-transaction projection fails", async () => {
+  const { id, body } = await setup();
+  const generation = await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value");
+  await env.DB.prepare(`CREATE TRIGGER reject_projection BEFORE INSERT ON current_projections
+    BEGIN SELECT RAISE(ABORT, 'synthetic projection failure'); END`).run();
+  await expect(call(`v2/links/${id}/decisions`, body)).rejects.toThrow("synthetic projection failure");
+  expect(await count("classification_decisions")).toBe(0);
+  expect(await count("classification_decision_runs")).toBe(0);
+  expect(await count("current_projections")).toBe(0);
+  expect(await count("link_selections_v2")).toBe(0);
+  expect(await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value")).toBe(generation);
+  await env.DB.prepare("DROP TRIGGER reject_projection").run();
+  const first = await call(`v2/links/${id}/decisions`, body);
+  expect(first.status).toBe(200);
+  // Simulate a lost HTTP response: a separate read already sees the projection.
+  await assertProjection(id, ["llm"]);
+  const replay = await call(`v2/links/${id}/decisions`, body);
+  expect(await replay.json()).toMatchObject({ replayed: true });
+  expect(await count("classification_decisions")).toBe(1);
+});
+
+it.each(["decision", "human"])("R3-12: a newer %s before atomic commit rejects the stale projection plan", async (change) => {
+  const { id, body } = await setup();
+  const db = beforeBatch(1, async () => {
     if (change === "decision") {
       expect((await call(`v2/links/${id}/decisions`, { ...body, operation_key: "newer", automatic: { ...EMPTY_AUTOMATIC, topics: ["eval"] } })).status).toBe(200);
     } else expect((await call(`v2/links/${id}/overrides`, { operation_key: "human", field: "topics", action: "reject", term: "llm", expected_revision: 0 })).status).toBe(200);
   });
-  expect((await call(`v2/links/${id}/decisions`, body, db)).status).toBe(200);
+  expect((await call(`v2/links/${id}/decisions`, body, db)).status).toBe(409);
   await assertProjection(id, change === "decision" ? ["eval"] : []);
   const filtered = await call(`enrichment/jobs?topic=${change === "decision" ? "eval" : "llm"}`, undefined, env.DB, "GET");
   expect(filtered.status).toBe(200);

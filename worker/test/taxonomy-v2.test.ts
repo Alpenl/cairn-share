@@ -53,6 +53,39 @@ it("stores independent dimensions and keeps a legal v1 projection", async () => 
   expect(read.selection.content_functions).toEqual(["method", "tool", "data"]);
 });
 
+it("commits a whole-selection projection atomically with bounded SQL statements", async () => {
+  const id = await createLink();
+  const selection = { topics: ["llm", "eng", "eval", "design"], content_functions: ["method", "tool", "data"],
+    carriers: ["author_continuation"], affordances: ["practice", "background"], form: "method", use: "try" };
+  const generation = await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value");
+  await env.DB.prepare(`CREATE TRIGGER reject_selection_projection BEFORE INSERT ON current_projections
+    BEGIN SELECT RAISE(ABORT, 'synthetic selection projection failure'); END`).run();
+  await expect(request(`v2/links/${id}/selection`, selection, "PATCH")).rejects.toThrow("synthetic selection projection failure");
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_overrides WHERE link_id=?").bind(id).first("n")).toBe(0);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_events WHERE link_id=?").bind(id).first("n")).toBe(0);
+  expect(await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id).first("personal_revision")).toBe(0);
+  expect(await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value")).toBe(generation);
+  await env.DB.prepare("DROP TRIGGER reject_selection_projection").run();
+  let batchSize = 0;
+  const db = new Proxy(env.DB, { get(target, property) {
+    if (property === "batch") return (statements: D1PreparedStatement[]) => {
+      batchSize = statements.length;
+      return target.batch(statements);
+    };
+    const value = Reflect.get(target, property);
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+  const response = await worker.fetch(new Request(`https://test.example/api/v2/links/${id}/selection`, {
+    method: "PATCH", headers: { Authorization: "Bearer internal", "Content-Type": "application/json" }, body: JSON.stringify(selection)
+  }), { DB: db, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
+  expect(response.status).toBe(200);
+  expect(batchSize).toBeLessThanOrEqual(7);
+  const projected = await env.DB.prepare("SELECT effective FROM current_projections WHERE link_id=?").bind(id).first<string>("effective");
+  expect(JSON.parse(projected!).topics).toEqual(selection.topics);
+  expect((await (await request(`v2/links/${id}/selection`, undefined, "GET")).json() as {selection:{topics:string[]}}).selection.topics)
+    .toEqual(selection.topics);
+});
+
 it("expresses tool+method+data and author continuation together", async () => {
   const id = await createLink();
   const response = await request(`v2/links/${id}/selection`, {

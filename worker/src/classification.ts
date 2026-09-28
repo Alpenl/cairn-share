@@ -4,7 +4,7 @@ import type { Env } from "./index";
 import { record, taxonomy, validateClassification } from "./curation";
 import { contentHash, objectivePayload, objectiveUseAllowed, validAssessment,
   type AutomaticView, type EvidenceSnapshot } from "./domain";
-import { decisionInsertStatement, rebuildProjection, runInsertStatement, type WriteGuard } from "./domain-routes";
+import { completionProjectionPlan, decisionInsertStatement, rebuildProjection, runInsertStatement, type WriteGuard } from "./domain-routes";
 
 const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers });
@@ -118,7 +118,8 @@ async function idempotent<T extends { id: number }>(
   key: string | null,
   payloadHash: string,
   linkID: number,
-  commit: () => Promise<CommitOutcome<T> | { failure: ClassificationErrorCode }>
+  commit: () => Promise<CommitOutcome<T> | { failure: ClassificationErrorCode }>,
+  repairReplay?: () => Promise<void>
 ): Promise<Response> {
   const replayExisting = async (): Promise<Response | null> => {
     if (key === null) return null;
@@ -126,6 +127,7 @@ async function idempotent<T extends { id: number }>(
     if (existing) {
       if (existing.link_id !== linkID) return fail("operation_conflict", { reason: "operation_key belongs to another bookmark" });
       if (existing.payload_hash !== payloadHash) return fail("operation_conflict");
+      if (repairReplay) await repairReplay();
       return reply(JSON.parse(existing.response), 200);
     }
     return null;
@@ -162,6 +164,7 @@ async function idempotent<T extends { id: number }>(
     if (key === null) throw error;
     const existing = await readOperation(env, key, linkID);
     if (existing && existing.link_id === linkID && existing.payload_hash === payloadHash) {
+      if (repairReplay) await repairReplay();
       return reply(JSON.parse(existing.response), 200);
     }
     if (existing) return fail("operation_conflict");
@@ -519,9 +522,6 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         !job.lease_until || job.lease_until <= now) {
         return { failure: "lease_expired" as const };
       }
-      const link = await env.DB.prepare(`SELECT content_revision, personal_revision FROM links WHERE id=?`).bind(id)
-        .first<{ content_revision: number; personal_revision: number }>();
-      if (!link) return { failure: "not_found" as const };
       // One predicate guards every dependent write. It repeats the lease, the
       // bound input identity and the *current* target pointer, so a change
       // between this preflight and the commit cannot produce a success record.
@@ -534,17 +534,19 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         bindings: [id, String(body.lease_token), Number(body.revision), job.input_revision, now,
           String(result.policy_version), job.taxonomy_version, target.generation, target.spec_id, target.generation]
       };
+      const completeKey = key ?? `complete-${id}-${body.revision}`;
+      const runKey = `${completeKey}:run`;
+      const decisionKey = `${completeKey}:decision`;
+      const plan = await completionProjectionPlan(env, id, classification, automatic,
+        isV2 ? decisionKey : null, payloadHash, guard);
+      if (!plan) return { failure: "not_found" as const };
       const statements: D1PreparedStatement[] = [
-        // The guarded writes run first: the predicate requires the job to still
-        // be processing, and the job completion below clears that state. All of
-        // them share one predicate inside one transaction, so either every
-        // dependent write lands or none of them does (R2-01).
-        env.DB.prepare(`UPDATE links SET classification=? WHERE id=? AND ${guard.sql} RETURNING id`)
-          .bind(JSON.stringify(classification), id, ...guard.bindings)
+        // The read-only first statement records whether all precomputed inputs
+        // still match. Every write uses the same pre- or post-decision guard.
+        env.DB.prepare(`SELECT ? AS id WHERE ${plan.preGuard.sql}`).bind(id, ...plan.preGuard.bindings)
       ];
       if (isV2 && automatic) {
         const createdAt = new Date().toISOString();
-        const runKey = `${key ?? `complete-${id}-${body.revision}`}:run`;
         statements.push(runInsertStatement(env, {
           // The run records the revision bound at claim time, never a newer one
           // read at completion.
@@ -559,21 +561,20 @@ export async function classificationRoute(request: Request, env: Env, path: stri
           operationKey: runKey, coverage: result.coverage === "partial" ? "partial" : "complete",
           evidenceCoverage: text(result.evidence_coverage, 40) ? result.evidence_coverage : "",
           aliasDrift: result.alias_drift === true, createdAt, payloadHash
-        }, guard));
+        }, plan.preGuard));
         statements.push(decisionInsertStatement(env, {
           linkId: id, runOperationKey: runKey, contentRevision: job.content_revision,
           policyVersion: String(result.policy_version), policy: result.policy ?? {}, automatic,
-          operationKey: `${key ?? `complete-${id}-${body.revision}`}:decision`, createdAt, payloadHash
-        }, guard));
+          operationKey: decisionKey, createdAt, payloadHash
+        }, plan.preGuard, false));
       }
+      statements.push(...plan.statements);
       const finalize = env.DB.prepare(`UPDATE classification_jobs SET status='completed',result=?,error=NULL,
-        lease_token=NULL,lease_until=NULL,updated_at=? WHERE link_id=? AND ${guard.sql} RETURNING link_id`)
-        .bind(JSON.stringify({ ...result, classification }), now, id, ...guard.bindings);
-      return { statements, finalize, guardIndex: 0, operationGuard: guard, response: { id }, body: { id, status: "completed" } };
-    });
-    // The derived projection converges immediately after the atomic commit;
-    // it is a cache, never a source of truth.
-    if (response.status === 200) await rebuildProjection(env, id);
+        lease_token=NULL,lease_until=NULL,updated_at=? WHERE link_id=? AND ${plan.postGuard.sql} RETURNING link_id`)
+        .bind(JSON.stringify({ ...result, classification }), now, id, ...plan.postGuard.bindings);
+      return { statements, finalize, guardIndex: 0, operationGuard: plan.postGuard,
+        response: { id }, body: { id, status: "completed" } };
+    }, () => rebuildProjection(env, id));
     return response;
   }
   if (match[2] === "fail") {

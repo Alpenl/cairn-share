@@ -8,7 +8,7 @@ import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-r
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { taxonomyV2 } from "./taxonomy-v2";
-import { storedClassification, taxonomy } from "./curation";
+import { storedClassification, taxonomy, type Classification } from "./curation";
 import {
   canonicalJSON, contentHash, effectiveView, EMPTY_AUTOMATIC, normalizeField, objectivePayload,
   semanticSpecHash, snapshotCompleteness, objectiveUseAllowed, validOverride, validQuestionSpec, validSnapshot, validAssessment,
@@ -226,6 +226,12 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
     const blocks=(parseJSON(material.payload,{blocks:[]}) as {blocks:EntityBlock[]}).blocks;
     if(!validEntityObservations(observations,entities as string[],blocks,parseJSON(material.related_links??"[]",[]) as string[]))return fail("invalid_entity_observations");
   }
+  const projection = await readSelectionSnapshot(env, id);
+  if (!projection) return fail("not_found", 404);
+  const inputGuard = projectionInputGuard(id, projection);
+  const storedAutomatic = { ...projection.automatic,
+    entities: state === "completed_nonempty" ? entities as string[] : [] };
+  const storedView = effectiveView(storedAutomatic, projection.projectionInput.overrides);
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO entity_operations(operation_key,link_id,request_hash,evidence_snapshot_id,content_revision,content_hash,payload,outcome,created_at)
@@ -237,9 +243,10 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
             AND (? IN ('failed','not_run') OR (?=1 AND json_array_length(e.observations)>0))
         ) THEN 'ignored_stale' ELSE 'stored' END,?
       FROM links l JOIN evidence_snapshots s ON s.link_id=l.id AND s.content_revision=l.content_revision
-      WHERE l.id=? AND s.id=? AND s.content_revision=? AND s.content_hash=?
+      WHERE l.id=? AND s.id=? AND s.content_revision=? AND s.content_hash=? AND ${inputGuard.sql}
       ON CONFLICT(operation_key) DO NOTHING`)
-      .bind(operationKey, requestHash, canonicalJSON(body), state,body.observations===undefined?1:0, now, id, body.evidence_snapshot_id, body.content_revision, body.content_hash),
+      .bind(operationKey, requestHash, canonicalJSON(body), state,body.observations===undefined?1:0, now,
+        id, body.evidence_snapshot_id, body.content_revision, body.content_hash, ...inputGuard.bindings),
     env.DB.prepare(`INSERT INTO entity_states(link_id,state,content_revision,content_hash,evidence_snapshot_id,entities,observations,updated_at,operation_key,revision)
       SELECT link_id,?,content_revision,content_hash,evidence_snapshot_id,?,?,?,operation_key,1 FROM entity_operations
       WHERE operation_key=? AND request_hash=? AND applied=0 AND outcome='stored'
@@ -248,11 +255,18 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
         entities=excluded.entities,observations=excluded.observations,updated_at=excluded.updated_at,operation_key=excluded.operation_key,revision=entity_states.revision+1`)
       .bind(state, canonicalJSON(entities),canonicalJSON(observations), now, operationKey, requestHash),
     env.DB.prepare(`UPDATE entity_operations SET applied=1 WHERE operation_key=? AND request_hash=? AND applied=0`)
-      .bind(operationKey, requestHash)
+      .bind(operationKey, requestHash),
+    ...projectionWrites(env, id, projection.link.personal_revision, storedView, storedAutomatic,
+      projection.projected, projection.contentRevision, projection.stale, projection.decisionId,
+      projection.projectionInput.classification,
+      entityProjectionGuard(id, projection, operationKey, requestHash, "stored")),
+    ...projectionWrites(env, id, projection.link.personal_revision, projection.view, projection.automatic,
+      projection.projected, projection.contentRevision, projection.stale, projection.decisionId,
+      projection.projectionInput.classification,
+      entityProjectionGuard(id, projection, operationKey, requestHash, "ignored_stale"))
   ]);
   const committed = await receipt();
   if (!committed) return fail("run_stale", 409);
-  if (committed.request_hash === requestHash && committed.link_id === id) await rebuildProjection(env, id);
   return acknowledge(committed, false);
 }
 
@@ -586,7 +600,7 @@ export function decisionInsertStatement(env: Env, decision: {
   linkId: number; runOperationKey: string; contentRevision: number; policyVersion: string; policy: unknown;
   automatic: AutomaticView; operationKey: string; createdAt: string; payloadHash: string;
   runIDs?: number[]; personalRevision?: number;
-}, guard: WriteGuard): D1PreparedStatement {
+}, guard: WriteGuard, ignoreConflict = true): D1PreparedStatement {
   // The run is appended in the same batch, so its id is resolved by the
   // operation key rather than by a pre-read that a concurrent writer could
   // invalidate; the same guard proves the run actually landed.
@@ -595,7 +609,7 @@ export function decisionInsertStatement(env: Env, decision: {
        run_ids, run_references_complete, expected_personal_revision, payload_version)
      SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, json_array(r.id)), 1, ?, 1
      FROM classification_runs r WHERE r.operation_key = ? AND ${guard.sql}
-     ON CONFLICT(operation_key) DO NOTHING RETURNING id`
+     ${ignoreConflict ? "ON CONFLICT(operation_key) DO NOTHING" : ""} RETURNING id`
   ).bind(decision.linkId, decision.contentRevision, decision.policyVersion,
     canonicalJSON(decision.policy), canonicalJSON(decision.automatic), decision.operationKey,
     decision.createdAt, decision.payloadHash, decision.runIDs ? JSON.stringify(decision.runIDs) : null,
@@ -719,6 +733,12 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
   const pinned = runs.results.map((run) => ({ id: run.id, spec_id: run.spec_id, spec_hash: run.spec_hash,
     requested_model: run.requested_model, resolved_model: run.resolved_model, target_generation: run.target_generation,
     source_hash: run.source_hash, evidence_snapshot_id: run.evidence_snapshot_id, wire_hash: wireHash(run) }));
+  const snapshot = await readSelectionSnapshot(env, id);
+  if (!snapshot || snapshot.link.content_revision !== link.content_revision ||
+      snapshot.link.personal_revision !== link.personal_revision) return fail("run_stale", 409);
+  const futureAutomatic = { ...automatic, entities: snapshot.automatic.entities };
+  const futureView = effectiveView(futureAutomatic, snapshot.projectionInput.overrides);
+  const inputGuard = projectionInputGuard(id, snapshot);
   const guard: WriteGuard = {
     sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND content_revision=? AND personal_revision=?)
       AND (SELECT COUNT(*) FROM classification_runs cr JOIN json_each(?) p ON cr.id=json_extract(p.value,'$.id')
@@ -735,14 +755,18 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
             THEN json_extract(cr.raw_judgments,'$.evidence_hash') END) IS json_extract(p.value,'$.wire_hash')
           AND ((cr.evidence_snapshot_id IS NULL AND cr.source_hash IS NULL) OR EXISTS (
             SELECT 1 FROM evidence_snapshots es WHERE es.id=cr.evidence_snapshot_id AND es.link_id=cr.link_id
-              AND es.content_revision=cr.content_revision AND es.content_hash=cr.source_hash)))=?`,
-    bindings: [id, link.content_revision, link.personal_revision, JSON.stringify(pinned), id, link.content_revision, runIDs.length]
+              AND es.content_revision=cr.content_revision AND es.content_hash=cr.source_hash)))=?
+      AND ${inputGuard.sql}`,
+    bindings: [id, link.content_revision, link.personal_revision, JSON.stringify(pinned), id, link.content_revision,
+      runIDs.length, ...inputGuard.bindings]
   };
   const result = await env.DB.batch([decisionInsertStatement(env, {
     linkId: id, runOperationKey: primary.operation_key, contentRevision: link.content_revision,
     policyVersion: body.policy_version, policy: body.policy ?? {}, automatic, runIDs, personalRevision: link.personal_revision,
     operationKey, createdAt: new Date().toISOString(), payloadHash
-  }, guard)]);
+  }, guard), ...projectionWrites(env, id, link.personal_revision, futureView, futureAutomatic, true,
+    link.content_revision, false, 0, snapshot.projectionInput.classification,
+    decisionProjectionGuard(id, snapshot, operationKey, payloadHash))]);
   if (!result[0].results.length) {
     const concurrent = await existingResponse();
     if (concurrent) return concurrent;
@@ -751,7 +775,6 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
     return fail("run_stale", 409, { content_revision: link.content_revision });
   }
   const decisionID = Number((result[0].results[0] as { id: number }).id);
-  await persistEffective(env, id, link.personal_revision);
   const view = await computeEffective(env, id);
   return reply({ id, run_ids: runIDs, run_references_complete: true, revision: link.personal_revision,
     policy_version: body.policy_version, decision_id: decisionID, effective: view.view, replayed: false });
@@ -824,51 +847,54 @@ async function recordOverride(
   if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || Number(expectedRevision) < 0)) {
     return fail("invalid_expected_revision");
   }
-  const link = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
-    .first<{ personal_revision: number }>();
-  if (!link) return fail("not_found", 404);
+  const snapshot = await readSelectionSnapshot(env, id);
+  if (!snapshot) return fail("not_found", 404);
   // CAS: the caller's expected revision must match the current personal
   // revision. The check and the write live in one atomic batch: every statement
   // is guarded by the same revision, so a stale client cannot interleave a
   // read-then-write and two concurrent writers cannot both succeed (F08).
-  const expected = expectedRevision === undefined ? link.personal_revision : Number(expectedRevision);
-  if (expected !== link.personal_revision) {
+  const expected = expectedRevision === undefined ? snapshot.link.personal_revision : Number(expectedRevision);
+  if (expected !== snapshot.link.personal_revision) {
     const concurrent = await stored();
     if (concurrent) return acknowledge(concurrent, true);
-    return fail("revision_conflict", 409, { revision: link.personal_revision });
+    return fail("revision_conflict", 409, { revision: snapshot.link.personal_revision });
   }
   const now = new Date().toISOString();
-  const revision = link.personal_revision + 1;
-  const guard = `SELECT 1 FROM links WHERE id = ? AND personal_revision = ?`;
+  const revision = snapshot.link.personal_revision + 1;
+  const inputGuard = projectionInputGuard(id, snapshot);
+  const futureView = effectiveView(snapshot.automatic, [...snapshot.projectionInput.overrides,
+    { field, term, action, source: "human", confirmed: true, revision }]);
+  const projectedGuard = overrideProjectionGuard(id, snapshot, revision, operationKey, payloadHash);
   const accepted = `SELECT 1 FROM curation_overrides WHERE operation_key = ? AND link_id = ? AND revision = ? AND payload_hash = ?`;
   const results = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO curation_overrides(link_id, field, term, action, source, confirmed, revision, operation_key, created_at, payload_hash)
-       SELECT ?, ?, ?, ?, 'human', 1, ?, ?, ?, ? WHERE EXISTS (${guard})
+       SELECT ?, ?, ?, ?, 'human', 1, ?, ?, ?, ? WHERE ${inputGuard.sql}
        ON CONFLICT(operation_key) DO NOTHING`
-    ).bind(id, field, term, action, revision, operationKey, now, payloadHash, id, link.personal_revision),
+    ).bind(id, field, term, action, revision, operationKey, now, payloadHash, ...inputGuard.bindings),
     env.DB.prepare(
       `INSERT INTO curation_events(link_id, kind, payload, revision, operation_key, created_at)
-       SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (${guard}) AND EXISTS (${accepted})
+       SELECT ?, ?, ?, ?, ?, ? WHERE ${inputGuard.sql} AND EXISTS (${accepted})
        ON CONFLICT(operation_key) DO NOTHING`
     ).bind(id, action, canonicalJSON({ field, term }), revision, operationKey + ":event", now,
-      id, link.personal_revision, operationKey, id, revision, payloadHash),
+      ...inputGuard.bindings, operationKey, id, revision, payloadHash),
     env.DB.prepare(`UPDATE links SET personal_revision = personal_revision + 1
-      WHERE id = ? AND personal_revision = ? AND EXISTS (${accepted}) RETURNING personal_revision`)
-      .bind(id, link.personal_revision, operationKey, id, revision, payloadHash)
+      WHERE id = ? AND ${inputGuard.sql} AND EXISTS (${accepted}) RETURNING personal_revision`)
+      .bind(id, ...inputGuard.bindings, operationKey, id, revision, payloadHash),
+    ...projectionWrites(env, id, revision, futureView, snapshot.automatic, snapshot.projected,
+      snapshot.contentRevision, snapshot.stale, snapshot.decisionId, snapshot.projectionInput.classification, projectedGuard)
   ]);
   const updated = results[2].results as unknown[];
   // A concurrent identical operation may already have committed. Confirm that
   // exact receipt before treating a changed mutable revision as a conflict.
   const receipt = await stored();
   if (receipt) {
-    if (updated.length > 0) await persistEffective(env, id, revision);
-    else if (receipt.link_id === id && receipt.payload_hash === payloadHash) await rebuildProjection(env, id);
+    if (updated.length === 0 && receipt.link_id === id && receipt.payload_hash === payloadHash) await rebuildProjection(env, id);
     return acknowledge(receipt, updated.length === 0);
   }
   const current = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
     .first<{ personal_revision: number }>();
-  return fail("revision_conflict", 409, { revision: current?.personal_revision ?? link.personal_revision });
+  return fail("revision_conflict", 409, { revision: current?.personal_revision ?? snapshot.link.personal_revision });
 }
 
 // persistSelectionOverrides translates a whole-selection write into the
@@ -891,14 +917,13 @@ export async function persistSelectionOverrides(
     resetFields?: OverrideField[];
   }
 ): Promise<{ revision: number } | { conflict: number }> {
-  const link = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
-    .first<{ personal_revision: number }>();
-  if (!link) return { conflict: 0 };
-  if (options.expectedRevision !== undefined && options.expectedRevision !== link.personal_revision) {
-    return { conflict: link.personal_revision };
+  const snapshot = await readSelectionSnapshot(env, id);
+  if (!snapshot) return { conflict: 0 };
+  if (options.expectedRevision !== undefined && options.expectedRevision !== snapshot.link.personal_revision) {
+    return { conflict: snapshot.link.personal_revision };
   }
-  const { view } = await computeEffective(env, id);
-  const automatic = options.rejectAutomaticExtras ? await automaticOf(env, id) : null;
+  const { view } = snapshot;
+  const automatic = options.rejectAutomaticExtras ? snapshot.automatic : null;
   const actions: Array<{ field: OverrideField; term: string; action: OverrideAction }> = [];
   const resetSet = new Set(options.resetFields ?? []);
   if (options.resetFields) {
@@ -947,36 +972,45 @@ export async function persistSelectionOverrides(
     if (wanted === "") actions.push({ field, term: "", action: "set_empty" });
     else actions.push({ field, term: wanted, action: "accept" });
   }
-  if (actions.length === 0) return { revision: link.personal_revision };
-  const now = new Date().toISOString();
-  const revision = link.personal_revision + 1;
-  const guard = `SELECT 1 FROM links WHERE id = ? AND personal_revision = ?`;
-  const statements: D1PreparedStatement[] = [];
-  for (const entry of actions) {
-    const key = `${options.operationPrefix}:${entry.field}:${entry.action}:${entry.term}`;
-    statements.push(env.DB.prepare(
-      `INSERT INTO curation_overrides(link_id, field, term, action, source, confirmed, revision, operation_key, created_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${guard})
-       ON CONFLICT(operation_key) DO NOTHING`
-    ).bind(id, entry.field, entry.term, entry.action, options.source, options.source === "human" ? 1 : 0,
-      revision, key, now, id, link.personal_revision));
-    statements.push(env.DB.prepare(
-      `INSERT INTO curation_events(link_id, kind, payload, revision, operation_key, created_at)
-       SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (${guard})
-       ON CONFLICT(operation_key) DO NOTHING`
-    ).bind(id, entry.action, canonicalJSON({ field: entry.field, term: entry.term, source: options.source }),
-      revision, `${key}:event`, now, id, link.personal_revision));
+  if (actions.length === 0) {
+    await rebuildProjection(env, id);
+    return { revision: snapshot.link.personal_revision };
   }
-  statements.push(env.DB.prepare(`UPDATE links SET personal_revision = personal_revision + 1 WHERE id = ? AND personal_revision = ? RETURNING personal_revision`)
-    .bind(id, link.personal_revision));
-  const results = await env.DB.batch(statements);
-  const updated = results[results.length - 1].results as unknown[];
+  const now = new Date().toISOString();
+  const revision = snapshot.link.personal_revision + 1;
+  const changes = actions.map((entry) => {
+    const key = `${options.operationPrefix}:${entry.field}:${entry.action}:${entry.term}`;
+    return { ...entry, source: options.source, confirmed: options.source === "human", revision,
+      operation_key: key, event_key: `${key}:event`, created_at: now,
+      event_payload: canonicalJSON({ field: entry.field, term: entry.term, source: options.source }) };
+  });
+  const payload = JSON.stringify(changes);
+  const inputGuard = projectionInputGuard(id, snapshot);
+  const futureView = effectiveView(snapshot.automatic, [...snapshot.projectionInput.overrides, ...changes]);
+  const projectedGuard = selectionProjectionGuard(id, snapshot, revision, changes.map((entry) => entry.operation_key));
+  const results = await env.DB.batch([
+    env.DB.prepare(`INSERT INTO curation_overrides(link_id,field,term,action,source,confirmed,revision,operation_key,created_at)
+      SELECT ?,json_extract(j.value,'$.field'),json_extract(j.value,'$.term'),json_extract(j.value,'$.action'),
+        json_extract(j.value,'$.source'),json_extract(j.value,'$.confirmed'),json_extract(j.value,'$.revision'),
+        json_extract(j.value,'$.operation_key'),json_extract(j.value,'$.created_at')
+      FROM json_each(?) j WHERE ${inputGuard.sql} ORDER BY CAST(j.key AS INTEGER)`)
+      .bind(id, payload, ...inputGuard.bindings),
+    env.DB.prepare(`INSERT INTO curation_events(link_id,kind,payload,revision,operation_key,created_at)
+      SELECT ?,json_extract(j.value,'$.action'),json_extract(j.value,'$.event_payload'),
+        json_extract(j.value,'$.revision'),json_extract(j.value,'$.event_key'),json_extract(j.value,'$.created_at')
+      FROM json_each(?) j WHERE ${inputGuard.sql} ORDER BY CAST(j.key AS INTEGER)`)
+      .bind(id, payload, ...inputGuard.bindings),
+    env.DB.prepare(`UPDATE links SET personal_revision=personal_revision+1 WHERE id=? AND ${inputGuard.sql}
+      RETURNING personal_revision`).bind(id, ...inputGuard.bindings),
+    ...projectionWrites(env, id, revision, futureView, snapshot.automatic, snapshot.projected,
+      snapshot.contentRevision, snapshot.stale, snapshot.decisionId, snapshot.projectionInput.classification, projectedGuard)
+  ]);
+  const updated = results[2].results as unknown[];
   if (updated.length === 0) {
     const current = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
       .first<{ personal_revision: number }>();
-    return { conflict: current?.personal_revision ?? link.personal_revision };
+    return { conflict: current?.personal_revision ?? snapshot.link.personal_revision };
   }
-  await persistEffective(env, id, revision);
   return { revision };
 }
 
@@ -1034,16 +1068,11 @@ export async function computeEffective(env: Env, id: number): Promise<{ view: Ef
   return { view: effectiveView(automatic, []), automatic, decisionId: 0, projected: false, stale: false, contentRevision: 0 };
 }
 
-// persistEffective writes the query projections (current_projections and
-// link_selections_v2) from the computed view. Both are derived caches; a CAS
-// guard on the personal revision keeps a concurrent override from being
-// overwritten by a stale projection.
-// projectionStatements builds the guarded projection writes. They are exported
-// so an atomic completion can commit the run, the decision and the projection
-// in one transaction (F05/F10) instead of rebuilding after the fact.
-export function projectionStatements(env: Env, id: number, personalRevision: number, view: EffectiveView, projected: boolean, contentRevision: number, stale = false, decisionId = 0): D1PreparedStatement[] {
+// projectionStatements builds the guarded query projection writes used by both
+// atomic business commits and exact-operation recovery.
+export function projectionStatements(env: Env, id: number, personalRevision: number, view: EffectiveView, projected: boolean, contentRevision: number, stale = false, decisionId = 0, overrideGuard?: WriteGuard): D1PreparedStatement[] {
   const now = new Date().toISOString();
-  const guard = projectionGuard(id, personalRevision, contentRevision, decisionId);
+  const guard = overrideGuard ?? projectionGuard(id, personalRevision, contentRevision, decisionId);
   return [
     env.DB.prepare(
       `INSERT INTO current_projections(link_id, content_revision, effective, updated_at)
@@ -1064,39 +1093,171 @@ export function projectionStatements(env: Env, id: number, personalRevision: num
   ];
 }
 
+type SelectionSnapshot = NonNullable<Awaited<ReturnType<typeof readSelectionSnapshot>>>;
+
+// Pin every input used to precompute a future effective view. A changed entity
+// result or legacy write can otherwise race even while personal/content remain
+// unchanged. Every domain statement in the batch must use this predicate.
+function projectionInputGuard(id: number, snapshot: SelectionSnapshot): WriteGuard {
+  return {
+    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+      AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?
+      AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
+      AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?`,
+    bindings: [id, snapshot.link.personal_revision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+      id, snapshot.projectionInput.decisionId, id, snapshot.projectionInput.entityRevision,
+      id, snapshot.projectionInput.legacyId]
+  };
+}
+
+function decisionProjectionGuard(id: number, snapshot: SelectionSnapshot, operationKey: string, payloadHash: string): WriteGuard {
+  return {
+    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+      AND (SELECT id FROM classification_decisions WHERE link_id=? ORDER BY id DESC LIMIT 1)=
+        (SELECT id FROM classification_decisions WHERE link_id=? AND operation_key=? AND payload_hash=?)
+      AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
+      AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?`,
+    bindings: [id, snapshot.link.personal_revision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+      id, id, operationKey, payloadHash, id, snapshot.projectionInput.entityRevision,
+      id, snapshot.projectionInput.legacyId]
+  };
+}
+
+function overrideProjectionGuard(id: number, snapshot: SelectionSnapshot, personalRevision: number,
+  operationKey: string, payloadHash: string): WriteGuard {
+  return {
+    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+      AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?
+      AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
+      AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?
+      AND EXISTS (SELECT 1 FROM curation_overrides WHERE link_id=? AND operation_key=? AND payload_hash=? AND revision=?)`,
+    bindings: [id, personalRevision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+      id, snapshot.projectionInput.decisionId, id, snapshot.projectionInput.entityRevision,
+      id, snapshot.projectionInput.legacyId, id, operationKey, payloadHash, personalRevision]
+  };
+}
+
+function selectionProjectionGuard(id: number, snapshot: SelectionSnapshot, personalRevision: number,
+  actionKeys: string[]): WriteGuard {
+  return {
+    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+      AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?
+      AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
+      AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?
+      AND (SELECT COUNT(*) FROM curation_overrides WHERE link_id=? AND revision=?
+        AND operation_key IN (SELECT value FROM json_each(?)))=?`,
+    bindings: [id, personalRevision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+      id, snapshot.projectionInput.decisionId, id, snapshot.projectionInput.entityRevision,
+      id, snapshot.projectionInput.legacyId, id, personalRevision, JSON.stringify(actionKeys), actionKeys.length]
+  };
+}
+
+function entityProjectionGuard(id: number, snapshot: SelectionSnapshot, operationKey: string,
+  requestHash: string, outcome: "stored" | "ignored_stale"): WriteGuard {
+  const expectedEntityRevision = snapshot.projectionInput.entityRevision + (outcome === "stored" ? 1 : 0);
+  return {
+    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+      AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?
+      AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?
+      AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
+      AND EXISTS (SELECT 1 FROM entity_operations WHERE link_id=? AND operation_key=? AND request_hash=? AND outcome=?)
+      AND (?='ignored_stale' OR EXISTS (SELECT 1 FROM entity_states WHERE link_id=? AND operation_key=?))`,
+    bindings: [id, snapshot.link.personal_revision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+      id, snapshot.projectionInput.decisionId, id, snapshot.projectionInput.legacyId,
+      id, expectedEntityRevision, id, operationKey, requestHash, outcome,
+      outcome, id, operationKey]
+  };
+}
+
+function projectionWrites(
+  env: Env, id: number, personalRevision: number, view: EffectiveView, automatic: AutomaticView,
+  projected: boolean, contentRevision: number, stale: boolean, decisionId: number,
+  priorClassification: string | null, guard?: WriteGuard
+): D1PreparedStatement[] {
+  const active = guard ?? projectionGuard(id, personalRevision, contentRevision, decisionId);
+  const statements = projectionStatements(env, id, personalRevision, view, projected, contentRevision, stale, decisionId, active);
+  // Write the compatibility classification last. It is itself a pinned input
+  // for the precomputed view, so changing it earlier would invalidate the
+  // remaining guards inside the same transaction.
+  const humanCuration = view.reviewed ? canonicalJSON({ topics: view.topics.slice(0, 3), form: view.form, use: view.use }) : null;
+  statements.push(env.DB.prepare(`UPDATE links SET curation=?,curation_projection_epoch=curation_projection_epoch+1
+    WHERE id=? AND ${active.sql}`).bind(humanCuration, id, ...active.bindings));
+  if (projected) {
+    const prior = storedClassification(priorClassification, null);
+    const generated = {
+      why_suggestion: "", entities: [], uncertainty: false, taxonomy_version: taxonomy.version, discarded_tags: [],
+      ...prior, topics: automatic.topics.slice(0, 3), form: automatic.form, use: automatic.use
+    };
+    statements.push(env.DB.prepare(`UPDATE links SET classification=? WHERE id=? AND ${active.sql}`)
+      .bind(canonicalJSON(generated), id, ...active.bindings));
+  }
+  return statements;
+}
+
+// Completion computes the future view before the batch, then writes that view
+// inside the run/decision/job transaction. The pre-guard pins every input to
+// that calculation; the post-guard proves the new decision landed before a
+// projection or completion receipt can be written.
+export async function completionProjectionPlan(
+  env: Env, id: number, classification: Classification, automatic: AutomaticView | null,
+  decisionKey: string | null, payloadHash: string, jobGuard: WriteGuard
+): Promise<{ preGuard: WriteGuard; postGuard: WriteGuard; statements: D1PreparedStatement[] } | null> {
+  const snapshot = await readSelectionSnapshot(env, id);
+  if (!snapshot) return null;
+  const identity = `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=?)
+    AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
+    AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?`;
+  const identityBindings = [id, snapshot.link.personal_revision, snapshot.link.content_revision,
+    id, snapshot.projectionInput.entityRevision, id, snapshot.projectionInput.legacyId];
+  const priorDecision = `COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?`;
+  const preGuard: WriteGuard = {
+    sql: `(${jobGuard.sql}) AND ${identity} AND ${priorDecision}`,
+    bindings: [...jobGuard.bindings, ...identityBindings, id, snapshot.projectionInput.decisionId]
+  };
+  const newDecision = decisionKey !== null;
+  const decisionGuard = newDecision
+    ? `(SELECT id FROM classification_decisions WHERE link_id=? ORDER BY id DESC LIMIT 1)=
+        (SELECT id FROM classification_decisions WHERE link_id=? AND operation_key=? AND payload_hash=?)`
+    : priorDecision;
+  const postGuard: WriteGuard = {
+    sql: `(${jobGuard.sql}) AND ${identity} AND ${decisionGuard}`,
+    bindings: [...jobGuard.bindings, ...identityBindings,
+      ...(newDecision ? [id, id, decisionKey, payloadHash] : [id, snapshot.projectionInput.decisionId])]
+  };
+  const projected = automatic !== null || snapshot.projected;
+  const futureAutomatic = automatic !== null
+    ? { ...automatic, entities: snapshot.automatic.entities }
+    : snapshot.projected ? snapshot.automatic
+      : { ...EMPTY_AUTOMATIC, topics: classification.topics, form: classification.form, use: classification.use,
+        entities: snapshot.automatic.entities };
+  const view = effectiveView(futureAutomatic, snapshot.projectionInput.overrides);
+  const statements = projectionWrites(env, id, snapshot.link.personal_revision, view, futureAutomatic,
+    projected, snapshot.contentRevision, automatic !== null ? false : snapshot.stale,
+    snapshot.decisionId, JSON.stringify(classification), postGuard);
+  if (!projected) {
+    statements.push(env.DB.prepare(`UPDATE links SET classification=? WHERE id=? AND ${postGuard.sql}`)
+      .bind(JSON.stringify(classification), id, ...postGuard.bindings));
+  }
+  return { preGuard, postGuard, statements };
+}
+
 function projectionGuard(id: number, personalRevision: number, contentRevision: number, decisionId: number): WriteGuard {
   return { sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=?)
       AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?`,
     bindings: [id, personalRevision, contentRevision, id, decisionId] };
 }
 
-async function persistEffective(env: Env, id: number, personalRevision: number): Promise<void> {
-  // A superseded computation never overwrites newer caches. If another writer
-  // wins after our read, recompute from the current source of truth, boundedly.
+async function persistEffective(env: Env, id: number): Promise<void> {
+  // A superseded computation never overwrites newer caches. Pin the entity and
+  // legacy input as well as personal/content/decision; neither is covered by
+  // personal revision alone. Recompute from one SQLite snapshot on conflict.
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) {
-      const current = await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id).first<{ personal_revision: number }>();
-      if (!current) return;
-      personalRevision = current.personal_revision;
-    }
-    const { view, automatic, decisionId, projected, stale, contentRevision } = await computeEffective(env, id);
-    const guard = projectionGuard(id, personalRevision, contentRevision, decisionId);
-    const statements = projectionStatements(env, id, personalRevision, view, projected, contentRevision, stale, decisionId);
-    if (projected) {
-      const row = await env.DB.prepare("SELECT classification FROM links WHERE id=?").bind(id).first<{ classification: string | null }>();
-      const prior = storedClassification(row?.classification ?? null, null);
-      const generated = {
-        why_suggestion: "", entities: [], uncertainty: false, taxonomy_version: taxonomy.version, discarded_tags: [],
-        ...prior, topics: automatic.topics.slice(0, 3), form: automatic.form, use: automatic.use
-      };
-      statements.push(env.DB.prepare(`UPDATE links SET classification=? WHERE id=? AND ${guard.sql}`)
-        .bind(canonicalJSON(generated), id, ...guard.bindings));
-    }
-    // Human projection stays separate from the AI suggestion. This cache write
-    // is marked so compatibility triggers never turn it into human input.
-    const humanCuration = view.reviewed ? canonicalJSON({ topics: view.topics.slice(0, 3), form: view.form, use: view.use }) : null;
-    statements.push(env.DB.prepare(`UPDATE links SET curation=?,curation_projection_epoch=curation_projection_epoch+1
-      WHERE id=? AND ${guard.sql}`).bind(humanCuration, id, ...guard.bindings));
+    const snapshot = await readSelectionSnapshot(env, id);
+    if (!snapshot) return;
+    const guard = projectionInputGuard(id, snapshot);
+    const statements = projectionWrites(env, id, snapshot.link.personal_revision, snapshot.view,
+      snapshot.automatic, snapshot.projected, snapshot.contentRevision, snapshot.stale,
+      snapshot.decisionId, snapshot.projectionInput.classification, guard);
     const result = await env.DB.batch(statements);
     if (result[0].results.length) return;
   }
@@ -1108,10 +1269,8 @@ async function currentTaxonomyVersion(): Promise<string> {
 
 // rebuildProjection is kept as the single entry point used by the completion
 // path and legacy writers.
-export async function rebuildProjection(env: Env, id: number, personalRevision?: number): Promise<void> {
-  const link = await env.DB.prepare(`SELECT personal_revision FROM links WHERE id = ?`).bind(id)
-    .first<{ personal_revision: number }>();
-  await persistEffective(env, id, personalRevision ?? link?.personal_revision ?? 0);
+export async function rebuildProjection(env: Env, id: number): Promise<void> {
+  await persistEffective(env, id);
 }
 
 async function effective(env: Env, id: number): Promise<Response> {

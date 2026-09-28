@@ -10,7 +10,7 @@ const strings = (value: unknown): string[] => Array.isArray(value) ? value.filte
 
 type Decision = { id: number; content_revision: number; automatic: string; policy_version: string;
   run_references_complete: number; runs: Array<{ coverage: string; evidence_coverage: string }> };
-type Legacy = { payload: string | null; revision: number; provenance: string };
+type Legacy = { id: number; payload: string | null; revision: number; provenance: string };
 type Entity = { state: string; content_revision: number; content_hash: string; evidence_snapshot_id: number;
   entities: string; observations: string; revision: number; snapshot_matches: number };
 type Queue = { status: string; content_revision: number };
@@ -47,7 +47,7 @@ export async function readSelectionSnapshot(env: Env, id: number) {
     (SELECT json_group_array(json_object('field',o.field,'term',o.term,'action',o.action,'source',o.source,
       'confirmed',o.confirmed,'revision',o.revision)) FROM
       (SELECT field,term,action,source,confirmed,revision FROM curation_overrides WHERE link_id=l.id ORDER BY revision,id) o) AS overrides,
-    (SELECT json_object('payload',h.payload,'revision',h.revision,'provenance',h.provenance)
+    (SELECT json_object('id',h.id,'payload',h.payload,'revision',h.revision,'provenance',h.provenance)
       FROM legacy_curation_history h WHERE h.link_id=l.id ORDER BY h.id DESC LIMIT 1) AS legacy,
     (SELECT json_object('state',e.state,'content_revision',e.content_revision,'content_hash',e.content_hash,
       'evidence_snapshot_id',e.evidence_snapshot_id,'entities',e.entities,'observations',e.observations,'revision',e.revision,
@@ -75,7 +75,8 @@ export async function readSelectionSnapshot(env: Env, id: number) {
       const field = normalizeField(entry.field);
       return field ? [{ ...entry, field, confirmed: entry.confirmed === 1 }] : [];
     });
-  const layered = [...legacyOverrides(parse<Legacy | null>(link.legacy, null)), ...overrides];
+  const legacy = parse<Legacy | null>(link.legacy, null);
+  const layered = [...legacyOverrides(legacy), ...overrides];
   const view = effectiveView(automatic, layered);
   const stale = decision !== null && decision.content_revision !== link.content_revision;
   const origins = effectiveOrigins(view, layered, decision ? "automatic" : "legacy_unknown");
@@ -116,6 +117,14 @@ export async function readSelectionSnapshot(env: Env, id: number) {
   }));
   return {
     link, view, automatic, decisionId: decision?.id ?? 0, projected: decision !== null, stale, contentRevision: link.content_revision,
+    projectionInput: {
+      overrides: layered,
+      decisionId: decision?.id ?? 0,
+      entityRevision: entity?.revision ?? 0,
+      entity,
+      legacyId: legacy?.id ?? 0,
+      classification: link.classification
+    },
     state: {
       version: 1, content_revision: link.content_revision, personal_revision: link.personal_revision,
       decision_id: decision?.id ?? null, decision_content_revision: decision?.content_revision ?? null,

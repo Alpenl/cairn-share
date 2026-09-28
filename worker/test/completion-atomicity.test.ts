@@ -87,6 +87,26 @@ for (const protocol of ["legacy", "v2"] as const) {
     expect((await request(`enrichment/classifications/${id}/complete`, body)).status).toBe(200);
   });
 
+  it(`B03-T07 ${protocol}: projection failure rolls back run, job, receipt and generation`, async () => {
+    const { id, body } = await setup(protocol);
+    const generation = await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value");
+    await env.DB.prepare(`CREATE TRIGGER reject_completion_projection BEFORE INSERT ON current_projections
+      BEGIN SELECT RAISE(ABORT, 'synthetic completion projection failure'); END`).run();
+    await expect(request(`enrichment/classifications/${id}/complete`, body)).rejects.toThrow("synthetic completion projection failure");
+    expect(await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first("status")).toBe("processing");
+    expect(await env.DB.prepare("SELECT classification FROM links WHERE id=?").bind(id).first("classification")).toBeNull();
+    for (const table of ["classification_runs", "classification_decisions", "classification_operations", "current_projections", "link_selections_v2"]) {
+      expect(await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE link_id=?`).bind(id).first("n"), table).toBe(0);
+    }
+    expect(await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value")).toBe(generation);
+    await env.DB.prepare("DROP TRIGGER reject_completion_projection").run();
+    expect((await request(`enrichment/classifications/${id}/complete`, body)).status).toBe(200);
+    const projected = await env.DB.prepare("SELECT effective FROM current_projections WHERE link_id=?").bind(id).first<string>("effective");
+    expect(JSON.parse(projected!).topics).toEqual(["llm"]);
+    expect((await request(`enrichment/classifications/${id}/complete`, body)).status).toBe(200);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM classification_operations WHERE link_id=?").bind(id).first("n")).toBe(1);
+  });
+
   it.each(["target", "content", "lease"] as const)(`R3-01 ${protocol}: %s change after preflight cannot complete the job`, async (change) => {
     const { id, job, body, caps, target } = await setup(protocol);
     const barrier = beforeBatch(async () => {

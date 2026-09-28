@@ -87,6 +87,22 @@ it("repairs a historical projection gap on exact entity replay without another o
   expect(rows.results.map(row=>row.term)).toEqual(["AcmeEntity"]);
   expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM entity_operations WHERE link_id=?").bind(id).first("n")).toBe(1);
 });
+
+it("rolls back entity state, receipt, projection and generation on projection failure",async()=>{
+  const {id,body}=await setup();
+  const generation=await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value");
+  await env.DB.prepare(`CREATE TRIGGER reject_entity_projection BEFORE INSERT ON current_projections
+    BEGIN SELECT RAISE(ABORT, 'synthetic entity projection failure'); END`).run();
+  await expect(request(`v2/links/${id}/entity-state`,body)).rejects.toThrow("synthetic entity projection failure");
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM entity_operations WHERE link_id=?").bind(id).first("n")).toBe(0);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM entity_states WHERE link_id=?").bind(id).first("n")).toBe(0);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM current_projections WHERE link_id=?").bind(id).first("n")).toBe(0);
+  expect(await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value")).toBe(generation);
+  await env.DB.prepare("DROP TRIGGER reject_entity_projection").run();
+  expect((await request(`v2/links/${id}/entity-state`,body)).status).toBe(200);
+  const cached=await env.DB.prepare("SELECT effective FROM current_projections WHERE link_id=?").bind(id).first<string>("effective");
+  expect(JSON.parse(cached!).entities).toEqual(["AcmeEntity"]);
+});
 it("R3-09 search and cached projection follow entity accept/reject/reset/set-empty and source staleness",async()=>{
   const {id,body}=await setup();
   expect((await request(`v2/links/${id}/entity-state`,body)).status).toBe(200);

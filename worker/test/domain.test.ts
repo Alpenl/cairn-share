@@ -932,6 +932,23 @@ it("repairs a historical projection gap on exact override replay without another
   expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_events WHERE link_id=?").bind(id).first("n")).toBe(1);
 });
 
+it("rolls back a human override and cache generation when its projection fails", async () => {
+  const id = await createLink();
+  const body = { field: "topics", term: "llm", action: "accept", operation_key: "atomic-override", expected_revision: 0 };
+  const generation = await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value");
+  await env.DB.prepare(`CREATE TRIGGER reject_override_projection BEFORE INSERT ON current_projections
+    BEGIN SELECT RAISE(ABORT, 'synthetic override projection failure'); END`).run();
+  await expect(request(`v2/links/${id}/overrides`, body)).rejects.toThrow("synthetic override projection failure");
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_overrides WHERE link_id=?").bind(id).first("n")).toBe(0);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM curation_events WHERE link_id=?").bind(id).first("n")).toBe(0);
+  expect(await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id).first("personal_revision")).toBe(0);
+  expect(await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value")).toBe(generation);
+  await env.DB.prepare("DROP TRIGGER reject_override_projection").run();
+  expect((await request(`v2/links/${id}/overrides`, body)).status).toBe(200);
+  const projected = await env.DB.prepare("SELECT effective FROM current_projections WHERE link_id=?").bind(id).first<string>("effective");
+  expect(JSON.parse(projected!).topics).toEqual(["llm"]);
+});
+
 
 it("allows only authenticated App curation reads and actions on the Android paths", async () => {
   const id = await createLink();
