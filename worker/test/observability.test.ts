@@ -105,4 +105,18 @@ describe("application observability control", () => {
     expect(JSON.parse(String(log.mock.calls[120][0]))).toEqual({ schema: 1, kind: "worker_log_drops", count: 3 });
     expect(log).toHaveBeenCalledTimes(122);
   });
+
+  it("labels private paid-attempt routes without logging their payload", async () => {
+    expect((await publish({ version: 0, logs: "basic" })).status).toBe(200);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const response = await request("/api/enrichment/provider-attempts/reserve?operation_key=private", {
+      method: "POST", body: JSON.stringify({ secret: "private-prompt" })
+    });
+    expect(response.status).toBe(400);
+    expect(log).toHaveBeenCalledOnce();
+    const event = JSON.parse(String(log.mock.calls[0][0]));
+    expect(event).toMatchObject({ route: "/api/enrichment/provider-attempts/reserve",
+      method: "POST", status: 400 });
+    expect(JSON.stringify(event)).not.toMatch(/private|prompt|operation_key/);
+  });
 });

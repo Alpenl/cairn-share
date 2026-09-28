@@ -8,10 +8,11 @@
 - 私有 `reserve`、`settle`、`authorize-fallback` 和列表/汇总查询只接受 Enricher Token。单次预留按租约所有权、剩余时长、阶段、内容版本和同阶段已存在尝试原子判断。每日硬上限初值为全局 500、每条收藏 10、canary 4 次；占用以预留次数计，未知结果不退还。相同 operation 只回读，不再发放发送权。
 - 新领取和付费准入要求 `X-Cairn-Provider-Attempt-Ledger: 1`，握手声明新能力；来源保存与阅读完成必须有对应已结算 HTTP 200 凭证。预算耗尽但尚未生成凭证时，`budget-defer` 原子退还租约/尝试并设下次 UTC 窗口；和并发预留竞争时由 D1 守卫保证只有一边成功。
 - 管理汇总按需返回未决数量、最早时间/年龄以及当日各阶段次数。它不进入每个业务请求的查询路径；私人正文、prompt、原始租约和响应正文不写入凭证或平台日志。
+- Worker 应用请求日志用固定模板区分付费凭证预留、结算、降级授权和汇总查询；沿用 off/basic/diagnostic 热开关，不包含查询参数或请求正文。
 
 ## 验证
 
-- Worker 32 文件、347/347 测试；TypeScript 类型检查与 Wrangler 部署 dry-run 通过。
+- Worker 32 文件、348/348 测试；TypeScript 类型检查与 Wrangler 部署 dry-run 通过。
 - 测试覆盖同键重放、错误 operation、内容/租约失效、两种来源提示词的授权顺序、预算上限与拒绝、未决响应阻止重领、来源/阅读提交守卫、退还与预留竞争、隐私删除。旧夹具现通过真实私有凭证接口模拟已知供应商响应。
 - 真实本地 Worker/D1 与 Go 的 `providerledger`、`sourcelease`、`lifecycle` 联调通过。只在临时本地 D1 应用迁移，未改远端 D1。
 
