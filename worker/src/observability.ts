@@ -184,6 +184,8 @@ export type ProviderRecoveryEvent = {
 export type WorkerBusinessEvent =
   | { kind: "component_gate"; component: "source" | "reading" | "classification";
       action: "opened" | "probe_started" | "closed" }
+  | { kind: "stage_lease"; action: "local_defer" | "fault_without_reservation";
+      stage: "source" | "reading"; outcome: "deferred" | "refused"; status: 200 | 409 }
   | { kind: "manual_request"; action: "source" | "process";
       outcome: "accepted" | "replay" | "rejected" | "failed"; status: number }
   | { kind: "source_claim"; origin: "scheduled" | "by_id";

@@ -1,5 +1,5 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
@@ -424,6 +424,55 @@ it("returns an unused local-stage lease without charging an attempt", async () =
     enrichment_status: "pending", enrichment_attempts: 0, enrichment_lease_token: null
   });
   expect((await post("enrichment/jobs/claim")).status).toBe(200);
+});
+
+it("exports bounded stage-lease outcomes under the log switch without private fields", async () => {
+  const { id, job } = await claimed();
+  expect((await post("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    expect((await post(`enrichment/jobs/${id}/local-defer`, {
+      lease_token: job.lease_token, stage: "fetch"
+    })).status).toBe(200);
+    const next = await post("enrichment/jobs/claim");
+    expect(next.status).toBe(200);
+    const claimedAgain = await next.json() as { lease_token: string; content_revision: number };
+    expect((await admit(id, claimedAgain.lease_token)).status).toBe(200);
+    expect((await reserve(id, claimedAgain.lease_token, claimedAgain.content_revision)).status).toBe(200);
+    expect((await post(`enrichment/jobs/${id}/local-defer`, {
+      lease_token: claimedAgain.lease_token, stage: "fetch"
+    })).status).toBe(409);
+    const second = await post("links", { url: "https://x.com/u/status/log-lease" }, "app");
+    const secondID = (await second.json() as { id: number }).id;
+    const secondClaim = await post("enrichment/jobs/claim");
+    expect(secondClaim.status).toBe(200);
+    const secondLease = (await secondClaim.json() as { lease_token: string }).lease_token;
+    expect((await post(`enrichment/jobs/${secondID}/fail`, {
+      lease_token: secondLease, error: "admission stopped", component_fault: "source_transient"
+    })).status).toBe(409);
+    const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
+    expect(entries.filter(entry => entry.kind === "stage_lease")).toEqual([
+      { schema: 1, config_version: 1, kind: "stage_lease", action: "local_defer",
+        stage: "source", outcome: "deferred", status: 200 },
+      { schema: 1, config_version: 1, kind: "stage_lease", action: "local_defer",
+        stage: "source", outcome: "refused", status: 409 },
+      { schema: 1, config_version: 1, kind: "stage_lease", action: "fault_without_reservation",
+        stage: "source", outcome: "deferred", status: 409 }
+    ]);
+    expect(JSON.stringify(entries)).not.toContain(job.lease_token);
+    expect(JSON.stringify(entries)).not.toContain(claimedAgain.lease_token);
+    expect(JSON.stringify(entries)).not.toContain("https://x.com/u/status/log-lease");
+    expect((await post("internal/observability", { version: 2, logs: "off" })).status).toBe(200);
+    const offClaim = await post("enrichment/jobs/claim");
+    expect(offClaim.status).toBe(200);
+    const offLease = (await offClaim.json() as { lease_token: string }).lease_token;
+    expect((await post(`enrichment/jobs/${secondID}/local-defer`, {
+      lease_token: offLease, stage: "fetch"
+    })).status).toBe(200);
+    expect(log.mock.calls.length).toBe(entries.length);
+  } finally {
+    log.mockRestore();
+  }
 });
 
 it("keeps a paid source attempt while deferring reading and fences reserved reading", async () => {

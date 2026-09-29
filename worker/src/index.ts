@@ -1513,8 +1513,10 @@ async function deferLocalSourceStage(request: Request, env: Env, id: number,
           WHERE a.link_id=? AND a.lease_hash=? AND a.stage=?)`)
       .bind(now, now, component, token, id, id, leaseHash, stage)
   ]));
-  return results[0].results.length ? json({ id, status: "deferred" })
-    : error("provider_result_unknown", 409);
+  const released = results[0].results.length > 0;
+  timing.addBusinessEvent({ kind: "stage_lease", action: "local_defer", stage: component,
+    outcome: released ? "deferred" : "refused", status: released ? 200 : 409 });
+  return released ? json({ id, status: "deferred" }) : error("provider_result_unknown", 409);
 }
 
 async function completeEnrichmentJob(
@@ -1735,7 +1737,11 @@ async function failEnrichmentJob(
           .bind(now, now, stage === "fetch" ? "source" : "reading", leaseToken,
             id, id, leaseHash, stage)
       ]));
-      return results[0].results.length ? error("provider_attempt_missing", 409)
+      const released = results[0].results.length > 0;
+      timing.addBusinessEvent({ kind: "stage_lease", action: "fault_without_reservation",
+        stage: stage === "fetch" ? "source" : "reading",
+        outcome: released ? "deferred" : "refused", status: 409 });
+      return released ? error("provider_attempt_missing", 409)
         : error("provider_result_unknown", 409);
     }
   }
