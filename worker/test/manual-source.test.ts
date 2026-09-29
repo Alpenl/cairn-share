@@ -2,6 +2,7 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { taxonomy } from "../src/curation";
+import { withoutLogEnvelope } from "./log-envelope";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 const operation = "manual-source-fixture-1";
@@ -95,7 +96,7 @@ it("logs source acceptance only after durable evidence and distinguishes replay"
       [entry.action, entry.outcome, entry.status])).toEqual([
       ["source", "accepted", 200], ["source", "replay", 200], ["source", "rejected", 409]
     ]);
-    expect(entries.filter((entry) => entry.kind === "source_claim")).toMatchObject([
+    expect(entries.filter((entry) => entry.kind === "source_claim").map(withoutLogEnvelope)).toEqual([
       { schema: 1, config_version: 1, kind: "source_claim", origin: "by_id",
         outcome: "claimed", status: 200 }
     ]);

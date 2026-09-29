@@ -2,6 +2,7 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { resetObservabilityCacheForTest } from "../src/observability";
+import { withoutLogEnvelope } from "./log-envelope";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal",
   CAIRN_OPERATOR_TOKEN: "operator" });
@@ -94,7 +95,7 @@ it("separates durable reservation from reported provider settlement in safe even
       .bind(500, new Date().toISOString().slice(0, 10)).run();
     expect((await call(reservePath, { ...canary, operation_key: "8".repeat(64) })).status).toBe(429);
     const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
-    expect(entries.filter((entry) => entry.kind === "provider_attempt")).toMatchObject([
+    expect(entries.filter((entry) => entry.kind === "provider_attempt").map(withoutLogEnvelope)).toEqual([
       { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",
         stage: "fetch", outcome: "reserved", status: 200 },
       { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",

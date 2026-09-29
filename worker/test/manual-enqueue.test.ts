@@ -1,6 +1,7 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { withoutLogEnvelope } from "./log-envelope";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
@@ -52,7 +53,7 @@ it("logs accepted, replay, claim and rejection after their durable outcomes", as
       [entry.action, entry.outcome, entry.status])).toEqual([
       ["process", "accepted", 200], ["process", "replay", 200], ["process", "rejected", 409]
     ]);
-    expect(entries.filter((entry) => entry.kind === "source_claim")).toMatchObject([
+    expect(entries.filter((entry) => entry.kind === "source_claim").map(withoutLogEnvelope)).toEqual([
       { schema: 1, config_version: 1, kind: "source_claim", origin: "scheduled",
         outcome: "claimed", status: 200 }
     ]);

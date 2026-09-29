@@ -1,6 +1,7 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { withoutLogEnvelope } from "./log-envelope";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
@@ -451,7 +452,7 @@ it("exports bounded stage-lease outcomes under the log switch without private fi
       lease_token: secondLease, error: "admission stopped", component_fault: "source_transient"
     })).status).toBe(409);
     const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
-    expect(entries.filter(entry => entry.kind === "stage_lease")).toMatchObject([
+    expect(entries.filter(entry => entry.kind === "stage_lease").map(withoutLogEnvelope)).toEqual([
       { schema: 1, config_version: 1, kind: "stage_lease", action: "local_defer",
         stage: "source", outcome: "deferred", status: 200 },
       { schema: 1, config_version: 1, kind: "stage_lease", action: "local_defer",

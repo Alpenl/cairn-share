@@ -1,6 +1,7 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { withoutLogEnvelope } from "./log-envelope";
 
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal",
   CAIRN_OPERATOR_TOKEN: "operator" });
@@ -176,7 +177,7 @@ it("reports safe committed, replay and rejected outcomes under the live log swit
     expect((await call(path, body, "operator")).status).toBe(200);
     expect((await call(path, body, "operator")).status).toBe(200);
     const events = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
-    expect(events.filter((entry) => entry.kind === "provider_recovery")).toMatchObject([
+    expect(events.filter((entry) => entry.kind === "provider_recovery").map(withoutLogEnvelope)).toEqual([
       { schema: 1, kind: "provider_recovery", config_version: 1,
         stage: "reading", outcome: "rejected", status: 409 },
       { schema: 1, kind: "provider_recovery", config_version: 1,
