@@ -26,8 +26,9 @@ export const SOURCE_GATE_READY_SQL = `EXISTS(SELECT 1 FROM enrichment_component_
 // A read-only preflight and the actual source claim share this exact
 // candidate predicate. The preflight is only a snapshot; callers that see
 // false must not subsequently claim without first running their canary.
-export const SOURCE_CLAIM_CANDIDATE_SQL = `SELECT id
-  FROM links INDEXED BY links_manual_priority_idx
+function sourceClaimCandidateSQL(index: string, stagePredicate: string): string {
+  return `SELECT id
+  FROM links INDEXED BY ${index}
   WHERE ${X_LINK_SQL}
     AND (curation_status <> 'drop' OR manual_priority = 1)
     AND enrichment_status IN ('pending', 'failed', 'processing')
@@ -52,14 +53,28 @@ export const SOURCE_CLAIM_CANDIDATE_SQL = `SELECT id
       WHERE day=?),0) < ?
     AND (SELECT COUNT(*) FROM enrichment_provider_attempts a
       WHERE a.link_id=links.id AND a.created_at>=? AND a.created_at<?) < ?
-    AND ((?=1 AND (${SOURCE_NEXT_COMPONENT_SQL})='source')
-      OR (?=1 AND (${SOURCE_NEXT_COMPONENT_SQL})='reading'))
+    AND ${stagePredicate}
     AND ${SOURCE_GATE_READY_SQL}
   ORDER BY manual_priority DESC, id ASC
   LIMIT 1`;
+}
+
+// The common path retains the smaller priority index. A locally paused stage
+// uses a stage-leading index, so a long queue of the excluded stage is not
+// scanned on every scheduler tick.
+export const SOURCE_CLAIM_CANDIDATE_SQL = sourceClaimCandidateSQL(
+  "links_manual_priority_idx", "1=1"
+);
+export const SOURCE_CLAIM_STAGE_CANDIDATE_SQL = sourceClaimCandidateSQL(
+  "links_source_stage_priority_idx", `(${SOURCE_NEXT_COMPONENT_SQL})=?`
+);
+
+export function sourceClaimSQL(stageMask: "both" | "source" | "reading"): string {
+  return stageMask === "both" ? SOURCE_CLAIM_CANDIDATE_SQL : SOURCE_CLAIM_STAGE_CANDIDATE_SQL;
+}
 
 export function sourceClaimCandidateBindings(
-  now: Date, gateAware = true, allowSource = true, allowReading = true
+  now: Date, gateAware = true, stageMask: "both" | "source" | "reading" = "both"
 ): Array<string | number> {
   const nowIso = now.toISOString();
   const budgetStart = nowIso.slice(0, 10) + "T00:00:00.000Z";
@@ -67,5 +82,6 @@ export function sourceClaimCandidateBindings(
   return [MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso, nowIso, nowIso,
     budgetStart.slice(0, 10), PROVIDER_ATTEMPT_LIMITS.daily_total,
     budgetStart, budgetEnd, PROVIDER_ATTEMPT_LIMITS.daily_item,
-    allowSource ? 1 : 0, allowReading ? 1 : 0, gateAware ? 1 : 0, nowIso, nowIso];
+    ...(stageMask === "both" ? [] : [stageMask]),
+    gateAware ? 1 : 0, nowIso, nowIso];
 }

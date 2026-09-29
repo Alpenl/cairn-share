@@ -12,7 +12,7 @@ import { emitProviderRecovery, emitRequest, emitWorkerBusiness, policyReadAvaila
 import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
 import { MAX_ENRICHMENT_ATTEMPTS, SOURCE_CLAIM_CANDIDATE_SQL, SOURCE_GATE_READY_SQL,
   SOURCE_NEXT_COMPONENT_SQL, X_LINK_SQL,
-  sourceClaimCandidateBindings } from "./source-claim";
+  sourceClaimCandidateBindings, sourceClaimSQL } from "./source-claim";
 
 export interface Env {
   DB: D1Database;
@@ -1254,15 +1254,14 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
             enrichment_lease_until = ?,
             enrichment_error = NULL,
             enrichment_updated_at = ?
-        WHERE id = (${SOURCE_CLAIM_CANDIDATE_SQL})
+        WHERE id = (${sourceClaimSQL(stageMask)})
         RETURNING id, url, note, created_at, enrichment_attempts,
                   enrichment_lease_token, enrichment_lease_until, content_revision,
                   CASE WHEN refresh_requested_at IS NOT NULL THEN refresh_epoch ELSE 0 END AS refresh_epoch,
                   ${SOURCE_NEXT_COMPONENT_SQL} AS source_component`
     )
       .bind(guarded ? 0 : 1, guarded ? 0 : 1, guarded ? null : "legacy_unknown", leaseToken, leaseUntil, nowIso,
-        ...sourceClaimCandidateBindings(now, gateAware,
-          stageMask !== "reading", stageMask !== "source")), sourceGateProbe(env, leaseToken, now)])
+        ...sourceClaimCandidateBindings(now, gateAware, stageMask)), sourceGateProbe(env, leaseToken, now)])
   );
   const row = results[0].results[0] as EnrichmentJobRow | undefined;
 
