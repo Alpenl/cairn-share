@@ -7,7 +7,7 @@ import { applyV1Write } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
 import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
 import { readSelectionSnapshot } from "./selection-state";
-import { emitProviderRecovery, emitRequest, emitWorkerBusiness, policyReadAvailable, publishPolicy, requestPolicy,
+import { emitProviderRecovery, emitRequest, emitWorkerBusiness, logExporterStatus, policyReadAvailable, publishPolicy, requestPolicy,
   type ProviderRecoveryEvent, type RequestD1Stats, type WorkerBusinessEvent } from "./observability";
 import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
 import { MAX_ENRICHMENT_ATTEMPTS, SOURCE_CLAIM_CANDIDATE_SQL, SOURCE_GATE_READY_SQL,
@@ -349,7 +349,10 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   if (path === "/api/internal/observability") {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
-    return routeMethod(request, ["POST"], () => publishPolicy(request, env.DB));
+    return routeMethod(request, ["GET", "POST"], () => request.method === "GET"
+      ? requestPolicy(env.DB).then((policy) => json(logExporterStatus(policy), 200,
+        { "Cache-Control": "private, no-store" }))
+      : publishPolicy(request, env.DB));
   }
 
   if (path === "/" || path === "/debug") {

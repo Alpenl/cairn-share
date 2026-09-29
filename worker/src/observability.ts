@@ -22,7 +22,11 @@ let cache: { policy: Policy; until: number } | undefined;
 let lastConfirmed: Policy | undefined;
 let loading: Promise<Policy> | undefined;
 let generation = 0;
-let logWindow = { minute: -1, emitted: 0, dropped: 0 };
+type LogLane = "request" | "business";
+type LaneCounts = { emitted: number; dropped: number; write_errors: number };
+const emptyCounts = (): LaneCounts => ({ emitted: 0, dropped: 0, write_errors: 0 });
+let logWindow = { minute: -1, request: emptyCounts(), business: emptyCounts() };
+let logTotals = { request: emptyCounts(), business: emptyCounts() };
 
 function effective(policy: Policy): LogMode {
   if (policy.logs === "diagnostic" && Date.now() >= (policy.diagnostic_until ?? 0)) {
@@ -201,38 +205,71 @@ export type WorkerBusinessEvent =
       reason?: "operation_conflict" | "budget_exhausted" | "component_paused" | "lease_conflict" | "invalid_request" |
         "not_found" | "attempt_not_eligible" | "unclassified" };
 
-function takeLogSlot(mode: Exclude<LogMode, "off">): boolean {
+function writeLog(lane: LogLane, value: object): void {
+  try {
+    console.log(JSON.stringify(value));
+  } catch {
+    logWindow[lane].write_errors++;
+    logTotals[lane].write_errors++;
+  }
+}
+
+function takeLogSlot(mode: Exclude<LogMode, "off">, lane: LogLane): boolean {
   const minute = Math.floor(Date.now() / 60_000);
   if (minute !== logWindow.minute) {
-    if (logWindow.dropped > 0) {
-      console.log(JSON.stringify({ schema: 1, kind: "worker_log_drops", count: logWindow.dropped }));
+    for (const previousLane of ["request", "business"] as const) {
+      const dropped = logWindow[previousLane].dropped;
+      if (dropped > 0) {
+        writeLog(previousLane, { schema: 1, kind: "worker_log_drops", lane: previousLane,
+          count: dropped, minute: logWindow.minute });
+      }
     }
-    logWindow = { minute, emitted: 0, dropped: 0 };
+    logWindow = { minute, request: emptyCounts(), business: emptyCounts() };
   }
+  // Request summaries cannot consume the capacity reserved for lifecycle and
+  // provider events. Both lanes remain bounded independently per isolate.
   const limit = mode === "diagnostic" ? 600 : 120;
-  if (logWindow.emitted >= limit) {
-    logWindow.dropped++;
+  if (logWindow[lane].emitted >= limit) {
+    logWindow[lane].dropped++;
+    logTotals[lane].dropped++;
+    // The first loss is visible even if the isolate receives no next-minute
+    // request. Later reports grow logarithmically under sustained overload.
+    const dropped = logWindow[lane].dropped;
+    if ((dropped & (dropped - 1)) === 0) {
+      writeLog(lane, { schema: 1, kind: "worker_log_drops", lane,
+        count: dropped, minute });
+    }
     return false;
   }
-  logWindow.emitted++;
+  logWindow[lane].emitted++;
+  logTotals[lane].emitted++;
   return true;
+}
+
+// This reports only the isolate that answered. A collector must aggregate
+// across isolates; D1 receipts remain authoritative for paid operations.
+export function logExporterStatus(policy: Policy): object {
+  return { scope: "isolate", config_version: policy.version,
+    effective_logs: effective(policy), policy_available: policyReadAvailable(policy),
+    collector_delivery: "unknown", minute: logWindow.minute,
+    window: logWindow, totals: logTotals };
 }
 
 // Recovery receipts in D1 remain authoritative. This export is deliberately
 // free of operation/link IDs because platform logs cannot be deleted by link.
 export function emitProviderRecovery(policy: Policy, event: ProviderRecoveryEvent | undefined): void {
   const mode = effective(policy);
-  if (!event || mode === "off" || !takeLogSlot(mode)) return;
-  console.log(JSON.stringify({ schema: 1, kind: "provider_recovery", config_version: policy.version,
-    stage: event.stage, outcome: event.outcome, status: event.status }));
+  if (!event || mode === "off" || !takeLogSlot(mode, "business")) return;
+  writeLog("business", { schema: 1, kind: "provider_recovery", config_version: policy.version,
+    stage: event.stage, outcome: event.outcome, status: event.status });
 }
 
 export function emitWorkerBusiness(policy: Policy, event: WorkerBusinessEvent): void {
   const mode = effective(policy);
-  if (mode === "off" || !takeLogSlot(mode)) return;
+  if (mode === "off" || !takeLogSlot(mode, "business")) return;
   // The lifecycle facts carry no private IDs. Durable operation receipts and
   // leases remain the authoritative, deletable record for an individual link.
-  console.log(JSON.stringify({ schema: 1, config_version: policy.version, ...event }));
+  writeLog("business", { schema: 1, config_version: policy.version, ...event });
 }
 
 export function emitRequest(policy: Policy, request: Request, response: Response | null, durationMS: number,
@@ -241,7 +278,7 @@ export function emitRequest(policy: Policy, request: Request, response: Response
   if (mode === "off" || (mode === "basic" && response !== null && response.status < 400 && request.method === "GET")) return;
   const path = new URL(request.url).pathname;
   if (path === "/api/internal/observability") return;
-  if (!takeLogSlot(mode)) return;
+  if (!takeLogSlot(mode, "request")) return;
   const method = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(request.method) ? request.method : "OTHER";
   const contentLength = response?.headers.get("content-length");
   const responseBytes = contentLength && /^\d{1,12}$/.test(contentLength) ? Number(contentLength) : null;
@@ -250,11 +287,11 @@ export function emitRequest(policy: Policy, request: Request, response: Response
     ? headerCacheState : null;
   // Platform logs cannot promise deletion by bookmark. Never include raw URL,
   // IDs, request/response bodies, SQL text, tokens or trace identifiers here.
-  console.log(JSON.stringify({ schema: 1, kind: "worker_request", config_version: policy.version,
+  writeLog("request", { schema: 1, kind: "worker_request", config_version: policy.version,
     route: routeTemplate(path), method, status: response?.status ?? null,
     error_type: response === null ? "unhandled" : response.status >= 400 ? `http_${response.status}` : null,
     duration_ms: Math.round(durationMS), response_bytes: responseBytes, cache_state: cacheState,
-    d1_stats: d1Stats ?? "unavailable" }));
+    d1_stats: d1Stats ?? "unavailable" });
 }
 
 export function resetObservabilityCacheForTest(): void {
@@ -262,5 +299,6 @@ export function resetObservabilityCacheForTest(): void {
   cache = undefined;
   lastConfirmed = undefined;
   loading = undefined;
-  logWindow = { minute: -1, emitted: 0, dropped: 0 };
+  logWindow = { minute: -1, request: emptyCounts(), business: emptyCounts() };
+  logTotals = { request: emptyCounts(), business: emptyCounts() };
 }

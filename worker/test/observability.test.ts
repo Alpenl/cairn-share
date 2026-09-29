@@ -1,7 +1,7 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import worker, { type Env } from "../src/index";
-import { emitRequest, requestPolicy, resetObservabilityCacheForTest } from "../src/observability";
+import { emitRequest, emitWorkerBusiness, requestPolicy, resetObservabilityCacheForTest } from "../src/observability";
 
 const API_TOKEN = "app_test_token";
 const ENRICHER_TOKEN = "enricher_test_token";
@@ -139,11 +139,59 @@ describe("application observability control", () => {
     const input = new Request("https://share.example/api/links/123?private=secret", { method: "POST" });
     const output = new Response(null, { status: 201 });
     for (let i = 0; i < 123; i++) emitRequest(policy, input, output, 1);
-    expect(log).toHaveBeenCalledTimes(120);
+    expect(log).toHaveBeenCalledTimes(122);
+    expect(JSON.parse(String(log.mock.calls[120][0]))).toMatchObject({
+      kind: "worker_log_drops", lane: "request", count: 1
+    });
+    expect(JSON.parse(String(log.mock.calls[121][0]))).toMatchObject({
+      kind: "worker_log_drops", lane: "request", count: 2
+    });
+    const status = await request(endpoint, { method: "GET" });
+    expect(status.status).toBe(200);
+    expect(status.headers.get("cache-control")).toBe("private, no-store");
+    await expect(status.json()).resolves.toMatchObject({ scope: "isolate", effective_logs: "basic",
+      collector_delivery: "unknown",
+      window: { request: { emitted: 120, dropped: 3 } },
+      totals: { request: { emitted: 120, dropped: 3 } } });
     vi.setSystemTime(new Date(Date.now() + 60_001));
     emitRequest(policy, input, output, 1);
-    expect(JSON.parse(String(log.mock.calls[120][0]))).toEqual({ schema: 1, kind: "worker_log_drops", count: 3 });
-    expect(log).toHaveBeenCalledTimes(122);
+    expect(JSON.parse(String(log.mock.calls[122][0]))).toMatchObject({
+      kind: "worker_log_drops", lane: "request", count: 3 });
+    expect(log).toHaveBeenCalledTimes(124);
+  });
+
+  it("reserves a separate bounded lane for business events under request floods", async () => {
+    expect((await publish({ version: 0, logs: "basic" })).status).toBe(200);
+    const policy = await requestPolicy(env.DB);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const input = new Request("https://share.example/api/enrichment/jobs", { method: "POST" });
+    for (let i = 0; i < 200; i++) emitRequest(policy, input, new Response(null, { status: 200 }), 1);
+    emitWorkerBusiness(policy, { kind: "provider_attempt", action: "reserve", stage: "reading",
+      outcome: "reserved", status: 200 });
+    expect(log.mock.calls.some(([raw]) => JSON.parse(String(raw)).kind === "provider_attempt")).toBe(true);
+    const status = await request(endpoint, { method: "GET" });
+    await expect(status.json()).resolves.toMatchObject({ scope: "isolate",
+      window: { request: { emitted: 120, dropped: 80 }, business: { emitted: 1, dropped: 0 } } });
+    expect((await request(endpoint, { method: "GET" }, API_TOKEN)).status).toBe(401);
+    expect((await publish({ version: 1, logs: "off" })).status).toBe(200);
+    const before = log.mock.calls.length;
+    emitWorkerBusiness(await requestPolicy(env.DB), { kind: "provider_attempt", action: "reserve",
+      stage: "reading", outcome: "reserved", status: 200 });
+    expect(log).toHaveBeenCalledTimes(before);
+    const off = await request(endpoint, { method: "GET" });
+    await expect(off.json()).resolves.toMatchObject({ effective_logs: "off",
+      totals: { request: { dropped: 80 }, business: { emitted: 1 } } });
+  });
+
+  it("counts console write errors without failing business processing", async () => {
+    expect((await publish({ version: 0, logs: "basic" })).status).toBe(200);
+    const policy = await requestPolicy(env.DB);
+    vi.spyOn(console, "log").mockImplementation(() => { throw new Error("collector unavailable"); });
+    expect(() => emitWorkerBusiness(policy, { kind: "source_claim", origin: "scheduled",
+      outcome: "claimed", status: 200 })).not.toThrow();
+    const status = await request(endpoint, { method: "GET" });
+    await expect(status.json()).resolves.toMatchObject({ scope: "isolate",
+      totals: { business: { emitted: 1, write_errors: 1 } } });
   });
 
   it("labels private paid-attempt routes without logging their payload", async () => {
