@@ -4,7 +4,7 @@ DROP TRIGGER enrichment_provider_reading_recoveries_commit;
 CREATE TRIGGER enrichment_provider_reading_recoveries_commit
 AFTER INSERT ON enrichment_provider_reading_recoveries
 BEGIN
-  SELECT CASE WHEN NOT EXISTS (
+  SELECT RAISE(ABORT,'provider_reading_recovery_ineligible') WHERE NOT EXISTS (
     SELECT 1 FROM enrichment_provider_attempts a JOIN links l ON l.id=a.link_id
     JOIN enrichment_sources s ON s.link_id=l.id
     WHERE a.operation_key=NEW.operation_key AND a.link_id=NEW.link_id
@@ -32,7 +32,7 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM enrichment_provider_attempts other
         WHERE other.link_id=l.id AND other.lease_hash=a.lease_hash
           AND other.stage='reading' AND other.state='reserved')
-  ) THEN RAISE(ABORT,'provider_reading_recovery_ineligible') END;
+  );
 
   UPDATE links SET enrichment_status='completed',manual_priority=0,
     enrichment_next_retry_at=NULL,enrichment_lease_token=NULL,enrichment_lease_until=NULL,

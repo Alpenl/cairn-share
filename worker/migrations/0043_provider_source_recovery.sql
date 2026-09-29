@@ -27,7 +27,7 @@ END;
 CREATE TRIGGER enrichment_provider_source_recoveries_commit
 AFTER INSERT ON enrichment_provider_source_recoveries
 BEGIN
-  SELECT CASE WHEN NOT EXISTS (
+  SELECT RAISE(ABORT,'provider_source_recovery_ineligible') WHERE NOT EXISTS (
     SELECT 1 FROM enrichment_provider_attempts a JOIN links l ON l.id=a.link_id
     WHERE a.operation_key=NEW.operation_key AND a.link_id=NEW.link_id
       AND a.stage='fetch' AND a.state='responded' AND a.http_status=200
@@ -42,14 +42,14 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM enrichment_provider_attempts other
         WHERE other.link_id=l.id AND other.lease_hash=a.lease_hash
           AND other.stage='fetch' AND other.state='reserved')
-  ) THEN RAISE(ABORT,'provider_source_recovery_ineligible') END;
+  );
 
   UPDATE links SET original_text=json_extract(NEW.source_payload,'$.original_text'),
     original_language=json_extract(NEW.source_payload,'$.original_language'),
     source_context_text=json_extract(NEW.source_payload,'$.context_text'),
     related_links=json_extract(NEW.source_payload,'$.related_links'),
     ai_title=NULL,translated_text=NULL,summary=NULL,
-    images=CASE WHEN original_text IS json_extract(NEW.source_payload,'$.original_text') THEN images ELSE '[]' END,
+    images=iif(original_text IS json_extract(NEW.source_payload,'$.original_text'),images,'[]'),
     enrichment_model=NULL,enriched_at=NULL,enrichment_status='pending',
     enrichment_attempts=0,enrichment_next_retry_at=NULL,manual_priority=1,
     enrichment_lease_token=NULL,enrichment_lease_until=NULL,enrichment_error=NULL,
@@ -67,11 +67,11 @@ BEGIN
     SELECT id,content_revision,NEW.evidence_hash,NEW.evidence_payload,0,'complete',NEW.created_at
     FROM links WHERE id=NEW.link_id
     ON CONFLICT(link_id,content_revision) DO NOTHING;
-  SELECT CASE WHEN NOT EXISTS (
+  SELECT RAISE(ABORT,'provider_source_recovery_snapshot_conflict') WHERE NOT EXISTS (
     SELECT 1 FROM evidence_snapshots s JOIN links l ON l.id=s.link_id
     WHERE l.id=NEW.link_id AND s.content_revision=l.content_revision
       AND s.content_hash=NEW.evidence_hash
-  ) THEN RAISE(ABORT,'provider_source_recovery_snapshot_conflict') END;
+  );
 
   UPDATE enrichment_provider_source_recoveries SET
     source_payload=NULL,evidence_payload=NULL,lease_token=NULL,lease_hash=NULL,
