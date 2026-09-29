@@ -226,6 +226,13 @@ async function activeTarget(env: Env): Promise<Target | null> {
   ).first<Target>();
 }
 
+async function registeredTargetSpec(env: Env, target: Target): Promise<boolean> {
+  if (target.protocol !== "v2") return true;
+  const row = await env.DB.prepare("SELECT spec_hash FROM question_specs WHERE spec_id=?")
+    .bind(target.spec_id).first<{ spec_hash: string }>();
+  return row?.spec_hash === target.spec_hash;
+}
+
 type Capabilities = {
   protocol?: unknown;
   taxonomy_version?: unknown;
@@ -306,7 +313,8 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     fromQuery.taxonomy_versions = csv("taxonomy_versions");
     fromQuery.policy_versions = csv("policy_versions");
     fromQuery.models = csv("models");
-    const response = reply({ target, supported: request.headers.get("X-Cairn-Classification-Budget") === "1" && supports(fromQuery, target) });
+    const response = reply({ target, supported: request.headers.get("X-Cairn-Classification-Budget") === "1" &&
+      supports(fromQuery, target) && await registeredTargetSpec(env, target) });
     response.headers.set("X-Cairn-Classification-Budget", "1");
     return response;
   }
@@ -320,12 +328,15 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       typeof body.requested_model !== "string" || !["legacy", "v2"].includes(String(body.protocol))) {
       return fail("invalid_classification_config");
     }
+    if (body.protocol === "v2" && (!text(body.policy_version, 100) || !text(body.requested_model, 200) ||
+      !await registeredTargetSpec(env, body as Target))) return fail("invalid_classification_config");
     const current = await activeTarget(env);
     if (!current) return fail("configuration_error");
     if (body.expected_generation !== undefined && body.expected_generation !== current.generation) {
       return fail("target_changed", { generation: current.generation });
     }
-    if (current.spec_hash === body.spec_hash && current.policy_version === body.policy_version &&
+    if (current.spec_id === body.spec_id && current.spec_hash === body.spec_hash &&
+      current.protocol === body.protocol && current.policy_version === body.policy_version &&
       current.requested_model === body.requested_model && current.taxonomy_version === body.taxonomy_version) {
       return reply({ generation: current.generation, unchanged: true });
     }
@@ -358,6 +369,10 @@ export async function classificationRoute(request: Request, env: Env, path: stri
   if (path === "/api/enrichment/classifications/claim") {
     const target = await activeTarget(env);
     if (!target) return fail("configuration_error");
+    if (!await registeredTargetSpec(env, target)) return fail("configuration_error");
+    if (body.expected_generation !== undefined && body.expected_generation !== target.generation) {
+      return fail("target_changed", { generation: target.generation });
+    }
     // The consumer declares capabilities; it never defines the target. A
     // mismatch is a component-level condition and must not drain the queue or
     // burn attempts.

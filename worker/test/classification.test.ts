@@ -35,7 +35,7 @@ const settings = { taxonomy_version: taxonomy.version, policy_version: "jev-tags
 
 it.each(["primary", "context"])("R3-02: delayed %s snapshot does not claim or burn attempts", async (changedField) => {
   const { id, lease_token, source } = await setup();
-  expect((await switchTarget(v2Target)).status).toBe(200);
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
   const prior = await env.DB.prepare("SELECT id,content_revision FROM evidence_snapshots WHERE link_id=?").bind(id)
     .first<{ id: number; content_revision: number }>();
   const changed = changedField === "primary" ? { ...source, original_text: "new source awaiting its snapshot" }
@@ -65,7 +65,7 @@ it.each(["primary", "context"])("R3-02: delayed %s snapshot does not claim or bu
 
 it("R3-02: a snapshot with the current revision but another primary cannot be claimed", async () => {
   const { id } = await setup();
-  expect((await switchTarget(v2Target)).status).toBe(200);
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
   expect((await request(`v2/links/${id}/evidence`, { snapshot: {
     blocks: [{ id: "primary", role: "primary", text: "unrelated primary text" }],
     fetched_at: "2026-09-22T00:00:00Z", retrieval: "manual", truncation: { truncated: false }
@@ -191,6 +191,55 @@ async function switchTarget(body: Record<string, unknown>) {
   return request("enrichment/classifications/target", body);
 }
 
+async function registeredSpecHash(specID: string): Promise<string> {
+  const response = await request("v2/question-specs", { spec_id: specID, spec_version: 1, questions: {} });
+  expect(response.status).toBe(200);
+  return (await response.json() as { spec_hash: string }).spec_hash;
+}
+
+async function registeredV2Target() {
+  return { ...v2Target, spec_hash: await registeredSpecHash(v2Target.spec_id) };
+}
+
+it("rejects an unregistered or mismatched v2 spec before changing the target", async () => {
+  const { id } = await setup();
+  const unregistered = await switchTarget(v2Target);
+  expect(unregistered.status).toBe(400);
+  expect((await unregistered.json() as { error: string }).error).toBe("invalid_classification_config");
+  const valid = await registeredV2Target();
+  expect((await switchTarget({ ...valid, spec_hash: "wrong" })).status).toBe(400);
+  const target = await (await request("enrichment/classifications/target", undefined, "GET")).json() as { target: { generation: number } };
+  expect(target.target.generation).toBe(0);
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+  expect((await switchTarget(valid)).status).toBe(200);
+});
+
+it("pauses a corrupted active target without leasing or burning an attempt", async () => {
+  const { id } = await setup();
+  const valid = await registeredV2Target();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO classification_targets(generation,spec_id,spec_hash,taxonomy_version,
+      policy_version,requested_model,protocol,created_at) VALUES (1,?,?,?,?,?,?,'now')`)
+      .bind(valid.spec_id, "wrong", valid.taxonomy_version, valid.policy_version, valid.requested_model, "v2"),
+    env.DB.prepare("UPDATE classification_target_state SET generation=1 WHERE id=1")
+  ]);
+  const handshake = await request("enrichment/classifications/target?protocol=v2&spec_ids=classify-v2&taxonomy_versions=2026-09-20.1&policy_versions=jev-tags-v2&models=jev-pinned-1", undefined, "GET");
+  expect((await handshake.json() as { supported: boolean }).supported).toBe(false);
+  const claim = await request("enrichment/classifications/claim", v2Caps);
+  expect((await claim.json() as { error: string }).error).toBe("configuration_error");
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+  expect((await switchTarget(valid)).status).toBe(200);
+});
+
+it("rejects a target switch between handshake and claim before leasing", async () => {
+  const { id } = await setup();
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
+  const stale = await request("enrichment/classifications/claim", { ...v2Caps, expected_generation: 0 });
+  expect((await stale.json() as { error: string }).error).toBe("target_changed");
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+  expect((await request("enrichment/classifications/claim", { ...v2Caps, expected_generation: 1 })).status).toBe(200);
+});
+
 it("does not re-claim a completed target across A/B policy alternation (20 rounds)", async () => {
   const { id, lease_token, source } = await setup();
   const a = { ...settings, policy_version: "policy-a" };
@@ -209,7 +258,7 @@ it("does not re-claim a completed target across A/B policy alternation (20 round
 });
 
 it("rejects a v2 claim whose declared capabilities do not match the target", async () => {
-  expect((await switchTarget(v2Target)).status).toBe(200);
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
   const mismatch = await request("enrichment/classifications/claim", { ...v2Caps, models: ["other-model"] });
   expect(mismatch.status).toBe(409);
   expect((await mismatch.json() as { error: string }).error).toBe("capability_mismatch");
@@ -222,7 +271,7 @@ it("rejects a v2 claim whose declared capabilities do not match the target", asy
 it("only hands v2 jobs to a matching consumer and migrates stale generations", async () => {
   const { id } = await setup();
   // Job was enrolled under the legacy generation.
-  expect((await switchTarget(v2Target)).status).toBe(200);
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
   const before = await env.DB.prepare("SELECT target_generation FROM classification_jobs WHERE link_id=?").bind(id).first<any>();
   expect(before.target_generation).toBe(0);
   const claimed = await request("enrichment/classifications/claim", v2Caps);
@@ -236,7 +285,7 @@ it("binds a v2 claim to the server target and completes it (F02 regression)", as
   const { id, source } = await setup();
   const target = {
     spec_id: "classify-v1",
-    spec_hash: "sha256:go-spec",
+    spec_hash: await registeredSpecHash("classify-v1"),
     taxonomy_version: taxonomy.version,
     policy_version: "jev-policy-v2",
     requested_model: "jev-latest",
@@ -293,7 +342,7 @@ it("guards completion against a target switch (no stale overwrite)", async () =>
   const { id } = await setup();
   const job = await claim();
   // Switch to v2 while the legacy completion is in flight.
-  expect((await switchTarget(v2Target)).status).toBe(200);
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
   const stale = await request(`enrichment/classifications/${id}/complete`, completion(job));
   expect(stale.status).toBe(409);
   expect((await stale.json() as { error: string }).error).toBe("target_changed");
@@ -302,7 +351,7 @@ it("guards completion against a target switch (no stale overwrite)", async () =>
 });
 
 it("rolls a target back with a new generation without rewinding", async () => {
-  expect((await switchTarget(v2Target)).status).toBe(200);
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
   const rollback = await switchTarget({ ...v2Target, spec_id: "classify-v1-rollback", spec_hash: "sha256:classify-v1", policy_version: "jev-tags-v1", protocol: "legacy" });
   expect(rollback.status).toBe(200);
   const body = await rollback.json() as { generation: number };
