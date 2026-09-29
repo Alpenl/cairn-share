@@ -9,7 +9,8 @@ async function post(path: string, body: unknown = {}, token = "internal", guarde
   return worker.fetch(new Request(`https://test/api/${path}`, {
     method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json",
       ...(guarded ? { "X-Cairn-Provider-Attempt-Ledger": "1" } : {}),
-      ...(guarded && path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
+      ...(guarded && path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1",
+        "X-Cairn-Source-Component-Gate": "1" } : {}) },
     body: JSON.stringify(body)
   }), bindings());
 }
@@ -44,13 +45,14 @@ it("requires the internal token for source lease capability negotiation", async 
   expect(valid.status).toBe(200);
   expect(await valid.json()).toEqual({ protocol: 1, lease_ms: 900_000,
     paid_stage_admission: true, provider_result_guard: true, completion_replay: true,
-    provider_attempt_ledger: true, refresh_source_checkpoint: true });
+    provider_attempt_ledger: true, refresh_source_checkpoint: true,
+    source_component_gate: true });
 });
 
 it("checks exact source claimability without taking a lease", async () => {
   const path = "https://test/api/enrichment/source-claimable";
   const check = (token = "internal") => worker.fetch(new Request(path, { method: "GET",
-    headers: { Authorization: `Bearer ${token}` } }), bindings());
+    headers: { Authorization: `Bearer ${token}`, "X-Cairn-Source-Component-Gate": "1" } }), bindings());
   expect((await check("app")).status).toBe(401);
   expect(await (await check()).json()).toEqual({ claimable: false });
   const created = await post("links", { url: "https://x.com/u/status/claimable" }, "app");
@@ -211,4 +213,168 @@ it("does not release a lease acquired by another owner", async () => {
   expect(await stale.json()).toEqual({ error: "lease_conflict" });
   expect(await env.DB.prepare("SELECT enrichment_lease_token,enrichment_status FROM links WHERE id=?")
     .bind(id).first()).toEqual({ enrichment_lease_token: next.lease_token, enrichment_status: "processing" });
+});
+
+it("keeps a source fault from consuming a stored-source reading claim", async () => {
+  const source = await post("links", { url: "https://x.com/u/status/91" }, "app");
+  const sourceID = (await source.json() as { id: number }).id;
+  const reading = await post("links", { url: "https://x.com/u/status/92" }, "app");
+  const readingID = (await reading.json() as { id: number }).id;
+  await env.DB.prepare("UPDATE links SET original_text='stored text' WHERE id=?").bind(readingID).run();
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',retry_at=?
+    WHERE component='source'`).bind(new Date(Date.now() + 60_000).toISOString()).run();
+  const claimed = await post("enrichment/jobs/claim");
+  expect(claimed.status).toBe(200);
+  expect(await claimed.json()).toMatchObject({ id: readingID });
+  expect(await env.DB.prepare("SELECT enrichment_attempts FROM links WHERE id=?")
+    .bind(sourceID).first("enrichment_attempts")).toBe(0);
+  expect((await post("enrichment/jobs/claim")).status).toBe(503);
+});
+
+it("claims one due source probe and closes it only after a settled source checkpoint", async () => {
+  const first = await post("links", { url: "https://x.com/u/status/93" }, "app");
+  const firstID = (await first.json() as { id: number }).id;
+  const second = await post("links", { url: "https://x.com/u/status/94" }, "app");
+  const secondID = (await second.json() as { id: number }).id;
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',retry_at='2000-01-01'
+    WHERE component='source'`).run();
+  const outcomes = await Promise.all([post("enrichment/jobs/claim"), post("enrichment/jobs/claim")]);
+  expect(outcomes.map((response) => response.status).sort()).toEqual([200, 503]);
+  const job = await outcomes.find((response) => response.status === 200)!.json() as {
+    id: number; lease_token: string; content_revision: number
+  };
+  expect(job.id).toBe(firstID);
+  const gate = await env.DB.prepare(`SELECT state,probe_token,probe_until FROM enrichment_component_gates
+    WHERE component='source'`).first<{ state: string; probe_token: string; probe_until: string }>();
+  expect(gate).toMatchObject({ state: "probing", probe_token: job.lease_token });
+  expect(Date.parse(gate!.probe_until) - Date.now()).toBeGreaterThan(15 * 60_000);
+  expect(await env.DB.prepare("SELECT enrichment_attempts FROM links WHERE id=?")
+    .bind(secondID).first("enrichment_attempts")).toBe(0);
+  expect((await admit(job.id, job.lease_token)).status).toBe(200);
+  expect((await reserve(job.id, job.lease_token, job.content_revision)).status).toBe(200);
+  expect((await settle()).status).toBe(200);
+  const source = { original_text: "fetched text", original_language: "en", context_text: "",
+    related_links: [], image_urls: [], model: "fixture" };
+  expect((await post(`enrichment/jobs/${job.id}/source`, { lease_token: job.lease_token, source })).status).toBe(200);
+  expect(await env.DB.prepare("SELECT state FROM enrichment_component_gates WHERE component='source'")
+    .first("state")).toBe("closed");
+  expect((await post("enrichment/jobs/claim")).status).toBe(200);
+});
+
+it("does not hand a due probe to an older source client", async () => {
+  const created = await post("links", { url: "https://x.com/u/status/99" }, "app");
+  const id = (await created.json() as { id: number }).id;
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',retry_at='2000-01-01'
+    WHERE component='source'`).run();
+  const older = await worker.fetch(new Request("https://test/api/enrichment/jobs/claim", {
+    method: "POST", headers: { Authorization: "Bearer internal",
+      "X-Cairn-Provider-Attempt-Ledger": "1", "X-Cairn-Source-Lease-Admission": "1" }
+  }), bindings());
+  expect(older.status).toBe(204);
+  expect(await env.DB.prepare("SELECT enrichment_attempts FROM links WHERE id=?")
+    .bind(id).first("enrichment_attempts")).toBe(0);
+  expect(await env.DB.prepare("SELECT state FROM enrichment_component_gates WHERE component='source'")
+    .first("state")).toBe("open");
+  expect((await post("enrichment/jobs/claim")).status).toBe(200);
+});
+
+it("releases a source probe after a free checkpoint without clearing the provider fault", async () => {
+  const first = await post("links", { url: "https://x.com/u/status/97" }, "app");
+  const firstID = (await first.json() as { id: number }).id;
+  const second = await post("links", { url: "https://x.com/u/status/98" }, "app");
+  const secondID = (await second.json() as { id: number }).id;
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',failures=1,
+    reason='provider_transient',retry_at='2000-01-01' WHERE component='source'`).run();
+  const response = await post("enrichment/jobs/claim");
+  expect(response.status).toBe(200);
+  const job = await response.json() as { id: number; lease_token: string };
+  expect(job.id).toBe(firstID);
+  const source = { original_text: "pasted text", original_language: "en", context_text: "",
+    related_links: [], image_urls: [], model: "manual" };
+  expect((await post(`enrichment/jobs/${firstID}/source`, {
+    lease_token: job.lease_token, source
+  })).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state,failures,reason,probe_token FROM enrichment_component_gates
+    WHERE component='source'`).first()).toEqual({ state: "open", failures: 1,
+    reason: "provider_transient", probe_token: null });
+  expect(await env.DB.prepare("SELECT original_text FROM links WHERE id=?")
+    .bind(firstID).first("original_text")).toBe("pasted text");
+  const next = await post("enrichment/jobs/claim");
+  expect(next.status).toBe(200);
+  expect(await next.json()).toMatchObject({ id: secondID });
+});
+
+it("fences an old source lease when its component gate opens before payment", async () => {
+  const { id, job } = await claimed();
+  expect((await admit(id, job.lease_token)).status).toBe(200);
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',retry_at=?
+    WHERE component='source'`).bind(new Date(Date.now() + 60_000).toISOString()).run();
+  const denied = await reserve(id, job.lease_token, job.content_revision);
+  expect(denied.status).toBe(503);
+  expect(await denied.json()).toEqual({ error: "component_paused" });
+  expect(await env.DB.prepare("SELECT COUNT(*) FROM enrichment_provider_attempts WHERE link_id=?")
+    .bind(id).first("COUNT(*)")).toBe(0);
+  const released = await admit(id, job.lease_token);
+  expect(released.status).toBe(503);
+  expect(await released.json()).toEqual({ error: "component_paused" });
+  expect(await env.DB.prepare(`SELECT enrichment_status,enrichment_attempts,enrichment_lease_token FROM links WHERE id=?`)
+    .bind(id).first()).toEqual({ enrichment_status: "pending", enrichment_attempts: 0,
+      enrichment_lease_token: null });
+});
+
+it("opens only the failing source gate with the leased failure and retries one probe", async () => {
+  const { id, job } = await claimed();
+  const waiting = await post("links", { url: "https://x.com/u/status/95" }, "app");
+  const waitingID = (await waiting.json() as { id: number }).id;
+  expect((await admit(id, job.lease_token)).status).toBe(200);
+  expect((await reserve(id, job.lease_token, job.content_revision)).status).toBe(200);
+  expect((await settle()).status).toBe(200);
+  const failed = await post(`enrichment/jobs/${id}/fail`, {
+    lease_token: job.lease_token, error: "[search] HTTP 529",
+    component_fault: "source_transient", retry_after_ms: 120_000
+  });
+  expect(failed.status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state,failures,reason FROM enrichment_component_gates
+    WHERE component='source'`).first()).toEqual({ state: "open", failures: 1,
+      reason: "provider_transient" });
+  expect(await env.DB.prepare("SELECT state FROM enrichment_component_gates WHERE component='reading'")
+    .first("state")).toBe("closed");
+  expect((await post("enrichment/jobs/claim")).status).toBe(503);
+  expect(await env.DB.prepare("SELECT enrichment_attempts FROM links WHERE id=?")
+    .bind(waitingID).first("enrichment_attempts")).toBe(0);
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET retry_at='2000-01-01'
+    WHERE component='source'`).run();
+  const probe = await post("enrichment/jobs/claim");
+  expect(probe.status).toBe(200);
+  const next = await probe.json() as { id: number; lease_token: string };
+  expect(next.id).toBe(waitingID);
+  expect((await post(`enrichment/jobs/${next.id}/fail`, {
+    lease_token: next.lease_token, error: "probe failed before payment"
+  })).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state,failures,reason FROM enrichment_component_gates
+    WHERE component='source'`).first()).toEqual({ state: "open", failures: 2,
+      reason: "probe_failed" });
+});
+
+it("closes a reading probe only after its paid completion commits", async () => {
+  const created = await post("links", { url: "https://x.com/u/status/96" }, "app");
+  const id = (await created.json() as { id: number }).id;
+  await env.DB.prepare("UPDATE links SET original_text='stored text' WHERE id=?").bind(id).run();
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',retry_at='2000-01-01'
+    WHERE component='reading'`).run();
+  const claimed = await post("enrichment/jobs/claim");
+  expect(claimed.status).toBe(200);
+  const job = await claimed.json() as { id: number; lease_token: string; content_revision: number };
+  expect(job.id).toBe(id);
+  expect(await env.DB.prepare("SELECT state FROM enrichment_component_gates WHERE component='reading'")
+    .first("state")).toBe("probing");
+  expect((await admit(id, job.lease_token, 210_000, "reading")).status).toBe(200);
+  expect((await reserve(id, job.lease_token, job.content_revision, "reading")).status).toBe(200);
+  expect((await settle("reading")).status).toBe(200);
+  const completion = { lease_token: job.lease_token, original_text: "stored text",
+    ai_title: "测试标题", original_language: "en", translated_text: "中文译文",
+    summary: "测试摘要", related_links: [], images: [], model: "fixture" };
+  expect((await post(`enrichment/jobs/${id}/complete`, completion)).status).toBe(200);
+  expect(await env.DB.prepare("SELECT state FROM enrichment_component_gates WHERE component='reading'")
+    .first("state")).toBe("closed");
 });

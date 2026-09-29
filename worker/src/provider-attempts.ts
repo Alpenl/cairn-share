@@ -116,6 +116,9 @@ async function reserve(request: Request, env: Env,
         AND l.enrichment_status='processing' AND l.enrichment_lease_token=?
         AND l.enrichment_lease_until>=?
         AND l.enrichment_paid_stage=?
+        AND EXISTS(SELECT 1 FROM enrichment_component_gates g
+          WHERE g.component=? AND (g.state='closed' OR (g.state='probing'
+            AND g.probe_token=l.enrichment_lease_token AND g.probe_until>?)))
         AND COALESCE((SELECT total FROM enrichment_provider_daily_usage WHERE day=?),0) < ?
         AND (SELECT COUNT(*) FROM enrichment_provider_attempts WHERE link_id=l.id AND created_at>=? AND created_at<?) < ?
         AND ((?=1 AND l.enrichment_paid_uncertain=0
@@ -132,6 +135,7 @@ async function reserve(request: Request, env: Env,
       .bind(value.operation_key, leaseHash, value.stage, value.variant, value.attempt_number,
         value.request_hash, payloadHash, value.model, nowISO,
         value.link_id, value.content_revision, value.lease_token, deadline, value.stage,
+        value.stage === "fetch" ? "source" : "reading", nowISO,
         day, PROVIDER_ATTEMPT_LIMITS.daily_total,
         start, end, PROVIDER_ATTEMPT_LIMITS.daily_item,
         value.attempt_number, leaseHash, value.stage,
@@ -167,6 +171,23 @@ async function reserve(request: Request, env: Env,
     onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
       outcome: "rejected", status: 429, reason: "budget_exhausted" });
     return fail("budget_exhausted", 429);
+  }
+  if (value.stage !== "canary") {
+    const gate = await env.DB.prepare(`SELECT state,probe_token,probe_until,retry_at
+      FROM enrichment_component_gates WHERE component=?`)
+      .bind(value.stage === "fetch" ? "source" : "reading")
+      .first<{ state: string; probe_token: string | null; probe_until: string | null; retry_at: string | null }>();
+    if (gate && gate.state !== "closed" &&
+        !(gate.state === "probing" && gate.probe_token === value.lease_token &&
+          gate.probe_until && gate.probe_until > nowISO)) {
+      onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
+        outcome: "rejected", status: 503, reason: "component_paused" });
+      const response = fail("component_paused", 503);
+      const until = gate.state === "open" ? gate.retry_at : gate.probe_until;
+      const delay = until ? Math.max(0, Date.parse(until) - Date.now()) : 0;
+      if (delay > 0) response.headers.set("Retry-After", String(Math.ceil(delay / 1000)));
+      return response;
+    }
   }
   onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
     outcome: "rejected", status: 409, reason: "lease_conflict" });

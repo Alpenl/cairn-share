@@ -182,7 +182,7 @@ export type ProviderRecoveryEvent = {
 };
 
 export type WorkerBusinessEvent =
-  | { kind: "component_gate"; component: "classification";
+  | { kind: "component_gate"; component: "source" | "reading" | "classification";
       action: "opened" | "probe_started" | "closed" }
   | { kind: "manual_request"; action: "source" | "process";
       outcome: "accepted" | "replay" | "rejected" | "failed"; status: number }
@@ -196,7 +196,7 @@ export type WorkerBusinessEvent =
       outcome: "reserved" | "already_reserved" | "responded" | "authorized" |
         "confirmed_not_billed" | "replay" | "rejected" | "failed";
       status: number; provider_status?: number; response_id_present?: boolean;
-      reason?: "operation_conflict" | "budget_exhausted" | "lease_conflict" | "invalid_request" |
+      reason?: "operation_conflict" | "budget_exhausted" | "component_paused" | "lease_conflict" | "invalid_request" |
         "not_found" | "attempt_not_eligible" | "unclassified" };
 
 function takeLogSlot(mode: Exclude<LogMode, "off">): boolean {

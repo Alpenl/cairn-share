@@ -12,7 +12,8 @@ it("claims in priority order through the D1 index with bounded reads", async () 
   const day = now.slice(0, 10);
   const start = `${day}T00:00:00.000Z`;
   const end = new Date(Date.parse(start) + 86400000).toISOString();
-  const bindings = [5, now, now, now, now, day, 1_000_000, start, end, 1_000_000];
+  const bindings = [5, now, now, now, now, day, 1_000_000, start, end, 1_000_000,
+    1, now, now];
   const forcedPlan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${SOURCE_CLAIM_CANDIDATE_SQL}`)
     .bind(...bindings).all<{ detail: string }>();
   const forcedResult = await env.DB.prepare(SOURCE_CLAIM_CANDIDATE_SQL)

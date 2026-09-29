@@ -1019,7 +1019,7 @@ export async function manualSourceRoute(request: Request, env: Env, id: number,
 // (the evidence read by snapshot id lives in domain-routes; see latestSnapshot)
 
 export async function sourceRoute(request: Request, env: Env, id: number,
-  onStored?: () => void): Promise<Response> {
+  onStored?: () => void, onGateClosed?: () => void): Promise<Response> {
   if (request.method === "GET") {
     const row = await env.DB.prepare(`SELECT s.payload FROM enrichment_sources s JOIN links l ON l.id=s.link_id
       WHERE l.id=? AND s.url=l.url AND s.original_text=l.original_text`).bind(id).first<{ payload: string }>();
@@ -1058,9 +1058,35 @@ export async function sourceRoute(request: Request, env: Env, id: number,
       ON CONFLICT(link_id) DO UPDATE SET url=excluded.url,original_text=excluded.original_text,
         payload=excluded.payload,fetched_at=excluded.fetched_at`)
       .bind(source.original_text, JSON.stringify(source), now, id, body.lease_token, now,
-        source.original_text, source.context_text, JSON.stringify(source.related_links))
+        source.original_text, source.context_text, JSON.stringify(source.related_links)),
+    env.DB.prepare(`UPDATE enrichment_component_gates SET state='closed',epoch=epoch+1,
+      failures=0,retry_at=NULL,probe_token=NULL,probe_until=NULL,reason=NULL,updated_at=?
+      WHERE component='source' AND state='probing' AND probe_token=?
+        AND EXISTS(SELECT 1 FROM links l JOIN enrichment_sources s ON s.link_id=l.id
+          WHERE l.id=? AND l.enrichment_status='processing' AND l.enrichment_lease_token=?
+            AND l.enrichment_lease_until>? AND l.original_text=? AND s.url=l.url
+            AND s.original_text=l.original_text)
+        AND EXISTS(SELECT 1 FROM enrichment_provider_attempts a WHERE a.link_id=?
+          AND a.lease_hash=? AND a.stage='fetch' AND a.state='responded' AND a.http_status=200)`)
+      .bind(now, body.lease_token, id, body.lease_token, now, source.original_text,
+        id, leaseHash),
+    // A pasted or adopted source proves only that the checkpoint works. It
+    // cannot prove the external fetch recovered, so release this probe for
+    // another eligible fetch without clearing the provider fault.
+    env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',epoch=epoch+1,
+      retry_at=?,probe_token=NULL,probe_until=NULL,updated_at=?
+      WHERE component='source' AND state='probing' AND probe_token=?
+        AND EXISTS(SELECT 1 FROM links l JOIN enrichment_sources s ON s.link_id=l.id
+          WHERE l.id=? AND l.enrichment_status='processing' AND l.enrichment_lease_token=?
+            AND l.enrichment_lease_until>? AND l.original_text=? AND s.url=l.url
+            AND s.original_text=l.original_text)
+        AND NOT EXISTS(SELECT 1 FROM enrichment_provider_attempts a WHERE a.link_id=?
+          AND a.lease_hash=? AND a.stage='fetch' AND a.state='responded' AND a.http_status=200)`)
+      .bind(now, now, body.lease_token, id, body.lease_token, now, source.original_text,
+        id, leaseHash)
   ]);
   if (results[0].results.length) {
+    if (Number(results[2].meta.changes) === 1) onGateClosed?.();
     onStored?.();
     return reply({ id, status: "source_saved" });
   }
