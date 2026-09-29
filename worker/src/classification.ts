@@ -595,6 +595,9 @@ export async function classificationRoute(request: Request, env: Env, path: stri
   }
   if (match[2] === "fail") {
     if (!text(body.error, 1800)) return fail("invalid_classification");
+    const retryAfterMS = body.retry_after_ms;
+    if (retryAfterMS !== undefined &&
+      (typeof retryAfterMS !== "number" || !Number.isSafeInteger(retryAfterMS) || retryAfterMS < 0)) return fail("invalid_classification");
     const job = await env.DB.prepare(`SELECT status, attempts, target_generation, spec_id, revision, input_revision, lease_token, lease_until
       FROM classification_jobs WHERE link_id=?`).bind(id).first<{
         status: string; attempts: number; target_generation: number; spec_id: string; revision: number; input_revision: number;
@@ -614,7 +617,13 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       return reply({ id, status: "superseded" });
     }
     const status = job.attempts >= 5 ? "exhausted" : "failed";
-    const delay = [60_000, 300_000, 1800_000, 7200_000][Math.min(job.attempts - 1, 3)];
+    const baseDelay = [60_000, 300_000, 1800_000, 7200_000][Math.min(job.attempts - 1, 3)];
+    // Persist a bounded, spread-out retry time. TypeSafe may send either
+    // Retry-After header; Go converts it to milliseconds before reporting.
+    // The provider hint cannot reduce the queue's existing attempt backoff.
+    const jitter = Math.floor(baseDelay * 0.2 * crypto.getRandomValues(new Uint32Array(1))[0] / 0x100000000);
+    const providerDelay = Math.min(typeof retryAfterMS === "number" ? retryAfterMS : 0, 600_000);
+    const delay = Math.min(7200_000, Math.max(baseDelay + jitter, providerDelay));
     const retry = status === "exhausted" ? null : new Date(Date.now() + delay).toISOString();
     const row = await env.DB.prepare(`UPDATE classification_jobs SET status=?,error=?,next_retry_at=?,
       lease_token=NULL,lease_until=NULL,updated_at=? WHERE link_id=? AND status='processing'

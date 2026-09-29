@@ -142,6 +142,49 @@ it("backs off classification failures without touching retrieval and allows expl
   expect((await request(`enrichment/classifications/${id}/complete`, completion(job))).status).toBe(409);
 });
 
+it.each([[480_000, 480_000], [86_400_000, 600_000]])(
+  "persists bounded provider retry hint %d ms without consuming another lease", async (hint, expected) => {
+    const { id } = await setup();
+    const job = await claim();
+    const started = Date.now();
+    expect((await request(`enrichment/classifications/${id}/fail`, {
+      ...job, error: "HTTP 529", retry_after_ms: hint
+    })).status).toBe(200);
+    const row = await env.DB.prepare("SELECT status,attempts,next_retry_at FROM classification_jobs WHERE link_id=?")
+      .bind(id).first<{ status: string; attempts: number; next_retry_at: string }>();
+    const delay = Date.parse(row!.next_retry_at) - started;
+    expect(row).toMatchObject({ status: "failed", attempts: 1 });
+    expect(delay).toBeGreaterThanOrEqual(expected);
+    expect(delay).toBeLessThan(expected + 5000);
+    expect((await request("enrichment/classifications/claim", settings)).status).toBe(204);
+  }
+);
+
+it("adds bounded jitter to a durable classification retry without a provider hint", async () => {
+  const { id } = await setup();
+  const job = await claim();
+  const started = Date.now();
+  expect((await request(`enrichment/classifications/${id}/fail`, { ...job, error: "temporary transport failure" })).status)
+    .toBe(200);
+  const nextRetryAt = await env.DB.prepare("SELECT next_retry_at FROM classification_jobs WHERE link_id=?")
+    .bind(id).first<string>("next_retry_at");
+  const delay = Date.parse(nextRetryAt!) - started;
+  expect(delay).toBeGreaterThanOrEqual(60_000);
+  expect(delay).toBeLessThan(75_000);
+});
+
+it("rejects invalid retry hints before changing a classification lease", async () => {
+  const { id } = await setup();
+  const job = await claim();
+  for (const hint of [-1, "60000", 1.5]) {
+    expect((await request(`enrichment/classifications/${id}/fail`, {
+      ...job, error: "HTTP 529", retry_after_ms: hint
+    })).status).toBe(400);
+  }
+  expect(await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first("status"))
+    .toBe("processing");
+});
+
 it("enforces lease expiry, taxonomy version and internal authentication", async () => {
   const { id, lease_token, source } = await setup();
   expect((await request("enrichment/classifications/claim", settings, "POST", "app")).status).toBe(401);
