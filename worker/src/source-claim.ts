@@ -52,16 +52,20 @@ export const SOURCE_CLAIM_CANDIDATE_SQL = `SELECT id
       WHERE day=?),0) < ?
     AND (SELECT COUNT(*) FROM enrichment_provider_attempts a
       WHERE a.link_id=links.id AND a.created_at>=? AND a.created_at<?) < ?
+    AND ((?=1 AND (${SOURCE_NEXT_COMPONENT_SQL})='source')
+      OR (?=1 AND (${SOURCE_NEXT_COMPONENT_SQL})='reading'))
     AND ${SOURCE_GATE_READY_SQL}
   ORDER BY manual_priority DESC, id ASC
   LIMIT 1`;
 
-export function sourceClaimCandidateBindings(now: Date, gateAware = true): Array<string | number> {
+export function sourceClaimCandidateBindings(
+  now: Date, gateAware = true, allowSource = true, allowReading = true
+): Array<string | number> {
   const nowIso = now.toISOString();
   const budgetStart = nowIso.slice(0, 10) + "T00:00:00.000Z";
   const budgetEnd = new Date(Date.parse(budgetStart) + 86400000).toISOString();
   return [MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso, nowIso, nowIso,
     budgetStart.slice(0, 10), PROVIDER_ATTEMPT_LIMITS.daily_total,
     budgetStart, budgetEnd, PROVIDER_ATTEMPT_LIMITS.daily_item,
-    gateAware ? 1 : 0, nowIso, nowIso];
+    allowSource ? 1 : 0, allowReading ? 1 : 0, gateAware ? 1 : 0, nowIso, nowIso];
 }

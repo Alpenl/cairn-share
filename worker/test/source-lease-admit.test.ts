@@ -46,7 +46,7 @@ it("requires the internal token for source lease capability negotiation", async 
   expect(await valid.json()).toEqual({ protocol: 1, lease_ms: 900_000,
     paid_stage_admission: true, provider_result_guard: true, completion_replay: true,
     provider_attempt_ledger: true, refresh_source_checkpoint: true,
-    source_component_gate: true });
+    source_component_gate: true, source_stage_pause: true });
 });
 
 it("checks exact source claimability without taking a lease", async () => {
@@ -231,6 +231,45 @@ it("keeps a source fault from consuming a stored-source reading claim", async ()
   expect((await post("enrichment/jobs/claim")).status).toBe(503);
 });
 
+it("filters a locally paused stage before taking a lease", async () => {
+  const source = await post("links", { url: "https://x.com/u/status/101" }, "app");
+  const sourceID = (await source.json() as { id: number }).id;
+  const reading = await post("links", { url: "https://x.com/u/status/102" }, "app");
+  const readingID = (await reading.json() as { id: number }).id;
+  await env.DB.prepare("UPDATE links SET original_text='stored text' WHERE id=?")
+    .bind(readingID).run();
+  const claimMask = (mask: string) => worker.fetch(new Request("https://test/api/enrichment/jobs/claim", {
+    method: "POST", headers: { Authorization: "Bearer internal",
+      "X-Cairn-Provider-Attempt-Ledger": "1", "X-Cairn-Source-Lease-Admission": "1",
+      "X-Cairn-Source-Component-Gate": "1", "X-Cairn-Source-Stage-Pause": "1",
+      "X-Cairn-Source-Stage-Mask": mask }
+  }), bindings());
+  expect((await claimMask("invalid")).status).toBe(400);
+  const first = await claimMask("reading");
+  expect(first.status).toBe(200);
+  expect(await first.json()).toMatchObject({ id: readingID, source_component: "reading" });
+  expect(await env.DB.prepare("SELECT enrichment_attempts FROM links WHERE id=?")
+    .bind(sourceID).first("enrichment_attempts")).toBe(0);
+  const second = await claimMask("source");
+  expect(second.status).toBe(200);
+  expect(await second.json()).toMatchObject({ id: sourceID, source_component: "source" });
+});
+
+it("preserves the strict legacy claim response until stage pause is requested", async () => {
+  const created = await post("links", { url: "https://x.com/u/status/legacy-shape" }, "app");
+  const id = (await created.json() as { id: number }).id;
+  const oldClient = await post("enrichment/jobs/claim");
+  expect(oldClient.status).toBe(200);
+  const body = await oldClient.json() as Record<string, unknown>;
+  expect(body.id).toBe(id);
+  expect(body).not.toHaveProperty("source_component");
+  const second = await post("links", { url: "https://x.com/u/status/legacy-by-id" }, "app");
+  const secondID = (await second.json() as { id: number }).id;
+  const byID = await post(`enrichment/jobs/${secondID}/claim`);
+  expect(byID.status).toBe(200);
+  expect(await byID.json()).not.toHaveProperty("source_component");
+});
+
 it("claims one due source probe and closes it only after a settled source checkpoint", async () => {
   const first = await post("links", { url: "https://x.com/u/status/93" }, "app");
   const firstID = (await first.json() as { id: number }).id;
@@ -354,6 +393,90 @@ it("opens only the failing source gate with the leased failure and retries one p
   expect(await env.DB.prepare(`SELECT state,failures,reason FROM enrichment_component_gates
     WHERE component='source'`).first()).toEqual({ state: "open", failures: 2,
       reason: "probe_failed" });
+});
+
+it("does not open a provider gate when admission failed before reservation", async () => {
+  const { id, job } = await claimed();
+  expect((await admit(id, job.lease_token)).status).toBe(200);
+  const failed = await post(`enrichment/jobs/${id}/fail`, {
+    lease_token: job.lease_token, error: "worker reservation unavailable",
+    component_fault: "source_transient", retry_after_ms: 120_000
+  });
+  expect(failed.status).toBe(409);
+  expect(await failed.json()).toEqual({ error: "provider_attempt_missing" });
+  expect(await env.DB.prepare(`SELECT enrichment_status,enrichment_attempts,enrichment_lease_token
+    FROM links WHERE id=?`).bind(id).first()).toEqual({ enrichment_status: "pending",
+    enrichment_attempts: 0, enrichment_lease_token: null });
+  expect(await env.DB.prepare(`SELECT state,failures FROM enrichment_component_gates
+    WHERE component='source'`).first()).toEqual({ state: "closed", failures: 0 });
+});
+
+it("returns an unused local-stage lease without charging an attempt", async () => {
+  const { id, job } = await claimed();
+  expect((await admit(id, job.lease_token)).status).toBe(200);
+  const deferred = await post(`enrichment/jobs/${id}/local-defer`, {
+    lease_token: job.lease_token, stage: "fetch"
+  });
+  expect(deferred.status).toBe(200);
+  expect(await deferred.json()).toEqual({ id, status: "deferred" });
+  expect(await env.DB.prepare(`SELECT enrichment_status,enrichment_attempts,
+    enrichment_lease_token FROM links WHERE id=?`).bind(id).first()).toEqual({
+    enrichment_status: "pending", enrichment_attempts: 0, enrichment_lease_token: null
+  });
+  expect((await post("enrichment/jobs/claim")).status).toBe(200);
+});
+
+it("keeps a paid source attempt while deferring reading and fences reserved reading", async () => {
+  const { id, job } = await claimed();
+  expect((await admit(id, job.lease_token)).status).toBe(200);
+  expect((await reserve(id, job.lease_token, job.content_revision)).status).toBe(200);
+  expect((await settle()).status).toBe(200);
+  const source = { original_text: "fetched text", original_language: "en", context_text: "",
+    related_links: [], image_urls: [], model: "fixture" };
+  expect((await post(`enrichment/jobs/${id}/source`, {
+    lease_token: job.lease_token, source
+  })).status).toBe(200);
+  const deferred = await post(`enrichment/jobs/${id}/local-defer`, {
+    lease_token: job.lease_token, stage: "reading"
+  });
+  expect(deferred.status).toBe(200);
+  expect(await env.DB.prepare(`SELECT enrichment_status,enrichment_attempts,original_text
+    FROM links WHERE id=?`).bind(id).first()).toEqual({ enrichment_status: "pending",
+    enrichment_attempts: 1, original_text: "fetched text" });
+  const next = await post("enrichment/jobs/claim");
+  expect(next.status).toBe(200);
+  const reading = await next.json() as { lease_token: string; content_revision: number };
+  expect((await admit(id, reading.lease_token, 210_000, "reading")).status).toBe(200);
+  expect((await reserve(id, reading.lease_token, reading.content_revision, "reading")).status).toBe(200);
+  const blocked = await post(`enrichment/jobs/${id}/local-defer`, {
+    lease_token: reading.lease_token, stage: "reading"
+  });
+  expect(blocked.status).toBe(409);
+  expect(await blocked.json()).toEqual({ error: "provider_result_unknown" });
+});
+
+it("releases a half-open probe when reservation fails before the provider call", async () => {
+  const { id } = await claimed();
+  await env.DB.prepare(`UPDATE links SET enrichment_status='pending',enrichment_lease_token=NULL,
+    enrichment_lease_until=NULL,enrichment_attempts=0 WHERE id=?`).bind(id).run();
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',failures=1,
+    reason='provider_transient',retry_at='2000-01-01' WHERE component='source'`).run();
+  const probe = await post("enrichment/jobs/claim");
+  expect(probe.status).toBe(200);
+  const job = await probe.json() as { id: number; lease_token: string };
+  expect(job.id).toBe(id);
+  expect((await admit(id, job.lease_token)).status).toBe(200);
+  const failed = await post(`enrichment/jobs/${id}/fail`, {
+    lease_token: job.lease_token, error: "reservation response missing",
+    component_fault: "source_transient"
+  });
+  expect(failed.status).toBe(409);
+  expect(await failed.json()).toEqual({ error: "provider_attempt_missing" });
+  expect(await env.DB.prepare(`SELECT state,failures,reason,probe_token FROM enrichment_component_gates
+    WHERE component='source'`).first()).toEqual({ state: "open", failures: 1,
+    reason: "provider_transient", probe_token: null });
+  expect(await env.DB.prepare("SELECT enrichment_attempts FROM links WHERE id=?")
+    .bind(id).first("enrichment_attempts")).toBe(0);
 });
 
 it("closes a reading probe only after its paid completion commits", async () => {

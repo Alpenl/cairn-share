@@ -130,6 +130,7 @@ type ErrorCode =
   | "lease_conflict"
   | "lease_released"
   | "component_paused"
+  | "provider_attempt_missing"
   | "provider_result_unknown"
   | "job_busy"
   | "not_found"
@@ -490,7 +491,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     return routeMethod(request, ["GET"], () => json({ protocol: 1,
       lease_ms: ENRICHMENT_LEASE_MILLISECONDS, paid_stage_admission: true,
       provider_result_guard: true, completion_replay: true, provider_attempt_ledger: true,
-      refresh_source_checkpoint: true, source_component_gate: true }));
+      refresh_source_checkpoint: true, source_component_gate: true,
+      source_stage_pause: true }));
   }
 
   if (path === "/api/enrichment/source-claimable") {
@@ -533,7 +535,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     return routeMethod(request, ["GET"], () => getEnrichmentImage(request, env, key));
   }
 
-  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(claim|complete|fail|images|lease-admit|budget-defer)$/);
+  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(claim|complete|fail|images|lease-admit|budget-defer|local-defer)$/);
   if (enrichmentJobMatch !== null) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
@@ -550,6 +552,9 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
       }
       if (enrichmentJobMatch[2] === "budget-defer") {
         return deferSourceBudget(request, env, id, timing);
+      }
+      if (enrichmentJobMatch[2] === "local-defer") {
+        return deferLocalSourceStage(request, env, id, timing);
       }
       return enrichmentJobMatch[2] === "complete"
         ? observeEnrichmentCommit(timing, "complete", (onResolved) =>
@@ -1228,6 +1233,12 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
   const leaseToken = crypto.randomUUID();
   const leaseUntil = new Date(now.getTime() + ENRICHMENT_LEASE_MILLISECONDS).toISOString();
   const gateAware = request.headers.get("X-Cairn-Source-Component-Gate") === "1";
+  const stagePauseAware = gateAware && request.headers.get("X-Cairn-Source-Stage-Pause") === "1";
+  const stageMask = request.headers.get("X-Cairn-Source-Stage-Mask") ?? "both";
+  if ((!stagePauseAware && stageMask !== "both") ||
+      (stageMask !== "both" && stageMask !== "source" && stageMask !== "reading")) {
+    return error("invalid_enrichment", 400);
+  }
   const guarded = request.headers.get("X-Cairn-Source-Lease-Admission") === "1";
   const results = await timing.measure("db", () =>
     env.DB.batch([env.DB.prepare(
@@ -1250,7 +1261,8 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
                   ${SOURCE_NEXT_COMPONENT_SQL} AS source_component`
     )
       .bind(guarded ? 0 : 1, guarded ? 0 : 1, guarded ? null : "legacy_unknown", leaseToken, leaseUntil, nowIso,
-        ...sourceClaimCandidateBindings(now, gateAware)), sourceGateProbe(env, leaseToken, now)])
+        ...sourceClaimCandidateBindings(now, gateAware,
+          stageMask !== "reading", stageMask !== "source")), sourceGateProbe(env, leaseToken, now)])
   );
   const row = results[0].results[0] as EnrichmentJobRow | undefined;
 
@@ -1262,7 +1274,7 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
     timing.addBusinessEvent({ kind: "component_gate", component: row.source_component, action: "probe_started" });
   }
   timing.addBusinessEvent({ kind: "source_claim", origin: "scheduled", outcome: "claimed", status: 200 });
-  return json(mapEnrichmentJob(row));
+  return json(mapEnrichmentJob(row, stagePauseAware));
 }
 
 async function claimEnrichmentJobById(
@@ -1328,7 +1340,7 @@ async function claimEnrichmentJobById(
       timing.addBusinessEvent({ kind: "component_gate", component: row.source_component, action: "probe_started" });
     }
     timing.addBusinessEvent({ kind: "source_claim", origin: "by_id", outcome: "claimed", status: 200 });
-    return json(mapEnrichmentJob(row));
+    return json(mapEnrichmentJob(row, request.headers.get("X-Cairn-Source-Stage-Pause") === "1"));
   }
 
   const existing = await timing.measure("db-check", () =>
@@ -1460,6 +1472,50 @@ async function deferSourceBudget(request: Request, env: Env, id: number, timing:
         AND a.lease_hash=? AND a.stage=?) RETURNING id`)
     .bind(nextWindow, now.toISOString(), id, token, stage, leaseHash, stage).first<{id:number}>());
   return updated ? json({ id, status: "deferred", retry_at: nextWindow }) : error("provider_result_unknown", 409);
+}
+
+// A per-process provider configuration pause cannot claim more of that stage.
+// Return an unused lease to the shared queue so a healthy instance may take
+// it. A prior paid stage keeps the job attempt; this stage must have no ledger
+// reservation, including a reservation whose HTTP response was lost.
+async function deferLocalSourceStage(request: Request, env: Env, id: number,
+  timing: TimingCollector): Promise<Response> {
+  if (request.headers.get("X-Cairn-Provider-Attempt-Ledger") !== "1") {
+    return error("capability_mismatch", 409);
+  }
+  const body = await readEnrichmentBody(request);
+  if (body instanceof Response) return body;
+  const token = readBoundedString(body.lease_token, 1, 100);
+  const stage = body.stage;
+  if (token === null || (stage !== "fetch" && stage !== "reading")) return error("invalid_enrichment");
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const leaseHash = [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const now = new Date().toISOString();
+  const component = stage === "fetch" ? "source" : "reading";
+  const results = await timing.measure("db", () => env.DB.batch([
+    env.DB.prepare(`UPDATE links SET enrichment_status='pending',
+      enrichment_attempts=CASE WHEN enrichment_paid_stage_started=0
+        THEN MAX(0,enrichment_attempts-1) ELSE enrichment_attempts END,
+      enrichment_paid_stage_started=0,enrichment_paid_stage=NULL,
+      enrichment_lease_token=NULL,enrichment_lease_until=NULL,
+      enrichment_next_retry_at=NULL,enrichment_error=NULL,enrichment_updated_at=?
+      WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+        AND enrichment_paid_uncertain=0
+        AND (enrichment_paid_stage IS NULL OR enrichment_paid_stage=?)
+        AND NOT EXISTS(SELECT 1 FROM enrichment_provider_attempts a
+          WHERE a.link_id=links.id AND a.lease_hash=? AND a.stage=?) RETURNING id`)
+      .bind(now, id, token, stage, leaseHash, stage),
+    env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',epoch=epoch+1,
+      retry_at=?,probe_token=NULL,probe_until=NULL,updated_at=?
+      WHERE component=? AND state='probing' AND probe_token=?
+        AND EXISTS(SELECT 1 FROM links l WHERE l.id=? AND l.enrichment_status='pending'
+          AND l.enrichment_lease_token IS NULL)
+        AND NOT EXISTS(SELECT 1 FROM enrichment_provider_attempts a
+          WHERE a.link_id=? AND a.lease_hash=? AND a.stage=?)`)
+      .bind(now, now, component, token, id, id, leaseHash, stage)
+  ]));
+  return results[0].results.length ? json({ id, status: "deferred" })
+    : error("provider_result_unknown", 409);
 }
 
 async function completeEnrichmentJob(
@@ -1643,6 +1699,48 @@ async function failEnrichmentJob(
   );
   if (current === null) return error("lease_conflict", 409);
 
+  // A transient observed before the provider reservation is evidence about
+  // our own admission path, not about the provider. Release the unused lease
+  // and stop this caller's round instead of opening a shared provider gate or
+  // charging another bookmark's attempt on the next claim.
+  const stage = componentFault === "source_transient" ? "fetch"
+    : componentFault === "reading_transient" ? "reading" : null;
+  const leaseBytes = stage ? await crypto.subtle.digest("SHA-256", new TextEncoder().encode(leaseToken)) : null;
+  const leaseHash = leaseBytes
+    ? [...new Uint8Array(leaseBytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("") : null;
+  if (stage) {
+    const reserved = await timing.measure("db-check", () => env.DB.prepare(`SELECT 1
+      FROM enrichment_provider_attempts WHERE link_id=? AND lease_hash=? AND stage=? LIMIT 1`)
+      .bind(id, leaseHash, stage).first());
+    if (!reserved) {
+      const now = new Date().toISOString();
+      const results = await timing.measure("db", () => env.DB.batch([
+        env.DB.prepare(`UPDATE links SET enrichment_status='pending',
+          enrichment_attempts=CASE WHEN enrichment_paid_stage_started=0
+            THEN MAX(0,enrichment_attempts-1) ELSE enrichment_attempts END,
+          enrichment_paid_stage_started=0,enrichment_paid_stage=NULL,
+          enrichment_lease_token=NULL,enrichment_lease_until=NULL,
+          enrichment_next_retry_at=NULL,enrichment_error=NULL,enrichment_updated_at=?
+          WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+            AND enrichment_paid_uncertain=0
+            AND NOT EXISTS(SELECT 1 FROM enrichment_provider_attempts a
+              WHERE a.link_id=links.id AND a.lease_hash=? AND a.stage=?) RETURNING id`)
+          .bind(now, id, leaseToken, leaseHash, stage),
+        env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',epoch=epoch+1,
+          retry_at=?,probe_token=NULL,probe_until=NULL,updated_at=?
+          WHERE component=? AND state='probing' AND probe_token=?
+            AND EXISTS(SELECT 1 FROM links l WHERE l.id=? AND l.enrichment_status='pending'
+              AND l.enrichment_lease_token IS NULL)
+            AND NOT EXISTS(SELECT 1 FROM enrichment_provider_attempts a
+              WHERE a.link_id=? AND a.lease_hash=? AND a.stage=?)`)
+          .bind(now, now, stage === "fetch" ? "source" : "reading", leaseToken,
+            id, id, leaseHash, stage)
+      ]));
+      return results[0].results.length ? error("provider_attempt_missing", 409)
+        : error("provider_result_unknown", 409);
+    }
+  }
+
   const now = new Date();
   const exhausted = current.enrichment_attempts >= MAX_ENRICHMENT_ATTEMPTS;
   const delayIndex = Math.max(0, Math.min(current.enrichment_attempts - 1, ENRICHMENT_RETRY_DELAYS_MILLISECONDS.length - 1));
@@ -1678,8 +1776,8 @@ async function failEnrichmentJob(
     const backoff = Math.min(600_000, 30_000 * 2 ** Math.min(gate?.failures ?? 0, 5));
     const hint = Math.min(Number(retryAfterMS ?? 0), 600_000);
     const retryAt = new Date(now.getTime() + Math.max(backoff, hint)).toISOString();
-    const leaseBytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(leaseToken));
-    const leaseHash = [...new Uint8Array(leaseBytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const faultHash = leaseHash ?? [...new Uint8Array(await crypto.subtle.digest("SHA-256",
+      new TextEncoder().encode(leaseToken)))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
     const gateOpen = env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',
       epoch=epoch+1,failures=MIN(failures+1,6),retry_at=?,probe_token=NULL,probe_until=NULL,
       reason=?,updated_at=? WHERE component=? AND epoch=?
@@ -1692,7 +1790,7 @@ async function failEnrichmentJob(
       .bind(retryAt, componentFault ? "provider_transient" : "probe_failed", now.toISOString(),
         component, gate?.epoch ?? -1, leaseToken, id, leaseToken, now.toISOString(),
         ownedProbe?.component === component ? 1 : 0, component === "source" ? "fetch" : "reading",
-        ownedProbe?.component === component ? 1 : 0, id, leaseHash,
+        ownedProbe?.component === component ? 1 : 0, id, faultHash,
         component === "source" ? "fetch" : "reading");
     const results = await timing.measure("db", () => env.DB.batch([gateOpen, jobFailure]));
     if (Number(results[0].meta.changes) === 1) {
@@ -2319,7 +2417,7 @@ function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean, withIdent
   };
 }
 
-function mapEnrichmentJob(row: EnrichmentJobRow): Record<string, unknown> {
+function mapEnrichmentJob(row: EnrichmentJobRow, includeComponent = false): Record<string, unknown> {
   return {
     id: row.id,
     url: row.url,
@@ -2331,7 +2429,8 @@ function mapEnrichmentJob(row: EnrichmentJobRow): Record<string, unknown> {
     content_revision: row.content_revision,
     // A non-zero epoch is an explicit, one-shot refresh intent the processor
     // must consume instead of reusing a stored source (R2-06).
-    refresh_epoch: row.refresh_epoch ?? 0
+    refresh_epoch: row.refresh_epoch ?? 0,
+    ...(includeComponent ? { source_component: row.source_component } : {})
   };
 }
 
