@@ -32,13 +32,17 @@ const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body)
 const fail = (error: string, status = 400) => reply({error}, status);
 const hex = (value: unknown) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const positive = (value: unknown) => Number.isSafeInteger(value) && Number(value) > 0;
-const leaseGuard = `EXISTS (SELECT 1 FROM classification_jobs j JOIN links l ON l.id=j.link_id
+const leaseIdentityGuard = `EXISTS (SELECT 1 FROM classification_jobs j JOIN links l ON l.id=j.link_id
   JOIN classification_target_state t ON t.id=1 JOIN evidence_snapshots e ON e.id=j.evidence_snapshot_id
   WHERE j.link_id=? AND j.status='processing' AND j.lease_token=? AND j.lease_until>?
   AND j.revision=? AND j.input_revision=? AND j.target_generation=? AND j.target_generation=t.generation
   AND j.spec_id=? AND j.content_revision=? AND j.content_revision=l.content_revision
   AND j.evidence_snapshot_id=? AND j.evidence_hash=? AND j.requested_model=?
   AND e.link_id=j.link_id AND e.content_revision=j.content_revision AND e.content_hash=j.evidence_hash)`;
+const leaseGuard = `(${leaseIdentityGuard} AND EXISTS(SELECT 1 FROM enrichment_component_gates g
+  JOIN classification_jobs j ON j.link_id=? WHERE g.component='classification'
+    AND (g.state='closed' OR (g.state='probing' AND g.epoch=j.component_epoch
+      AND g.probe_token=j.lease_token AND g.probe_until>?))))`;
 
 // A lost response never re-grants and never refunds the committed reservation.
 export async function classificationBudgetRoute(request: Request, env: Env, path: string): Promise<Response | null> {
@@ -67,7 +71,8 @@ export async function classificationBudgetRoute(request: Request, env: Env, path
   const old=await env.DB.prepare("SELECT units FROM budget_ledger WHERE operation_key=?").bind(operationKey).first<{units:string}>();
   if(old)return JSON.parse(old.units).payload_hash===payloadHash ? reply({granted:false,reason:"already_reserved"}) : fail("operation_conflict",409);
   const {now,start,end}=classificationWindow();
-  const bindings=[body.link_id,body.lease_token,now,body.revision,body.input_revision,body.target_generation,body.spec_id,body.content_revision,body.evidence_snapshot_id,body.evidence_hash,body.model];
+  const identityBindings=[body.link_id,body.lease_token,now,body.revision,body.input_revision,body.target_generation,body.spec_id,body.content_revision,body.evidence_snapshot_id,body.evidence_hash,body.model];
+  const bindings=[...identityBindings,body.link_id,now];
   // Global rows contain no bookmark id, lease, request text or source material.
   const units=canonicalJSON({calls:1,tokens:65536,payload_hash:payloadHash});
   const global=env.DB.prepare(`INSERT INTO budget_ledger(scope,link_id,units,operation_key,created_at)
@@ -86,6 +91,10 @@ export async function classificationBudgetRoute(request: Request, env: Env, path
   if(stored && JSON.parse(stored.units).payload_hash!==payloadHash)return fail("operation_conflict",409);
   if(Number(result[0].meta.changes)===1)return reply({granted:true,reason:"reserved"});
   if(stored)return reply({granted:false,reason:"already_reserved"});
-  if(!await env.DB.prepare(`SELECT ${leaseGuard} ok`).bind(...bindings).first<number>("ok"))return fail("lease_expired",409);
+  if(!await env.DB.prepare(`SELECT ${leaseGuard} ok`).bind(...bindings).first<number>("ok")) {
+    if(await env.DB.prepare(`SELECT ${leaseIdentityGuard} ok`).bind(...identityBindings).first<number>("ok"))
+      return fail("component_paused",503);
+    return fail("lease_expired",409);
+  }
   return reply({granted:false,reason:"budget_exhausted"});
 }

@@ -1,22 +1,23 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { taxonomy } from "../src/curation";
 import { settleFixtureAttempt } from "./provider-attempt-fixture";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 
-async function request(path: string, body?: unknown, method = "POST", token = "internal"): Promise<Response> {
+async function request(path: string, body?: unknown, method = "POST", token = "internal", gateAware = true): Promise<Response> {
   return worker.fetch(new Request(`https://test.example/api/${path}`, {
     method, headers: { "X-Cairn-Classification-Budget": "1", Authorization: `Bearer ${token}`,
       "Content-Type": "application/json", "X-Cairn-Provider-Attempt-Ledger": "1",
+      ...(gateAware && path === "enrichment/classifications/claim" ? { "X-Cairn-Classification-Gate": "1" } : {}),
       ...(path.endsWith("/claim") && path.startsWith("enrichment/jobs/") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 }
 
-async function setup() {
-  const create = await request("links", { url: "https://x.com/a/status/123", note: "test" }, "POST", "app");
+async function setup(url = "https://x.com/a/status/123") {
+  const create = await request("links", { url, note: "test" }, "POST", "app");
   const { id } = await create.json() as { id: number };
   const leased = await request(`enrichment/jobs/${id}/claim`);
   const { lease_token } = await leased.json() as { lease_token: string };
@@ -101,6 +102,28 @@ it("persists source before reading succeeds and classifies independently", async
   expect((await request("enrichment/classifications/claim", settings)).status).toBe(204);
 });
 
+it("adds the shared gate without changing historical classification leases", async () => {
+  await reset();
+  const boundary = env.TEST_MIGRATIONS.findIndex((migration) => migration.name.startsWith("0046_"));
+  expect(boundary).toBeGreaterThan(0);
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.slice(0, boundary));
+  await env.DB.prepare(`INSERT INTO links(id,url,note,created_at,original_text)
+    VALUES (77,'https://x.com/a/status/77','','2026-09-28','historical source')`).run();
+  await env.DB.prepare("INSERT OR IGNORE INTO classification_jobs(link_id) VALUES (77)").run();
+  await env.DB.prepare(`UPDATE classification_jobs SET status='processing',attempts=2,
+    lease_token='historical-lease',lease_until='2026-10-01T00:00:00.000Z' WHERE link_id=77`).run();
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.slice(boundary));
+  expect(await env.DB.prepare(`SELECT status,attempts,lease_token,component_epoch FROM classification_jobs
+    WHERE link_id=77`).first()).toEqual({ status: "processing", attempts: 2,
+    lease_token: "historical-lease", component_epoch: 0 });
+  expect(await env.DB.prepare(`SELECT component,state,epoch FROM enrichment_component_gates ORDER BY component`).all())
+    .toMatchObject({ results: [
+      { component: "classification", state: "closed", epoch: 0 },
+      { component: "reading", state: "closed", epoch: 0 },
+      { component: "source", state: "closed", epoch: 0 }
+    ] });
+});
+
 it("keeps human curation and stored reading aids when Jev is rerun", async () => {
   const { id, lease_token, source } = await setup();
   expect((await request(`enrichment/jobs/${id}/complete`, { lease_token, original_text: source.original_text,
@@ -181,8 +204,162 @@ it("rejects invalid retry hints before changing a classification lease", async (
       ...job, error: "HTTP 529", retry_after_ms: hint
     })).status).toBe(400);
   }
+  expect((await request(`enrichment/classifications/${id}/fail`, {
+    ...job, error: "HTTP 529", component_fault: "untrusted_reason"
+  })).status).toBe(400);
   expect(await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first("status"))
     .toBe("processing");
+});
+
+it("shares provider cooldown across jobs and grants only one half-open probe", async () => {
+  const first = await setup("https://x.com/a/status/501");
+  const second = await setup("https://x.com/a/status/502");
+  const third = await setup("https://x.com/a/status/503");
+  const failed = await claim();
+  expect(failed.id).toBe(first.id);
+  expect((await request(`enrichment/classifications/${failed.id}/fail`, {
+    ...failed, error: "HTTP 529", retry_after_ms: 480_000, component_fault: "provider_transient"
+  })).status).toBe(200);
+  const gate = await env.DB.prepare(`SELECT state,epoch,failures,retry_at,probe_token FROM enrichment_component_gates
+    WHERE component='classification'`).first<{ state: string; epoch: number; failures: number; retry_at: string; probe_token: string | null }>();
+  expect(gate).toMatchObject({ state: "open", epoch: 1, failures: 1, probe_token: null });
+  expect(Date.parse(gate!.retry_at) - Date.now()).toBeGreaterThan(470_000);
+  const paused = await request("enrichment/classifications/claim", settings);
+  expect(paused.status).toBe(503);
+  expect(await paused.json()).toMatchObject({ error: "component_paused" });
+  const sourceCreate = await request("links", { url: "https://x.com/a/status/504" }, "POST", "app");
+  const sourceID = (await sourceCreate.json() as { id: number }).id;
+  expect((await request(`enrichment/jobs/${sourceID}/claim`)).status).toBe(200);
+  for (const id of [second.id, third.id]) {
+    expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+  }
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET retry_at='2000-01-01T00:00:00.000Z'
+    WHERE component='classification'`).run();
+  const outcomes = await Promise.all([request("enrichment/classifications/claim", settings),
+    request("enrichment/classifications/claim", settings)]);
+  expect(outcomes.map((response) => response.status).sort()).toEqual([200, 503]);
+  const probe = await outcomes.find((response) => response.status === 200)!.json() as
+    { id: number; lease_token: string; revision: number; component_probe: boolean };
+  expect(probe.component_probe).toBe(true);
+  expect([second.id, third.id]).toContain(probe.id);
+  expect(await env.DB.prepare(`SELECT probe_token FROM enrichment_component_gates
+    WHERE component='classification'`).first("probe_token")).toBe(probe.lease_token);
+  expect((await request(`enrichment/classifications/${probe.id}/complete`, completion(probe))).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state FROM enrichment_component_gates
+    WHERE component='classification'`).first("state")).toBe("closed");
+  const remaining = await claim();
+  expect(remaining.id).not.toBe(probe.id);
+  expect([second.id, third.id]).toContain(remaining.id);
+});
+
+it("lets an old Go client recover one probe without new response fields", async () => {
+  await setup("https://x.com/a/status/541");
+  await setup("https://x.com/a/status/542");
+  const pending = await setup("https://x.com/a/status/543");
+  const stillPending = await setup("https://x.com/a/status/544");
+  const oldResponse = await request("enrichment/classifications/claim", settings, "POST", "internal", false);
+  expect(oldResponse.status).toBe(200);
+  const oldJob = await oldResponse.json() as Record<string, unknown>;
+  expect(oldJob).not.toHaveProperty("component_epoch");
+  expect(oldJob).not.toHaveProperty("component_probe");
+  const failed = await claim();
+  expect((await request(`enrichment/classifications/${failed.id}/fail`, {
+    ...failed, error: "HTTP 529", component_fault: "provider_transient"
+  })).status).toBe(200);
+  await env.DB.prepare("UPDATE enrichment_component_gates SET retry_at='2000-01-01' WHERE component='classification'").run();
+  const oldProbe = await request("enrichment/classifications/claim", settings, "POST", "internal", false);
+  expect(oldProbe.status).toBe(200);
+  const oldProbeJob = await oldProbe.json() as { id: number; lease_token: string; revision: number };
+  expect(oldProbeJob.id).toBe(pending.id);
+  expect(oldProbeJob).not.toHaveProperty("component_epoch");
+  expect(oldProbeJob).not.toHaveProperty("component_probe");
+  expect((await request("enrichment/classifications/claim", settings)).status).toBe(503);
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?")
+    .bind(stillPending.id).first("attempts")).toBe(0);
+  expect((await request(`enrichment/classifications/${oldProbeJob.id}/fail`, {
+    ...oldProbeJob, error: "old client saw HTTP 529"
+  })).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state,epoch,failures,reason FROM enrichment_component_gates
+    WHERE component='classification'`).first()).toMatchObject({
+    state: "open", epoch: 2, failures: 2, reason: "probe_failed"
+  });
+  await env.DB.prepare("UPDATE enrichment_component_gates SET retry_at='2000-01-01' WHERE component='classification'").run();
+  const recovered = await request("enrichment/classifications/claim", settings, "POST", "internal", false);
+  expect(recovered.status).toBe(200);
+  const recoveredJob = await recovered.json() as { id: number; lease_token: string; revision: number };
+  expect(recoveredJob.id).toBe(stillPending.id);
+  expect((await request(`enrichment/classifications/${recoveredJob.id}/complete`, completion(recoveredJob))).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state FROM enrichment_component_gates
+    WHERE component='classification'`).first("state")).toBe("closed");
+});
+
+it("keeps a provider fault after an older in-flight job succeeds", async () => {
+  await setup("https://x.com/a/status/511");
+  await setup("https://x.com/a/status/512");
+  const first = await claim();
+  const oldInFlight = await claim();
+  expect((await request(`enrichment/classifications/${first.id}/fail`, {
+    ...first, error: "HTTP 529", component_fault: "provider_transient"
+  })).status).toBe(200);
+  expect((await request(`enrichment/classifications/${oldInFlight.id}/complete`, completion(oldInFlight))).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state FROM enrichment_component_gates
+    WHERE component='classification'`).first("state")).toBe("open");
+});
+
+it("leaves an empty half-open queue faulted and recovers an abandoned probe", async () => {
+  await setup("https://x.com/a/status/521");
+  const first = await claim();
+  expect((await request(`enrichment/classifications/${first.id}/fail`, {
+    ...first, error: "HTTP 529", component_fault: "provider_transient"
+  })).status).toBe(200);
+  await env.DB.prepare("UPDATE enrichment_component_gates SET retry_at='2000-01-01' WHERE component='classification'").run();
+  expect((await request("enrichment/classifications/claim", settings)).status).toBe(204);
+  expect(await env.DB.prepare(`SELECT state FROM enrichment_component_gates
+    WHERE component='classification'`).first("state")).toBe("open");
+  await setup("https://x.com/a/status/522");
+  await setup("https://x.com/a/status/523");
+  const abandoned = await claim();
+  await env.DB.prepare("UPDATE enrichment_component_gates SET probe_until='2000-01-01' WHERE component='classification'").run();
+  const replacement = await claim();
+  expect(replacement.id).not.toBe(abandoned.id);
+  expect((await request(`enrichment/classifications/${abandoned.id}/complete`, completion(abandoned))).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state,probe_token FROM enrichment_component_gates
+    WHERE component='classification'`).first()).toMatchObject({ state: "probing", probe_token: replacement.lease_token });
+  expect((await request(`enrichment/classifications/${replacement.id}/fail`, {
+    ...replacement, error: "HTTP 529", component_fault: "provider_transient"
+  })).status).toBe(200);
+  const extended = await env.DB.prepare(`SELECT state,epoch,failures,retry_at FROM enrichment_component_gates
+    WHERE component='classification'`).first<{ state: string; epoch: number; failures: number; retry_at: string }>();
+  expect(extended).toMatchObject({ state: "open", epoch: 2, failures: 2 });
+  expect(Date.parse(extended!.retry_at) - Date.now()).toBeGreaterThan(55_000);
+});
+
+it("exports only fixed gate transitions through the existing log switch", async () => {
+  await setup("https://x.com/a/status/531");
+  await setup("https://x.com/a/status/532");
+  expect((await request("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const first = await claim();
+    expect((await request(`enrichment/classifications/${first.id}/fail`, {
+      ...first, error: "private-provider-body", component_fault: "provider_transient"
+    })).status).toBe(200);
+    await env.DB.prepare("UPDATE enrichment_component_gates SET retry_at='2000-01-01' WHERE component='classification'").run();
+    const probe = await claim();
+    expect((await request(`enrichment/classifications/${probe.id}/complete`, completion(probe))).status).toBe(200);
+    const events = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>)
+      .filter((entry) => entry.kind === "component_gate");
+    expect(events.map((entry) => entry.action)).toEqual(["opened", "probe_started", "closed"]);
+    expect(events.every((entry) => entry.component === "classification" && entry.config_version === 1)).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("private-provider-body");
+    expect(JSON.stringify(events)).not.toContain(first.lease_token);
+    expect((await request("internal/observability", { version: 2, logs: "off" })).status).toBe(200);
+    const count = log.mock.calls.length;
+    expect((await request("enrichment/classifications/claim", settings)).status).toBe(204);
+    expect(log.mock.calls.length).toBe(count);
+  } finally {
+    log.mockRestore();
+  }
 });
 
 it("enforces lease expiry, taxonomy version and internal authentication", async () => {

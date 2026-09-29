@@ -418,7 +418,9 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
       return observeEnrichmentCommit(timing, "source", (onResolved) =>
         sourceRoute(request, env, Number(sourceMatch[1]), () => onResolved("stored")));
     }
-    return classificationRoute(request, env, path);
+    return classificationRoute(request, env, path, (event) => timing.addBusinessEvent({
+      kind: "component_gate", component: "classification", action: event.action
+    }));
   }
 
   // App-facing curation is an exact allowlist, never an alias for arbitrary

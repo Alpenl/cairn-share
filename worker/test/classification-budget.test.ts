@@ -46,6 +46,18 @@ it("binds every lease, target and evidence field before any budget charge",async
  await env.DB.prepare("UPDATE classification_jobs SET lease_until='2000-01-01' WHERE link_id=1").run();
  expect((await reserve(body)).status).toBe(409);expect(await count()).toBe(0);
 });
+it("denies a paid call from another lease while the classification gate is open",async()=>{
+ const body=await seed();
+ await env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',epoch=1,retry_at=?,failures=1
+   WHERE component='classification'`).bind(new Date(Date.now()+60000).toISOString()).run();
+ expect((await reserve(body)).status).toBe(503);
+ expect(await count()).toBe(0);
+ await env.DB.prepare(`UPDATE enrichment_component_gates SET state='probing',probe_token='lease',probe_until=?
+   WHERE component='classification'`).bind(new Date(Date.now()+60000).toISOString()).run();
+ await env.DB.prepare("UPDATE classification_jobs SET component_epoch=1 WHERE link_id=1").run();
+ expect(await (await reserve(body)).json()).toMatchObject({granted:true,reason:"reserved"});
+ expect(await count()).toBe(1);
+});
 it("checks the final SQL transaction window rather than only a preflight",async()=>{
  const body=await seed();let changed=false;
  const db=new Proxy(env.DB,{get(target,property){if(property==="batch")return async(statements:D1PreparedStatement[])=>{

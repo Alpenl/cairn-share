@@ -182,6 +182,8 @@ export type ProviderRecoveryEvent = {
 };
 
 export type WorkerBusinessEvent =
+  | { kind: "component_gate"; component: "classification";
+      action: "opened" | "probe_started" | "closed" }
   | { kind: "manual_request"; action: "source" | "process";
       outcome: "accepted" | "replay" | "rejected" | "failed"; status: number }
   | { kind: "source_claim"; origin: "scheduled" | "by_id";

@@ -10,6 +10,7 @@ import { completionProjectionPlan, decisionInsertStatement, rebuildProjection, r
 const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers });
 const text = (v: unknown, max: number): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
+export type ClassificationGateEvent = { action: "opened" | "probe_started" | "closed" };
 const X_LINK_SQL = `(
   lower(url) LIKE 'https://x.com/%' OR lower(url) LIKE 'http://x.com/%'
   OR lower(url) LIKE 'https://www.x.com/%' OR lower(url) LIKE 'http://www.x.com/%'
@@ -23,6 +24,7 @@ const X_LINK_SQL = `(
 // exactly one class and one HTTP status.
 export type ClassificationErrorCode =
   | "budget_exhausted"
+  | "component_paused"
   | "capability_mismatch"
   | "target_changed"
   | "input_changed"
@@ -43,6 +45,7 @@ export type ClassificationErrorCode =
 
 const ERROR_STATUS: Record<ClassificationErrorCode, number> = {
   budget_exhausted: 429,
+  component_paused: 503,
   capability_mismatch: 409,
   target_changed: 409,
   input_changed: 409,
@@ -112,6 +115,8 @@ type CommitOutcome<T extends { id: number }> = {
   operationGuard: WriteGuard;
   response: T;
   body: unknown;
+  gateTransitionIndex?: number;
+  onGateTransition?: () => void;
 };
 
 async function idempotent<T extends { id: number }>(
@@ -157,6 +162,10 @@ async function idempotent<T extends { id: number }>(
       // The guarded write landed but the operation record did not, which means
       // the predicate was false for it; treat it as a lost lease.
       return fail("lease_expired");
+    }
+    if (outcome.gateTransitionIndex !== undefined &&
+      Number(results[outcome.gateTransitionIndex]?.meta.changes) === 1) {
+      try { outcome.onGateTransition?.(); } catch { /* optional telemetry cannot change a committed result */ }
     }
   } catch (error) {
     // The only expected failure is the operation-key UNIQUE constraint from a
@@ -291,7 +300,8 @@ async function bodyOf(request: Request): Promise<Record<string, unknown> | null>
 }
 
 // All routes are protected by the enricher token in index.ts.
-export async function classificationRoute(request: Request, env: Env, path: string): Promise<Response> {
+export async function classificationRoute(request: Request, env: Env, path: string,
+  onGate?: (event: ClassificationGateEvent) => void): Promise<Response> {
   // Handshake: consumers discover the authoritative target and whether their
   // declared capabilities are accepted. This never mutates the target.
   if (path === "/api/enrichment/classifications/target" && request.method === "GET") {
@@ -367,6 +377,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
   if (!body) return fail("invalid_json");
   const now = new Date().toISOString();
   if (path === "/api/enrichment/classifications/claim") {
+    const gateAware = request.headers.get("X-Cairn-Classification-Gate") === "1";
     const target = await activeTarget(env);
     if (!target) return fail("configuration_error");
     if (!await registeredTargetSpec(env, target)) return fail("configuration_error");
@@ -413,10 +424,11 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     // content revision and its matching snapshot id/hash. A completion can then
     // never re-stamp an old inference with a newer revision (R2-02). A v2 job
     // waits without consuming attempts until its current source is checkpointed.
-    const job = await env.DB.prepare(`UPDATE classification_jobs SET status='processing',
+    const jobStatement = env.DB.prepare(`UPDATE classification_jobs SET status='processing',
       attempts=CASE WHEN target_generation<>? THEN 1 ELSE attempts+1 END,
       lease_token=?, lease_until=?, next_retry_at=NULL, error=NULL,
       target_generation=?, spec_id=?, taxonomy_version=?, policy_version=?, requested_model=?, updated_at=?,
+      component_epoch=(SELECT epoch FROM enrichment_component_gates WHERE component='classification'),
       content_revision=(SELECT content_revision FROM links WHERE id=classification_jobs.link_id),
       evidence_snapshot_id=(SELECT id FROM evidence_snapshots WHERE link_id=classification_jobs.link_id
         AND content_revision=(SELECT content_revision FROM links WHERE id=classification_jobs.link_id)),
@@ -438,15 +450,43 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       AND (SELECT generation FROM classification_target_state WHERE id=1)=?
       AND (SELECT COUNT(*) FROM budget_ledger b WHERE b.scope='classification_global' AND b.created_at>=? AND b.created_at<?) < ?
       AND (SELECT COALESCE(SUM(json_extract(b.units,'$.tokens')),0) FROM budget_ledger b WHERE b.scope='classification_global' AND b.created_at>=? AND b.created_at<?)+65536 <= ?
+      AND EXISTS(SELECT 1 FROM enrichment_component_gates g WHERE g.component='classification'
+        AND (g.state='closed' OR (g.state='open' AND g.retry_at<=?)
+          OR (g.state='probing' AND g.probe_until<=?)))
       RETURNING link_id AS id, revision, input_revision, attempts AS attempt, lease_token, lease_until,
-                target_generation, spec_id, content_revision, evidence_snapshot_id, evidence_hash`)
+                target_generation, spec_id, content_revision, evidence_snapshot_id, evidence_hash,
+                component_epoch, (SELECT state FROM enrichment_component_gates WHERE component='classification') AS gate_state`)
       .bind(target.generation, token, until,
         target.generation, target.spec_id, boundTaxonomy, boundPolicy, boundModel, now,
         budgetWindow.start, budgetWindow.end, budgetLimits.max_calls_per_item, budgetWindow.start, budgetWindow.end, budgetLimits.max_tokens_per_item,
         isLegacy ? 1 : 0, now, target.generation, now, now, target.generation,
-        budgetWindow.start, budgetWindow.end, budgetLimits.max_calls_total, budgetWindow.start, budgetWindow.end, budgetLimits.max_tokens)
-      .first<{ id: number; revision: number; content_revision: number; evidence_snapshot_id: number | null; evidence_hash: string }>();
-    if (!job) return new Response(null, { status: 204, headers });
+        budgetWindow.start, budgetWindow.end, budgetLimits.max_calls_total, budgetWindow.start, budgetWindow.end, budgetLimits.max_tokens,
+        now, now);
+    // D1 batch is one SQLite transaction: a half-open job claim and its probe
+    // ownership become visible together. An empty queue does not acquire a
+    // probe, and another instance cannot claim while this probe owns the gate.
+    const gateProbe = env.DB.prepare(`UPDATE enrichment_component_gates SET state='probing',
+      probe_token=?,probe_until=?,updated_at=? WHERE component='classification' AND state<>'closed'
+      AND EXISTS(SELECT 1 FROM classification_jobs WHERE status='processing' AND lease_token=?)`)
+      .bind(token, new Date(Date.now() + 5 * 60_000).toISOString(), now, token);
+    const claimResults = await env.DB.batch([jobStatement, gateProbe]);
+    if (Number(claimResults[1].meta.changes) === 1) {
+      try { onGate?.({ action: "probe_started" }); } catch { /* optional telemetry */ }
+    }
+    const job = claimResults[0].results[0] as ({ id: number; revision: number; content_revision: number;
+      evidence_snapshot_id: number | null; evidence_hash: string; gate_state: string; component_epoch: number }) | undefined;
+    if (!job) {
+      const gate = await env.DB.prepare(`SELECT state,retry_at,probe_until FROM enrichment_component_gates
+        WHERE component='classification'`).first<{ state: string; retry_at: string | null; probe_until: string | null }>();
+      const until = gate?.state === 'open' ? gate.retry_at : gate?.state === 'probing' ? gate.probe_until : null;
+      if (until && Date.parse(until) > Date.now()) {
+        const delay = Date.parse(until) - Date.now();
+        const response = fail('component_paused', { retry_after_ms: delay });
+        response.headers.set('Retry-After', String(Math.ceil(delay / 1000)));
+        return response;
+      }
+      return new Response(null, { status: 204, headers });
+    }
     const source = await env.DB.prepare(`SELECT l.url,l.note,l.original_text,l.related_links,
       CASE WHEN s.original_text=l.original_text AND s.url=l.url THEN COALESCE(json_extract(s.payload,'$.context_text'),'') ELSE '' END AS context_text
       FROM links l LEFT JOIN enrichment_sources s ON s.link_id=l.id
@@ -458,7 +498,12 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       const parsed: unknown = JSON.parse(source.related_links ?? "[]");
       if (Array.isArray(parsed)) relatedLinks = parsed.filter((entry): entry is string => typeof entry === "string").slice(0, 50);
     } catch { relatedLinks = []; }
-    return reply({ ...job, ...source, related_links: relatedLinks });
+    const { gate_state: gateState, ...leased } = job;
+    if (!gateAware) {
+      const { component_epoch: _componentEpoch, ...legacy } = leased;
+      return reply({ ...legacy, ...source, related_links: relatedLinks });
+    }
+    return reply({ ...leased, component_probe: gateState !== 'closed', ...source, related_links: relatedLinks });
   }
   if (!match) return fail("not_found");
   if (match[2] === "retry") {
@@ -506,10 +551,10 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       if (!target) return { failure: "configuration_error" as const };
       // Reject completions that no longer match the active target *before*
       // touching storage, so a stale worker cannot overwrite the projection.
-      const job = await env.DB.prepare(`SELECT status, target_generation, spec_id, taxonomy_version, revision, input_revision, lease_token, lease_until, content_revision, evidence_hash, evidence_snapshot_id, attempts
+      const job = await env.DB.prepare(`SELECT status, target_generation, spec_id, taxonomy_version, revision, input_revision, lease_token, lease_until, content_revision, evidence_hash, evidence_snapshot_id, attempts, component_epoch
         FROM classification_jobs WHERE link_id=?`).bind(id).first<{
           status: string; target_generation: number; spec_id: string; taxonomy_version: string; revision: number; input_revision: number;
-          lease_token: string | null; lease_until: string | null; content_revision: number; evidence_hash: string; evidence_snapshot_id: number | null; attempts: number;
+          lease_token: string | null; lease_until: string | null; content_revision: number; evidence_hash: string; evidence_snapshot_id: number | null; attempts: number; component_epoch: number;
         }>();
       if (!job) return { failure: "not_found" as const };
       if (job.status === "completed") return { failure: "already_completed" as const };
@@ -585,23 +630,33 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         }, plan.preGuard, false));
       }
       statements.push(...plan.statements);
+      // A successful model result closes only the half-open probe that owns
+      // this exact lease and epoch. A success from an older in-flight job must
+      // never clear a newer provider outage.
+      statements.push(env.DB.prepare(`UPDATE enrichment_component_gates SET state='closed',
+        epoch=epoch+1,failures=0,retry_at=NULL,probe_token=NULL,probe_until=NULL,reason=NULL,updated_at=?
+        WHERE component='classification' AND state='probing' AND probe_token=? AND epoch=?
+          AND ${plan.postGuard.sql}`).bind(now, String(body.lease_token), job.component_epoch, ...plan.postGuard.bindings));
+      const gateTransitionIndex = statements.length - 1;
       const finalize = env.DB.prepare(`UPDATE classification_jobs SET status='completed',result=?,error=NULL,
         lease_token=NULL,lease_until=NULL,updated_at=? WHERE link_id=? AND ${plan.postGuard.sql} RETURNING link_id`)
         .bind(JSON.stringify({ ...result, classification }), now, id, ...plan.postGuard.bindings);
       return { statements, finalize, guardIndex: 0, operationGuard: plan.postGuard,
-        response: { id }, body: { id, status: "completed" } };
+        response: { id }, body: { id, status: "completed" }, gateTransitionIndex,
+        onGateTransition: () => onGate?.({ action: "closed" }) };
     }, () => rebuildProjection(env, id));
     return response;
   }
   if (match[2] === "fail") {
     if (!text(body.error, 1800)) return fail("invalid_classification");
+    if (body.component_fault !== undefined && body.component_fault !== "provider_transient") return fail("invalid_classification");
     const retryAfterMS = body.retry_after_ms;
     if (retryAfterMS !== undefined &&
       (typeof retryAfterMS !== "number" || !Number.isSafeInteger(retryAfterMS) || retryAfterMS < 0)) return fail("invalid_classification");
-    const job = await env.DB.prepare(`SELECT status, attempts, target_generation, spec_id, revision, input_revision, lease_token, lease_until
+    const job = await env.DB.prepare(`SELECT status, attempts, target_generation, spec_id, revision, input_revision, lease_token, lease_until, component_epoch
       FROM classification_jobs WHERE link_id=?`).bind(id).first<{
         status: string; attempts: number; target_generation: number; spec_id: string; revision: number; input_revision: number;
-        lease_token: string | null; lease_until: string | null;
+        lease_token: string | null; lease_until: string | null; component_epoch: number;
       }>();
     if (!job) return fail("not_found");
     if (job.status === "completed") return fail("already_completed");
@@ -612,8 +667,15 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     // A job superseded by a newer input revision is not a model failure. Mark
     // it stale without spending the new target's attempt budget.
     if (body.input_revision !== undefined && Number(body.input_revision) !== job.input_revision) {
-      await env.DB.prepare(`UPDATE classification_jobs SET status='pending', lease_token=NULL, lease_until=NULL,
-        next_retry_at=NULL, updated_at=? WHERE link_id=? AND lease_token=?`).bind(now, id, body.lease_token).run();
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',probe_token=NULL,probe_until=NULL,
+          retry_at=CASE WHEN retry_at>? THEN retry_at ELSE ? END,updated_at=?
+          WHERE component='classification' AND state='probing' AND probe_token=? AND epoch=?`)
+          .bind(now, now, now, body.lease_token, job.component_epoch),
+        env.DB.prepare(`UPDATE classification_jobs SET status='pending', lease_token=NULL, lease_until=NULL,
+          next_retry_at=NULL, updated_at=? WHERE link_id=? AND lease_token=?`)
+          .bind(now, id, body.lease_token)
+      ]);
       return reply({ id, status: "superseded" });
     }
     const status = job.attempts >= 5 ? "exhausted" : "failed";
@@ -625,10 +687,36 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     const providerDelay = Math.min(typeof retryAfterMS === "number" ? retryAfterMS : 0, 600_000);
     const delay = Math.min(7200_000, Math.max(baseDelay + jitter, providerDelay));
     const retry = status === "exhausted" ? null : new Date(Date.now() + delay).toISOString();
-    const row = await env.DB.prepare(`UPDATE classification_jobs SET status=?,error=?,next_retry_at=?,
+    const jobFailure = env.DB.prepare(`UPDATE classification_jobs SET status=?,error=?,next_retry_at=?,
       lease_token=NULL,lease_until=NULL,updated_at=? WHERE link_id=? AND status='processing'
       AND lease_token=? AND revision=? AND lease_until>? RETURNING link_id`)
-      .bind(status, body.error, retry, now, id, body.lease_token, body.revision, now).first();
+      .bind(status, body.error, retry, now, id, body.lease_token, body.revision, now);
+    let row: unknown;
+    const gate = await env.DB.prepare(`SELECT state,epoch,failures,probe_token FROM enrichment_component_gates
+      WHERE component='classification'`).first<{ state: string; epoch: number; failures: number; probe_token: string | null }>();
+    const probeFailed = gate?.state === "probing" && gate.probe_token === body.lease_token &&
+      gate.epoch === job.component_epoch;
+    if (body.component_fault === "provider_transient" || probeFailed) {
+      const backoff = Math.min(600_000, 30_000 * 2 ** Math.min(gate?.failures ?? 0, 5));
+      const gateRetry = new Date(Date.now() + Math.max(backoff, providerDelay)).toISOString();
+      const results = await env.DB.batch([
+        env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',epoch=epoch+1,failures=MIN(failures+1,6),
+          retry_at=?,probe_token=NULL,probe_until=NULL,reason=?,updated_at=?
+          WHERE component='classification' AND epoch=?
+          AND EXISTS(SELECT 1 FROM classification_jobs WHERE link_id=? AND status='processing'
+            AND lease_token=? AND revision=? AND lease_until>?
+            AND target_generation=(SELECT generation FROM classification_target_state WHERE id=1))`)
+          .bind(gateRetry, body.component_fault === "provider_transient" ? "provider_transient" : "probe_failed",
+            now, job.component_epoch, id, body.lease_token, body.revision, now),
+        jobFailure
+      ]);
+      if (Number(results[0].meta.changes) === 1) {
+        try { onGate?.({ action: "opened" }); } catch { /* optional telemetry */ }
+      }
+      row = results[1].results[0];
+    } else {
+      row = await jobFailure.first();
+    }
     return row ? reply({ id, status }) : fail("lease_expired");
   }
   return fail("not_found");
