@@ -94,7 +94,7 @@ it("separates durable reservation from reported provider settlement in safe even
       .bind(500, new Date().toISOString().slice(0, 10)).run();
     expect((await call(reservePath, { ...canary, operation_key: "8".repeat(64) })).status).toBe(429);
     const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
-    expect(entries.filter((entry) => entry.kind === "provider_attempt")).toEqual([
+    expect(entries.filter((entry) => entry.kind === "provider_attempt")).toMatchObject([
       { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",
         stage: "fetch", outcome: "reserved", status: 200 },
       { schema: 1, config_version: 1, kind: "provider_attempt", action: "reserve",

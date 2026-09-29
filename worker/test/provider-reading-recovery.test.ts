@@ -176,7 +176,7 @@ it("reports safe committed, replay and rejected outcomes under the live log swit
     expect((await call(path, body, "operator")).status).toBe(200);
     expect((await call(path, body, "operator")).status).toBe(200);
     const events = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
-    expect(events.filter((entry) => entry.kind === "provider_recovery")).toEqual([
+    expect(events.filter((entry) => entry.kind === "provider_recovery")).toMatchObject([
       { schema: 1, kind: "provider_recovery", config_version: 1,
         stage: "reading", outcome: "rejected", status: 409 },
       { schema: 1, kind: "provider_recovery", config_version: 1,

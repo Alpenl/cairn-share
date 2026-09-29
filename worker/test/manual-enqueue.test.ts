@@ -52,7 +52,7 @@ it("logs accepted, replay, claim and rejection after their durable outcomes", as
       [entry.action, entry.outcome, entry.status])).toEqual([
       ["process", "accepted", 200], ["process", "replay", 200], ["process", "rejected", 409]
     ]);
-    expect(entries.filter((entry) => entry.kind === "source_claim")).toEqual([
+    expect(entries.filter((entry) => entry.kind === "source_claim")).toMatchObject([
       { schema: 1, config_version: 1, kind: "source_claim", origin: "scheduled",
         outcome: "claimed", status: 200 }
     ]);

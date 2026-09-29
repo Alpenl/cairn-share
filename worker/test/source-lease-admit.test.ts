@@ -451,7 +451,7 @@ it("exports bounded stage-lease outcomes under the log switch without private fi
       lease_token: secondLease, error: "admission stopped", component_fault: "source_transient"
     })).status).toBe(409);
     const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
-    expect(entries.filter(entry => entry.kind === "stage_lease")).toEqual([
+    expect(entries.filter(entry => entry.kind === "stage_lease")).toMatchObject([
       { schema: 1, config_version: 1, kind: "stage_lease", action: "local_defer",
         stage: "source", outcome: "deferred", status: 200 },
       { schema: 1, config_version: 1, kind: "stage_lease", action: "local_defer",

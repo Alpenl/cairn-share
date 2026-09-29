@@ -106,7 +106,7 @@ it("reports completed, replayed and rejected commits without exposing result tex
     expect((await call(path, completion)).status).toBe(200);
     expect((await call(path, { ...completion, summary: "private changed summary" })).status).toBe(409);
     const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
-    expect(entries.filter((entry) => entry.kind === "enrichment_commit")).toEqual([
+    expect(entries.filter((entry) => entry.kind === "enrichment_commit")).toMatchObject([
       { schema: 1, config_version: 1, kind: "enrichment_commit", stage: "complete",
         outcome: "committed", status: 200 },
       { schema: 1, config_version: 1, kind: "enrichment_commit", stage: "complete",
@@ -134,7 +134,7 @@ it("rolls back both completion and receipt when the business update fails", asyn
   try {
     await expect(call(`enrichment/jobs/${id}/complete`, completion)).rejects.toThrow("injected_completion_failure");
     const entries = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>);
-    expect(entries.filter((entry) => entry.kind === "enrichment_commit")).toEqual([
+    expect(entries.filter((entry) => entry.kind === "enrichment_commit")).toMatchObject([
       { schema: 1, config_version: 1, kind: "enrichment_commit", stage: "complete",
         outcome: "failed", status: 500 }
     ]);

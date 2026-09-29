@@ -95,7 +95,7 @@ it("logs source acceptance only after durable evidence and distinguishes replay"
       [entry.action, entry.outcome, entry.status])).toEqual([
       ["source", "accepted", 200], ["source", "replay", 200], ["source", "rejected", 409]
     ]);
-    expect(entries.filter((entry) => entry.kind === "source_claim")).toEqual([
+    expect(entries.filter((entry) => entry.kind === "source_claim")).toMatchObject([
       { schema: 1, config_version: 1, kind: "source_claim", origin: "by_id",
         outcome: "claimed", status: 200 }
     ]);

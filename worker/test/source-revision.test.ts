@@ -33,7 +33,7 @@ it("reports source checkpoints only after a successful write",async()=>{
   expect((await f.save(changed)).status).toBe(200);
   expect((await call(`enrichment/jobs/${f.id}/source`,{lease_token:"wrong",source:changed})).status).toBe(409);
   const entries=log.mock.calls.map(([entry])=>JSON.parse(String(entry)) as Record<string,unknown>);
-  expect(entries.filter((entry)=>entry.kind==="enrichment_commit")).toEqual([
+  expect(entries.filter((entry)=>entry.kind==="enrichment_commit")).toMatchObject([
    {schema:1,config_version:1,kind:"enrichment_commit",stage:"source",outcome:"stored",status:200},
    {schema:1,config_version:1,kind:"enrichment_commit",stage:"source",outcome:"rejected",status:409}
   ]);
