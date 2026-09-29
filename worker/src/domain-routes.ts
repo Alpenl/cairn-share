@@ -949,6 +949,9 @@ export async function persistSelectionOverrides(
     // how the legacy `classification: null` ("restore automatic") is expressed
     // without clearing hidden v2 dimensions or the user's intent.
     resetFields?: OverrideField[];
+    // An explicit v1 confirmation pins all three fields, even when the saved
+    // values currently equal the automatic suggestions.
+    confirmV1Selection?: boolean;
     operation?: { key: string; payloadHash: string };
   }
 ): Promise<{ revision: number; selection: V2Selection } | { conflict: number } | { operationConflict: true }> {
@@ -983,6 +986,11 @@ export async function persistSelectionOverrides(
   ];
   for (const [field, current, wanted] of multi) {
     if (resetSet.has(field)) continue;
+    if (options.confirmV1Selection && field === "topics") {
+      actions.push({ field, term: "", action: "set_empty" });
+      for (const term of wanted) actions.push({ field, term, action: "accept" });
+      continue;
+    }
     const automaticTerms = automatic === null
       ? []
       : ((automatic[field as keyof AutomaticView] as string[] | undefined) ?? []);
@@ -1013,6 +1021,10 @@ export async function persistSelectionOverrides(
   ];
   for (const [field, current, wanted] of single) {
     if (resetSet.has(field)) continue;
+    if (options.confirmV1Selection && (field === "form" || field === "use")) {
+      actions.push({ field, term: wanted, action: wanted ? "accept" : "set_empty" });
+      continue;
+    }
     if (wanted === current) continue;
     if (wanted === "") actions.push({ field, term: "", action: "set_empty" });
     else actions.push({ field, term: wanted, action: "accept" });

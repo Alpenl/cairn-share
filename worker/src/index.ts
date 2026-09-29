@@ -4,6 +4,7 @@ import { bookmarkSource, record, storedClassification, taxonomy, validCurationSt
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
 import { applyV1Write } from "./taxonomy-v2";
+import { canonicalJSON } from "./domain";
 import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
 import { readSelectionSnapshot } from "./selection-state";
 import { emitProviderRecovery, emitRequest, emitWorkerBusiness, policyReadAvailable, publishPolicy, requestPolicy,
@@ -1100,7 +1101,13 @@ async function getEnrichmentReading(env: Env, id: number, timing: TimingCollecto
 async function updateCuration(request: Request, env: Env, id: number, timing: TimingCollector, app = false): Promise<Response> {
   const body = await readEnrichmentBody(request);
   if (body instanceof Response) return body;
-  if (Object.keys(body).some((key) => !["why", "curation_status", "classification"].includes(key))) return error("invalid_curation");
+  if (Object.keys(body).some((key) => !["why", "curation_status", "classification", "expected_revision", "operation_key"].includes(key))) return error("invalid_curation");
+  const guardedConfirm = "expected_revision" in body || "operation_key" in body;
+  if (guardedConfirm && (!Number.isSafeInteger(body.expected_revision) || Number(body.expected_revision) < 0 ||
+      typeof body.operation_key !== "string" || body.operation_key.length === 0 || body.operation_key.length > 200 ||
+      !("classification" in body) || body.classification === null || "why" in body || "curation_status" in body)) {
+    return error("invalid_curation");
+  }
   const updates: string[] = [];
   const bindings: Array<string | number | null> = [];
   if ("why" in body) {
@@ -1141,18 +1148,24 @@ async function updateCuration(request: Request, env: Env, id: number, timing: Ti
     const { selection: desired } = applyV1Write(existing, selection === null
       ? { topics: [], form: "", use: "" }
       : { topics: selection.topics, form: selection.form, use: selection.use });
-    // The legacy write has no revision and no operation id. It is recorded as a
-    // legacy_unknown human action at the current revision; the CAS is not
-    // invented for a protocol that cannot carry one. `classification: null`
-    // restores the automatic value for exactly the v1-expressible dimensions
-    // and never clears hidden v2 dimensions (B05-T06/R2-03).
+    // Guarded confirmation has the revision and operation ID from a current
+    // client. Old clients remain on the unguarded legacy path. A null value
+    // restores only the v1-expressible dimensions (B05-T06/R2-03).
+    const digest = guardedConfirm ? await crypto.subtle.digest("SHA-256", new TextEncoder().encode(
+      canonicalJSON({ id, classification: selection, expected_revision: body.expected_revision }))) : null;
+    const payloadHash = digest ? Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0")).join("") : "";
     const result = await persistSelectionOverrides(env, id, desired, {
-      source: "legacy_unknown",
-      operationPrefix: `v1-${id}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+      source: guardedConfirm ? "human" : "legacy_unknown",
+      operationPrefix: guardedConfirm ? String(body.operation_key) : `v1-${id}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+      expectedRevision: guardedConfirm ? Number(body.expected_revision) : undefined,
+      confirmV1Selection: guardedConfirm,
+      operation: guardedConfirm ? { key: String(body.operation_key), payloadHash } : undefined,
       rejectAutomaticExtras: true,
       resetFields: selection === null ? ["topics", "form", "use"] : undefined
     });
     if ("conflict" in result) return json({ error: "revision_conflict", revision: result.conflict }, 409);
+    if ("operationConflict" in result) return error("operation_conflict", 409);
   }
   if (app) {
     const item = await timing.measure("db", () => env.DB.prepare(

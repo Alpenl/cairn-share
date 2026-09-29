@@ -75,6 +75,50 @@ describe("bookmark curation", () => {
     expect(Object.keys(publicItem as object).sort()).toEqual(["created_at", "id", "learned", "learned_at", "note", "url"]);
   });
 
+  it("pins an explicit confirmation and replays it without duplicating overrides", async () => {
+    const id = await create();
+    expect((await complete(id)).status).toBe(200);
+    const row = await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id)
+      .first<{ personal_revision: number }>();
+    const confirm = { classification: { topics: ["llm"], form: "tool", use: "try" },
+      expected_revision: row!.personal_revision, operation_key: `confirm-${id}` };
+    expect((await request(`/api/links/${id}/curation`, "PATCH", confirm, appToken)).status).toBe(200);
+    expect(await detail(id)).toMatchObject({ classification_reviewed: true,
+      classification: { topics: ["llm"], form: "tool", use: "try" } });
+    const overrides = async () => (await env.DB.prepare("SELECT action,field,term,source,confirmed FROM curation_overrides WHERE link_id=? ORDER BY id")
+      .bind(id).all<{ action: string; field: string; term: string; source: string; confirmed: number }>()).results;
+    expect(await overrides()).toEqual([
+      { action: "set_empty", field: "topics", term: "", source: "human", confirmed: 1 },
+      { action: "accept", field: "topics", term: "llm", source: "human", confirmed: 1 },
+      { action: "accept", field: "form", term: "tool", source: "human", confirmed: 1 },
+      { action: "accept", field: "use", term: "try", source: "human", confirmed: 1 }
+    ]);
+    expect((await request(`/api/links/${id}/curation`, "PATCH", confirm, appToken)).status).toBe(200);
+    expect((await overrides()).length).toBe(4);
+    expect((await request(`/api/links/${id}/curation`, "PATCH", {
+      ...confirm, classification: { ...confirm.classification, topics: ["eng"] }
+    }, appToken)).status).toBe(409);
+  });
+
+  it("rejects a stale confirmation after another client edits a tag", async () => {
+    const id = await create();
+    expect((await complete(id)).status).toBe(200);
+    const row = await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id)
+      .first<{ personal_revision: number }>();
+    const edit = await request(`/api/bookmarks/${id}/v2-override`, "POST", {
+      field: "topics", term: "llm", action: "reject", operation_key: `reject-${id}`,
+      expected_revision: row!.personal_revision
+    }, appToken);
+    expect(edit.status).toBe(200);
+    const stale = await request(`/api/links/${id}/curation`, "PATCH", {
+      classification: { topics: ["llm"], form: "tool", use: "try" },
+      expected_revision: row!.personal_revision, operation_key: `stale-confirm-${id}`
+    }, appToken);
+    expect(stale.status).toBe(409);
+    expect(await detail(id)).toMatchObject({ classification_reviewed: true,
+      classification: { topics: [] } });
+  });
+
   it("rejects unknown, duplicate, oversized, and stale model classifications", async () => {
     const id = await create();
     for (const value of [classification({ topics: ["invented"] }), classification({ topics: ["llm", "llm"] }),
