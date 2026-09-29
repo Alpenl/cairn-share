@@ -19,13 +19,13 @@ function call(path: string, body: unknown, token = "internal", method = "POST") 
   }), bindings());
 }
 
-async function fixture() {
+async function fixture(sourceText = "saved source") {
   const created = await call("links", { url: "https://x.com/u/status/1" }, "app");
   const { id } = await created.json() as { id: number };
   const claimed = await call(`enrichment/jobs/${id}/claim`, {});
   expect(claimed.status).toBe(200);
   const { lease_token } = await claimed.json() as { lease_token: string };
-  const source = { original_text: "saved source", original_language: "en", context_text: "",
+  const source = { original_text: sourceText, original_language: "en", context_text: "",
     related_links: [], image_urls: [], model: "fixture" };
   expect((await call(`enrichment/jobs/${id}/source`, { lease_token, source })).status).toBe(200);
   expect((await call(`enrichment/jobs/${id}/lease-admit`, {
@@ -48,6 +48,33 @@ async function fixture() {
     related_links: [], images: [] };
   return { id, lease_token, completion };
 }
+
+it("keeps the exact saved source text, including significant edge whitespace", async () => {
+  const original = " \nSaved source with exact edges\n ";
+  const { id, completion } = await fixture(original);
+  expect((await call(`enrichment/jobs/${id}/complete`, completion)).status).toBe(200);
+  const saved = await env.DB.prepare("SELECT original_text FROM links WHERE id=?")
+    .bind(id).first<{ original_text: string }>();
+  expect(saved?.original_text).toBe(original);
+});
+
+it("rejects reading fields that would replace the saved source identity", async () => {
+  const { id, completion } = await fixture();
+  for (const change of [
+    { original_text: "different source" },
+    { original_language: "fr" },
+    { related_links: ["https://example.com/added"] }
+  ]) {
+    const rejected = await call(`enrichment/jobs/${id}/complete`, { ...completion, ...change });
+    expect(rejected.status).toBe(409);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM enrichment_completion_receipts WHERE link_id=?")
+      .bind(id).first<{ n: number }>())?.n).toBe(0);
+  }
+  expect((await call(`enrichment/jobs/${id}/complete`, completion)).status).toBe(200);
+  const saved = await env.DB.prepare("SELECT original_text,original_language,related_links FROM links WHERE id=?")
+    .bind(id).first<{ original_text: string; original_language: string; related_links: string }>();
+  expect(saved).toEqual({ original_text: "saved source", original_language: "en", related_links: "[]" });
+});
 
 it("replays a lost completion response without rewriting the bookmark", async () => {
   const { id, completion } = await fixture();

@@ -1373,7 +1373,12 @@ async function completeEnrichmentJob(
   if (body instanceof Response) return body;
 
   const leaseToken = readBoundedString(body.lease_token, 1, 100);
-  const originalText = readBoundedString(body.original_text, 1, MAX_ORIGINAL_TEXT_LENGTH);
+  // The source checkpoint may contain meaningful leading/trailing whitespace
+  // (for example a code block). Validate it without rewriting those bytes.
+  const originalText = typeof body.original_text === "string" &&
+    body.original_text.trim().length > 0 && body.original_text.length <= MAX_ORIGINAL_TEXT_LENGTH &&
+    new TextEncoder().encode(body.original_text).byteLength <= MAX_ORIGINAL_TEXT_LENGTH
+    ? body.original_text : null;
   const aiTitle = readOptionalBoundedString(body.ai_title, 1, MAX_AI_TITLE_LENGTH);
   const originalLanguage = readOptionalBoundedString(body.original_language, 1, MAX_ORIGINAL_LANGUAGE_LENGTH);
   const translatedText = readOptionalBoundedString(body.translated_text, 1, MAX_TRANSLATED_TEXT_LENGTH);
@@ -1425,13 +1430,24 @@ async function completeEnrichmentJob(
       (SELECT 1 FROM enrichment_provider_attempts a WHERE a.link_id=links.id
        AND a.lease_hash=? AND a.content_revision=links.content_revision
        AND a.stage='reading' AND a.state='responded' AND a.http_status=200)))`;
+  // A reading completion may add aids but cannot replace fields from a saved
+  // source. Keep this guard in the same D1 batch as the receipt and update so
+  // a source change between validation and commit cannot create a false ack.
+  const sourceGuard = `AND (NOT EXISTS (SELECT 1 FROM enrichment_sources s WHERE s.link_id=links.id)
+    OR EXISTS (SELECT 1 FROM enrichment_sources s WHERE s.link_id=links.id
+      AND s.url=links.url AND s.original_text=?
+      AND json(json_extract(s.payload,'$.related_links'))=json(?)
+      AND (json_extract(s.payload,'$.original_language')='' OR
+        json_extract(s.payload,'$.original_language')=?)))`;
+  const sourceBindings = [originalText, JSON.stringify(relatedLinks), originalLanguage ?? null];
   try {
     const results = await timing.measure("db", () => env.DB.batch([
       env.DB.prepare(`INSERT INTO enrichment_completion_receipts(lease_hash,link_id,payload_hash,response,created_at)
         SELECT ?,id,?,?,? FROM links WHERE id=? AND enrichment_status='processing'
-          AND enrichment_lease_token=? ${paidGuard}
+          AND enrichment_lease_token=? ${paidGuard} ${sourceGuard}
         RETURNING lease_hash`)
-        .bind(leaseHash, payloadHash, JSON.stringify(receiptBody), now, id, leaseToken, leaseHash),
+        .bind(leaseHash, payloadHash, JSON.stringify(receiptBody), now, id, leaseToken, leaseHash,
+          ...sourceBindings),
       env.DB.prepare(
       `UPDATE links
         SET enrichment_status = 'completed',
@@ -1457,12 +1473,13 @@ async function completeEnrichmentJob(
           AND enrichment_status = 'processing'
           AND enrichment_lease_token = ?
           ${paidGuard}
+          ${sourceGuard}
         RETURNING id`
     )
       .bind(
         aiTitle ?? null, originalLanguage ?? null, originalText, translatedText ?? null, summary,
         JSON.stringify(relatedLinks), JSON.stringify(images), classification ? JSON.stringify(classification) : null,
-        model, now, now, id, leaseToken, leaseHash
+        model, now, now, id, leaseToken, leaseHash, ...sourceBindings
       )
     ]));
     if (!results[0].results.length || !results[1].results.length) {

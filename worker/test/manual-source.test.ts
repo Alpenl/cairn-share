@@ -35,7 +35,7 @@ async function state(id: number) {
 
 it("commits manual source before accepting and replays the same operation without requeueing", async () => {
   const id = await link();
-  const text = "手动提供的原文";
+  const text = " \n手动提供的原文\n ";
   const before = (await state(id))!;
   const body = { operation_key: operation, expected_revision: before.content_revision, original_text: text };
   const identity = await call(`enrichment/jobs/${id}?include_cache_identity=1`);

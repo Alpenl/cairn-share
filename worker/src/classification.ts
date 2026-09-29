@@ -802,8 +802,8 @@ export async function manualSourceRoute(request: Request, env: Env, id: number,
     Number(body.expected_revision) < 0 || !text(body.original_text, 100_000)) return fail("invalid_source");
   // bodyOf bounds the incoming JSON to 1 MiB. This endpoint has the smaller
   // dashboard request limit and uses byte length, not JavaScript characters.
-  const sourceText = body.original_text.trim();
-  if (!sourceText || new TextEncoder().encode(sourceText).byteLength > 100_000 ||
+  const sourceText = body.original_text;
+  if (!sourceText.trim() || new TextEncoder().encode(sourceText).byteLength > 100_000 ||
     new TextEncoder().encode(JSON.stringify(body)).byteLength > (128 << 10)) return fail("invalid_source");
   const key = body.operation_key;
   const expected = Number(body.expected_revision);

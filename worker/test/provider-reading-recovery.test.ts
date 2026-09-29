@@ -103,6 +103,17 @@ it("recovers a settled reading once without changing source, classification or h
     .first<{ n: number }>())?.n).toBe(0);
 });
 
+it("keeps the saved source language when reading recovery disagrees", async () => {
+  const { id } = await fixture();
+  const reading = { ...recovery().reading, original_language: "fr" };
+  expect((await call("enrichment/provider-attempts/recover-reading", recovery(reading), "operator")).status)
+    .toBe(200);
+  expect(await env.DB.prepare("SELECT original_language,original_text FROM links WHERE id=?")
+    .bind(id).first()).toMatchObject({
+      original_language: "en", original_text: "Persisted primary source"
+    });
+});
+
 it("rebuilds image refs only from one matching R2 object per current source URL", async () => {
   const imageURL = "https://pbs.twimg.com/media/recovery-test";
   const { id } = await fixture([imageURL]);

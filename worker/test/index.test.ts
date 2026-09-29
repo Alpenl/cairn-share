@@ -196,7 +196,7 @@ describe("cairn-share worker", () => {
       enrichment_status: "completed",
       ai_title: "一条由人工智能生成的中文测试标题",
       original_language: "en",
-      original_text: "完整原文",
+      original_text: "  完整原文  ",
       translated_text: "完整简体中文译文",
       summary: "简短总结",
       related_links: JSON.stringify(["https://example.com/source"]),

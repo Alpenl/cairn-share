@@ -23,10 +23,11 @@ export function validEnrichmentSource(value: unknown): value is EnrichmentSource
   const keys = ["original_text", "model", "original_language", "context_text", "related_links", "image_urls"];
   if (Object.keys(source).length !== keys.length || Object.keys(source).some((key) => !keys.includes(key))) return false;
   return typeof source.original_text === "string" && source.original_text.trim().length > 0 &&
-    source.original_text.length <= 100_000 &&
+    source.original_text.length <= 100_000 && new TextEncoder().encode(source.original_text).byteLength <= 100_000 &&
     typeof source.model === "string" && source.model.trim().length > 0 && source.model.length <= 200 &&
     typeof source.original_language === "string" && source.original_language.length <= 32 &&
     typeof source.context_text === "string" && source.context_text.length <= 100_000 &&
+    new TextEncoder().encode(source.context_text).byteLength <= 100_000 &&
     Array.isArray(source.related_links) && source.related_links.length <= 50 &&
     source.related_links.every((item) => safeURL(item, false)) &&
     Array.isArray(source.image_urls) && source.image_urls.length <= 8 &&
