@@ -207,7 +207,7 @@ export type WorkerBusinessEvent =
 
 function writeLog(lane: LogLane, value: object): void {
   try {
-    console.log(JSON.stringify(value));
+    console.log(JSON.stringify({ time_utc: new Date().toISOString(), service: "cairn-share-worker", ...value }));
   } catch {
     logWindow[lane].write_errors++;
     logTotals[lane].write_errors++;

@@ -141,6 +141,7 @@ describe("application observability control", () => {
     for (let i = 0; i < 123; i++) emitRequest(policy, input, output, 1);
     expect(log).toHaveBeenCalledTimes(122);
     expect(JSON.parse(String(log.mock.calls[120][0]))).toMatchObject({
+      time_utc: "2026-09-28T00:00:00.000Z", service: "cairn-share-worker",
       kind: "worker_log_drops", lane: "request", count: 1
     });
     expect(JSON.parse(String(log.mock.calls[121][0]))).toMatchObject({
