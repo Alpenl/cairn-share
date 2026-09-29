@@ -703,10 +703,18 @@ export async function ackSourceRefresh(request: Request, env: Env, id: number): 
   const row = await env.DB.prepare(
     `UPDATE links SET refresh_requested_at=NULL,
        enrichment_error=CASE WHEN ?='completed' THEN enrichment_error ELSE ? END
-     WHERE id=? AND refresh_epoch=? RETURNING id`
+     WHERE id=? AND refresh_epoch=? AND refresh_requested_at IS NOT NULL RETURNING id`
   ).bind(String(body.status), reason, id, epoch).first();
-  if (!row) return fail("not_found");
-  return reply({ id, status: body.status, epoch });
+  if (row) return reply({ id, status: body.status, epoch });
+  // The ack response may have been lost, or the source checkpoint may have
+  // consumed the intent first. Neither case may rewrite a completed refresh.
+  const current = await env.DB.prepare(
+    `SELECT refresh_epoch,refresh_requested_at FROM links WHERE id=?`
+  ).bind(id).first<{ refresh_epoch: number; refresh_requested_at: string | null }>();
+  if (current?.refresh_epoch === epoch && current.refresh_requested_at === null) {
+    return reply({ id, status: "already_consumed", epoch });
+  }
+  return fail("not_found");
 }
 
 const MAX_PENDING_MANUAL = 100;

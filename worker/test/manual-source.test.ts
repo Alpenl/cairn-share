@@ -174,6 +174,15 @@ it("consumes a refresh intent in the successful source checkpoint transaction", 
   expect((await call(`enrichment/jobs/${id}/source`, body)).status).toBe(200);
   expect(await env.DB.prepare("SELECT original_text,refresh_requested_at FROM links WHERE id=?")
     .bind(id).first()).toEqual({ original_text: "new source text", refresh_requested_at: null });
+  // A late failure ack from an older Go process must not mark this saved
+  // source as a failed refresh.
+  const late = await call(`enrichment/jobs/${id}/refresh-source/ack`, {
+    epoch: job.refresh_epoch, status: "failed", reason: "snapshot unavailable"
+  });
+  expect(late.status).toBe(200);
+  expect(await late.json()).toMatchObject({ status: "already_consumed" });
+  expect(await env.DB.prepare("SELECT enrichment_error FROM links WHERE id=?")
+    .bind(id).first("enrichment_error")).toBeNull();
   // An identical checkpoint can be retried after its HTTP response is lost.
   expect((await call(`enrichment/jobs/${id}/source`, body)).status).toBe(200);
   await env.DB.prepare(`UPDATE links SET enrichment_status='pending',enrichment_lease_token=NULL,
@@ -181,6 +190,22 @@ it("consumes a refresh intent in the successful source checkpoint transaction", 
   const next = await call(`enrichment/jobs/${id}/claim`, {});
   expect(next.status).toBe(200);
   expect(await next.json()).toMatchObject({ id, refresh_epoch: 0 });
+});
+
+it("replays a failed refresh ack without changing its first result", async () => {
+  const id = await link("https://x.com/source/status/43");
+  expect((await call(`enrichment/jobs/${id}/refresh-source`, {})).status).toBe(200);
+  const claimed = await call(`enrichment/jobs/${id}/claim`, {});
+  const { refresh_epoch } = await claimed.json() as { refresh_epoch: number };
+  const path = `enrichment/jobs/${id}/refresh-source/ack`;
+  expect((await call(path, { epoch: refresh_epoch, status: "failed", reason: "fetch unavailable" })).status).toBe(200);
+  expect(await env.DB.prepare("SELECT refresh_requested_at,enrichment_error FROM links WHERE id=?")
+    .bind(id).first()).toEqual({ refresh_requested_at: null, enrichment_error: "fetch unavailable" });
+  const retry = await call(path, { epoch: refresh_epoch, status: "failed", reason: "different reason" });
+  expect(retry.status).toBe(200);
+  expect(await retry.json()).toMatchObject({ status: "already_consumed" });
+  expect(await env.DB.prepare("SELECT enrichment_error FROM links WHERE id=?")
+    .bind(id).first("enrichment_error")).toBe("fetch unavailable");
 });
 
 it("claims a newer manual source ahead of an older routine retrieval", async () => {
