@@ -47,6 +47,27 @@ it("requires the internal token for source lease capability negotiation", async 
     provider_attempt_ledger: true, refresh_source_checkpoint: true });
 });
 
+it("checks exact source claimability without taking a lease", async () => {
+  const path = "https://test/api/enrichment/source-claimable";
+  const check = (token = "internal") => worker.fetch(new Request(path, { method: "GET",
+    headers: { Authorization: `Bearer ${token}` } }), bindings());
+  expect((await check("app")).status).toBe(401);
+  expect(await (await check()).json()).toEqual({ claimable: false });
+  const created = await post("links", { url: "https://x.com/u/status/claimable" }, "app");
+  const id = (await created.json() as { id: number }).id;
+  expect(await (await check()).json()).toEqual({ claimable: true });
+  expect(await env.DB.prepare("SELECT enrichment_status,enrichment_attempts,enrichment_lease_token FROM links WHERE id=?")
+    .bind(id).first()).toEqual({ enrichment_status: "pending", enrichment_attempts: 0,
+      enrichment_lease_token: null });
+  expect((await post("enrichment/jobs/claim")).status).toBe(200);
+  expect(await (await check()).json()).toEqual({ claimable: false });
+  await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
+    .bind(new Date(Date.now() - 1000).toISOString(), id).run();
+  expect(await (await check()).json()).toEqual({ claimable: true });
+  await env.DB.prepare("UPDATE links SET enrichment_paid_uncertain=1 WHERE id=?").bind(id).run();
+  expect(await (await check()).json()).toEqual({ claimable: false });
+});
+
 it("holds a possibly paid call after a short lease instead of automatically paying twice", async () => {
   const { id, job } = await claimed();
   const ready = await admit(id, job.lease_token);
