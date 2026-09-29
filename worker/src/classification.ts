@@ -465,10 +465,13 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     // D1 batch is one SQLite transaction: a half-open job claim and its probe
     // ownership become visible together. An empty queue does not acquire a
     // probe, and another instance cannot claim while this probe owns the gate.
+    // Go bounds a classification to five minutes, with the final thirty
+    // seconds reserved for its completion write. A live probe must not be
+    // replaced while that write can still arrive.
     const gateProbe = env.DB.prepare(`UPDATE enrichment_component_gates SET state='probing',
       probe_token=?,probe_until=?,updated_at=? WHERE component='classification' AND state<>'closed'
       AND EXISTS(SELECT 1 FROM classification_jobs WHERE status='processing' AND lease_token=?)`)
-      .bind(token, new Date(Date.now() + 5 * 60_000).toISOString(), now, token);
+      .bind(token, new Date(Date.now() + 6 * 60_000).toISOString(), now, token);
     const claimResults = await env.DB.batch([jobStatement, gateProbe]);
     if (Number(claimResults[1].meta.changes) === 1) {
       try { onGate?.({ action: "probe_started" }); } catch { /* optional telemetry */ }

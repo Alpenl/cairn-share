@@ -244,6 +244,9 @@ it("shares provider cooldown across jobs and grants only one half-open probe", a
   expect([second.id, third.id]).toContain(probe.id);
   expect(await env.DB.prepare(`SELECT probe_token FROM enrichment_component_gates
     WHERE component='classification'`).first("probe_token")).toBe(probe.lease_token);
+  const probeUntil = await env.DB.prepare(`SELECT probe_until FROM enrichment_component_gates
+    WHERE component='classification'`).first("probe_until") as string;
+  expect(Date.parse(probeUntil) - Date.now()).toBeGreaterThan(5 * 60_000);
   expect((await request(`enrichment/classifications/${probe.id}/complete`, completion(probe))).status).toBe(200);
   expect(await env.DB.prepare(`SELECT state FROM enrichment_component_gates
     WHERE component='classification'`).first("state")).toBe("closed");
