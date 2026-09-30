@@ -538,7 +538,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   if (path === "/api/enrichment/jobs") {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
-    return routeMethod(request, ["GET"], () => listEnrichmentJobs(url, env, timing));
+    return routeMethod(request, ["GET"], () => listEnrichmentJobs(url, env, timing,
+      request.headers.get("X-Cairn-Tag-System") === "1"));
   }
 
   if (path === "/api/enrichment/overview") {
@@ -603,7 +604,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () =>
       getEnrichmentJob(env, Number(enrichmentJobDetailMatch[1]), timing,
-        url.searchParams.get("include_cache_identity") === "1")
+        url.searchParams.get("include_cache_identity") === "1", request.headers.get("X-Cairn-Tag-System") === "1")
     );
   }
 
@@ -930,7 +931,7 @@ export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; 
   return { clauses, bindings };
 }
 
-async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): Promise<Response> {
+async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, tagAware = false): Promise<Response> {
   const countsOption = url.searchParams.getAll("counts");
   if (countsOption.length > 1 || (countsOption.length === 1 && !["0", "1"].includes(countsOption[0]))) {
     return error("invalid_query");
@@ -998,8 +999,9 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   }
   const items = rows.slice(0, limit);
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
+  const mapped = items.map((row) => ({ ...mapEnrichmentListItem(row, withIdentity), ...(summary ? { content_loaded: false } : {}) }));
   return json({
-    items: items.map((row) => ({ ...mapEnrichmentListItem(row, withIdentity), ...(summary ? { content_loaded: false } : {}) })),
+    items: tagAware ? await attachTagSummaries(env, mapped, true) : mapped,
     next_before_id: next,
     ...(includeCounts ? { counts: mapEnrichmentCounts(countRow) } : {}),
     ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {})
@@ -1061,7 +1063,7 @@ async function getEnrichmentOverview(request: Request, url: URL, env: Env, timin
   }, OVERVIEW_CACHE_TTL_SECONDS);
 }
 
-async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, withIdentity = false): Promise<Response> {
+async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, withIdentity = false, tagAware = false): Promise<Response> {
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
@@ -1077,7 +1079,8 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, w
       .first<EnrichmentDetailRow>()
   );
   if (row === null) return error("not_found", 404);
-  return json(mapEnrichmentListItem(row, withIdentity));
+  const mapped = mapEnrichmentListItem(row, withIdentity);
+  return json(tagAware ? (await attachTagSummaries(env, [mapped], true))[0] : mapped);
 }
 
 async function getEnrichmentJobIdentity(env: Env, id: number, timing: TimingCollector): Promise<Response> {
