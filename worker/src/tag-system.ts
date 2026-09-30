@@ -43,7 +43,7 @@ async function customOf(env: Env, id: number) {
     JOIN custom_tag_links a ON a.tag_id=t.id WHERE a.link_id=? AND t.owner_id=? ORDER BY t.label,t.id`).bind(id, owner).all<Custom>();
   return rows.results.map(tagged);
 }
-export async function attachTagSummaries(env: Env, items: Array<Record<string, unknown>>) {
+export async function attachTagSummaries(env: Env, items: Array<Record<string, unknown>>, internal = false) {
   if (!items.length) return items;
   const ids = items.map(item => Number(item.id));
   const snapshots = await readSelectionSnapshots(env, ids);
@@ -54,13 +54,19 @@ export async function attachTagSummaries(env: Env, items: Array<Record<string, u
     const snapshot = snapshots.snapshots.get(Number(item.id));
     if (!snapshot) return item;
     const enrichment = object(item.enrichment) ? { ...item.enrichment } : null;
-    if (enrichment) {
-      const prior = object(enrichment.classification) ? enrichment.classification : {
+    const classification = (value: unknown) => {
+      // Keep an unclassified internal item null when it has no system labels;
+      // optional custom labels never fabricate a completed classification.
+      if (internal && value === null && !snapshot.view.topics.length && !(snapshot.view.resource_kinds ?? []).length) return null;
+      const prior = object(value) ? value : {
         why_suggestion: "", entities: [], uncertainty: false, taxonomy_version: taxonomyV2().version, discarded_tags: [], form: "", use: ""
       };
-      enrichment.classification = { ...prior, topics: snapshot.view.topics, resource_kinds: snapshot.view.resource_kinds ?? [] };
-    }
-    return { ...item, ...(enrichment ? { enrichment } : {}), custom_tags: customs.results.filter(t => t.link_id === item.id).map(tagged) };
+      return { ...prior, topics: snapshot.view.topics, resource_kinds: snapshot.view.resource_kinds ?? [] };
+    };
+    if (enrichment) enrichment.classification = classification(enrichment.classification);
+    return { ...item, ...(enrichment ? { enrichment } : {}),
+      ...(internal ? { classification: classification(item.classification) } : {}),
+      custom_tags: customs.results.filter(t => t.link_id === item.id).map(tagged) };
   });
 }
 async function manualOrigins(env: Env, id: number, revision: number) {

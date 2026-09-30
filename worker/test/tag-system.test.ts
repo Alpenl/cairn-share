@@ -196,3 +196,49 @@ it("returns current system and custom tags after bookmark and curation edits", a
       enrichment: { classification: { resource_kinds: ["skill"] } } });
   }
 });
+
+it("projects current resource and custom tags in negotiated internal lists and detail while retaining legacy shapes", async () => {
+  const id = await seed();
+  const { tag } = await (await call("custom-tags", { label: "网页投影验证", operation_key: "internal-read-custom" })).json() as any;
+  expect((await act(id, [{ action: "reject", tag_ref: "system/resource_kinds/skill" },
+    { action: "accept", tag_ref: "system/resource_kinds/prompt" }, { action: "attach", tag_ref: tag.tag_ref }])).status).toBe(200);
+  const internal = (path: string, aware: boolean) => worker.fetch(new Request(`https://test/api/${path}`, {
+    headers: { Authorization: "Bearer internal", ...(aware ? { "X-Cairn-Tag-System": "1" } : {}) }
+  }), fixtureEnv());
+  const before = await env.DB.prepare("SELECT original_text,note,why,personal_revision FROM links WHERE id=?").bind(id).first();
+  const paths = ["enrichment/jobs?curation_status=all&view=summary&limit=5", "enrichment/jobs?counts=0",
+    `enrichment/jobs/${id}`, `enrichment/jobs/${id}?include_cache_identity=1`];
+  for (const path of paths) {
+    const currentResponse = await internal(path, true);
+    expect(currentResponse.status, await currentResponse.clone().text()).toBe(200);
+    expect(currentResponse.headers.get("X-Cairn-Tag-System")).toBe("1");
+    const current = await currentResponse.json() as any;
+    const item = current.items ? current.items.find((entry: any) => entry.id === id) : current;
+    expect(item).toMatchObject({ classification: { topics: ["image_creation", "ai_coding"], resource_kinds: ["prompt"] },
+      custom_tags: [{ id: tag.id, tag_ref: tag.tag_ref }] });
+    const legacyResponse = await internal(path, false);
+    expect(legacyResponse.status).toBe(200);
+    const legacy = await legacyResponse.json() as any;
+    const oldItem = legacy.items ? legacy.items.find((entry: any) => entry.id === id) : legacy;
+    expect(oldItem).not.toHaveProperty("custom_tags");
+    expect(oldItem.classification).not.toHaveProperty("resource_kinds");
+    const { custom_tags: _customs, classification: _classification, ...currentFields } = item;
+    const { classification: _legacyClassification, ...legacyFields } = oldItem;
+    expect(currentFields).toEqual(legacyFields);
+  }
+  const filtered = await (await internal(`enrichment/jobs?view=summary&resource_kind=prompt&custom_tag=${tag.id}`, true)).json() as any;
+  expect(filtered.items.map((entry: any) => entry.id)).toEqual([id]);
+  expect(filtered.items[0].classification.resource_kinds).toEqual(["prompt"]);
+  expect(await env.DB.prepare("SELECT original_text,note,why,personal_revision FROM links WHERE id=?").bind(id).first()).toEqual(before);
+});
+
+it("keeps an unclassified internal bookmark null when it only has a custom label", async () => {
+  const { id } = await (await call("links", { url: "https://example.com/unclassified-custom" })).json() as { id: number };
+  const { tag } = await (await call("custom-tags", { label: "暂无正文", operation_key: "empty-custom" })).json() as any;
+  expect((await act(id, [{ action: "attach", tag_ref: tag.tag_ref }])).status).toBe(200);
+  const response = await worker.fetch(new Request(`https://test/api/enrichment/jobs/${id}`, {
+    headers: { Authorization: "Bearer internal", "X-Cairn-Tag-System": "1" }
+  }), fixtureEnv());
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ classification: null, custom_tags: [{ id: tag.id }] });
+});
