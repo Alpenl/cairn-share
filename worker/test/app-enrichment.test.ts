@@ -2,6 +2,7 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { taxonomy } from "../src/curation";
+import { settleFixtureAttempt } from "./provider-attempt-fixture";
 
 const appToken = "app-enrichment-test";
 const enricherToken = "enricher-test";
@@ -15,7 +16,9 @@ afterEach(() => vi.restoreAllMocks());
 
 async function request(path: string, method = "GET", body?: unknown, token = appToken): Promise<Response> {
   return worker.fetch(new Request(`https://app.example${path}`, {
-    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json",
+      "X-Cairn-Provider-Attempt-Ledger": "1",
+      ...(path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), bindings());
 }
@@ -28,6 +31,8 @@ async function seed(): Promise<number> {
 async function complete(id: number): Promise<void> {
   const claim = await request(`/api/enrichment/jobs/${id}/claim`, "POST", undefined, enricherToken);
   const { lease_token } = await claim.json() as { lease_token: string };
+  await settleFixtureAttempt((path, body) => request(`/api/${path}`, "POST", body, enricherToken),
+    id, lease_token, "reading");
   const response = await request(`/api/enrichment/jobs/${id}/complete`, "POST", {
     lease_token, ai_title: "用于同步验证的中文标题", original_language: "en",
     original_text: "source-only-keyword " + "original ".repeat(6000), translated_text: "译文".repeat(10000),
@@ -39,6 +44,66 @@ async function complete(id: number): Promise<void> {
 }
 
 describe("App enrichment integration", () => {
+  it("negotiates cache identity separately from legacy summary/detail and mutation responses", async () => {
+    const id = await seed();
+    await complete(id);
+    const oldList = "/api/links?include=enrichment";
+    const oldDetail = `/api/links/${id}?include=enrichment`;
+    for (const path of [oldList, oldDetail]) {
+      await request(path);
+      const opted = await request(path + "&include_cache_identity=1");
+      expect(opted.headers.get("X-Cairn-Cache")).toBe("MISS");
+      const data = await opted.json() as any;
+      const enrichment = (data.items?.[0] ?? data).enrichment;
+      const current = await env.DB.prepare("SELECT content_revision, app_body_revision, personal_revision FROM links WHERE id=?").bind(id).first();
+      expect(enrichment.cache_identity).toEqual({ schema_version: 1,
+        representation: path === oldList ? "enrichment_summary" : "enrichment_detail",
+        content_revision: current!.content_revision, body_revision: current!.app_body_revision, personal_revision: current!.personal_revision,
+        latest_decision_id: 0, latest_entity_revision: 0 });
+      expect((await request(path + "&include_cache_identity=1")).headers.get("X-Cairn-Cache")).toBe("HIT");
+      const legacy = await (await request(path)).json() as any;
+      expect((legacy.items?.[0] ?? legacy).enrichment).not.toHaveProperty("cache_identity");
+    }
+    const updated = await request(oldDetail + "&include_cache_identity=1", "PATCH", { note: "new personal note" });
+    expect(updated.status).toBe(200);
+    const data = await updated.json() as any;
+    expect(data.enrichment.cache_identity).toMatchObject({ schema_version: 1, representation: "enrichment_detail", latest_decision_id: 0 });
+    expect((await request(oldList + "&include_cache_identity=1")).headers.get("X-Cairn-Cache")).toBe("MISS");
+    // Actual material revision changes even when URL and reading timestamp do not.
+    const original = data.enrichment.cache_identity.content_revision;
+    await env.DB.prepare("UPDATE links SET content_revision=content_revision+1 WHERE id=?").bind(id).run();
+    // This is a fixture-only state change; a public mutation bumps the read generation.
+    await request(oldDetail, "PATCH", { learned: true });
+    const next = await (await request(oldDetail + "&include_cache_identity=1")).json() as any;
+    expect(next.enrichment.cache_identity.content_revision).toBe(original + 1);
+    expect(next.enrichment.updated_at).toBe(data.enrichment.updated_at);
+    expect(next.url).toBe(data.url);
+    const stillOld = await (await request(oldDetail, "PATCH", { learned: false })).json() as any;
+    expect(stillOld.enrichment).not.toHaveProperty("cache_identity");
+    // Reading aids can change independently of source bytes, with identical dates.
+    const bodyRevision = next.enrichment.cache_identity.body_revision;
+    await env.DB.prepare("UPDATE links SET translated_text='new translation', images='[]' WHERE id=?").bind(id).run();
+    const translated = await (await request(oldDetail + "&include_cache_identity=1", "PATCH", { learned: true })).json() as any;
+    expect(translated.enrichment.cache_identity.content_revision).toBe(original + 1);
+    expect(translated.enrichment.cache_identity.body_revision).toBe(bodyRevision + 1);
+    expect(translated.enrichment.updated_at).toBe(next.enrichment.updated_at);
+    expect(translated.enrichment.translated_text).toBe("new translation");
+    // A no-op must not advance the body identity.
+    await env.DB.prepare("UPDATE links SET translated_text=translated_text WHERE id=?").bind(id).run();
+    const unchanged = await env.DB.prepare("SELECT app_body_revision FROM links WHERE id=?").bind(id).first();
+    expect(unchanged!.app_body_revision).toBe(bodyRevision + 1);
+    // RETURNING sees pre-trigger revisions; the opted-in mutation rereads them.
+    const edited = await (await request(oldDetail + "&include_cache_identity=1", "PATCH", { url: "https://x.com/example/status/456" })).json() as any;
+    const stored = await env.DB.prepare("SELECT content_revision, app_body_revision FROM links WHERE id=?").bind(id).first();
+    expect(edited.enrichment.cache_identity.content_revision).toBe(stored!.content_revision);
+    expect(edited.enrichment.cache_identity.body_revision).toBe(stored!.app_body_revision);
+    expect(edited.enrichment.cache_identity.content_revision).toBeGreaterThan(original + 1);
+    // URL/summary invalidation (0027) and clearing the large body (0023)
+    // each advance the monotonic revision; the response must reflect both.
+    expect(edited.enrichment.cache_identity.body_revision).toBe(bodyRevision + 3);
+    expect(edited.enrichment.translated_text).toBeNull();
+  });
+
   it("searches literal percent, underscore and backslash characters in both list contracts", async () => {
     const special = await request("/api/links", "POST", { url: "https://example.com/literal", note: "100% a_b c\\d" });
     const id = (await special.json() as { id: number }).id;

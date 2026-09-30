@@ -1,33 +1,84 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { taxonomy } from "../src/curation";
+import { settleFixtureAttempt } from "./provider-attempt-fixture";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 
-async function request(path: string, body?: unknown, method = "POST", token = "internal"): Promise<Response> {
+async function request(path: string, body?: unknown, method = "POST", token = "internal", gateAware = true): Promise<Response> {
   return worker.fetch(new Request(`https://test.example/api/${path}`, {
-    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method, headers: { "X-Cairn-Classification-Budget": "1", Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json", "X-Cairn-Provider-Attempt-Ledger": "1",
+      ...(gateAware && path === "enrichment/classifications/claim" ? { "X-Cairn-Classification-Gate": "1" } : {}),
+      ...(path.endsWith("/claim") && path.startsWith("enrichment/jobs/") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
 }
 
-async function setup() {
-  const create = await request("links", { url: "https://x.com/a/status/123", note: "test" }, "POST", "app");
+async function setup(url = "https://x.com/a/status/123") {
+  const create = await request("links", { url, note: "test" }, "POST", "app");
   const { id } = await create.json() as { id: number };
   const leased = await request(`enrichment/jobs/${id}/claim`);
   const { lease_token } = await leased.json() as { lease_token: string };
+  await settleFixtureAttempt((path, body) => request(path, body), id, lease_token, "fetch");
   const source = { original_text: "A guide to evaluating LLMs", original_language: "en", context_text: "A related comment",
     related_links: [], image_urls: [], model: "grok-test" };
   expect((await request(`enrichment/jobs/${id}/source`, { lease_token, source })).status).toBe(200);
+  expect((await request(`v2/links/${id}/evidence`, { snapshot: {
+    blocks: [{ id: "primary", role: "primary", text: source.original_text }],
+    fetched_at: "2026-09-22T00:00:00Z", retrieval: "manual", truncation: { truncated: false }
+  } })).status).toBe(200);
   return { id, lease_token, source };
 }
 
 const settings = { taxonomy_version: taxonomy.version, policy_version: "jev-tags-v1", model: "jev-latest" };
+
+it.each(["primary", "context"])("R3-02: delayed %s snapshot does not claim or burn attempts", async (changedField) => {
+  const { id, lease_token, source } = await setup();
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
+  const prior = await env.DB.prepare("SELECT id,content_revision FROM evidence_snapshots WHERE link_id=?").bind(id)
+    .first<{ id: number; content_revision: number }>();
+  const changed = changedField === "primary" ? { ...source, original_text: "new source awaiting its snapshot" }
+    : { ...source, context_text: "new context awaiting its snapshot" };
+  expect((await request(`enrichment/jobs/${id}/source`, { lease_token, source: changed })).status).toBe(200);
+  for (let poll = 0; poll < 8; poll++) {
+    expect((await request("enrichment/classifications/claim", v2Caps)).status).toBe(204);
+  }
+  const waiting = await env.DB.prepare("SELECT status,attempts,lease_token FROM classification_jobs WHERE link_id=?").bind(id).first();
+  expect(waiting).toEqual({ status: "pending", attempts: 0, lease_token: null });
+  expect((await request(`v2/links/${id}/evidence`, { snapshot: {
+    blocks: [{ id: "primary", role: "primary", text: changed.original_text },
+      { id: "context", role: "legacy_unknown", text: changed.context_text }],
+    fetched_at: "2026-09-22T00:00:00Z", retrieval: "manual", truncation: { truncated: false }
+  } })).status).toBe(200);
+  const claimed = await request("enrichment/classifications/claim", v2Caps);
+  expect(claimed.status).toBe(200);
+  const job = await claimed.json() as { content_revision: number; evidence_snapshot_id: number; evidence_hash: string; original_text: string };
+  const bound = await env.DB.prepare("SELECT content_revision,content_hash FROM evidence_snapshots WHERE id=?").bind(job.evidence_snapshot_id)
+    .first<{ content_revision: number; content_hash: string }>();
+  expect(job.content_revision).toBe(bound!.content_revision);
+  expect(job.content_revision).toBeGreaterThan(prior!.content_revision);
+  expect(job.evidence_snapshot_id).not.toBe(prior!.id);
+  expect(job.evidence_hash).toBe(bound!.content_hash);
+  expect(job.original_text).toBe(changed.original_text);
+});
+
+it("R3-02: a snapshot with the current revision but another primary cannot be claimed", async () => {
+  const { id } = await setup();
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
+  expect((await request(`v2/links/${id}/evidence`, { snapshot: {
+    blocks: [{ id: "primary", role: "primary", text: "unrelated primary text" }],
+    fetched_at: "2026-09-22T00:00:00Z", retrieval: "manual", truncation: { truncated: false }
+  } })).status).toBe(200);
+  expect((await request("enrichment/classifications/claim", v2Caps)).status).toBe(204);
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+});
+
 async function claim() {
   const response = await request("enrichment/classifications/claim", settings);
   expect(response.status).toBe(200);
-  return response.json() as Promise<{ id: number; lease_token: string; revision: number; original_text: string; context_text: string }>;
+  return response.json() as Promise<{ id: number; lease_token: string; revision: number; target_generation: number; spec_id: string; original_text: string; context_text: string }>;
 }
 function completion(job: { lease_token: string; revision: number }) {
   return { ...job, result: { model: "jev-pinned", policy_version: settings.policy_version, answers: {}, usage: { input_tokens: 10, output_tokens: 5 },
@@ -51,6 +102,28 @@ it("persists source before reading succeeds and classifies independently", async
   expect((await request("enrichment/classifications/claim", settings)).status).toBe(204);
 });
 
+it("adds the shared gate without changing historical classification leases", async () => {
+  await reset();
+  const boundary = env.TEST_MIGRATIONS.findIndex((migration) => migration.name.startsWith("0046_"));
+  expect(boundary).toBeGreaterThan(0);
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.slice(0, boundary));
+  await env.DB.prepare(`INSERT INTO links(id,url,note,created_at,original_text)
+    VALUES (77,'https://x.com/a/status/77','','2026-09-28','historical source')`).run();
+  await env.DB.prepare("INSERT OR IGNORE INTO classification_jobs(link_id) VALUES (77)").run();
+  await env.DB.prepare(`UPDATE classification_jobs SET status='processing',attempts=2,
+    lease_token='historical-lease',lease_until='2026-10-01T00:00:00.000Z' WHERE link_id=77`).run();
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.slice(boundary));
+  expect(await env.DB.prepare(`SELECT status,attempts,lease_token,component_epoch FROM classification_jobs
+    WHERE link_id=77`).first()).toEqual({ status: "processing", attempts: 2,
+    lease_token: "historical-lease", component_epoch: 0 });
+  expect(await env.DB.prepare(`SELECT component,state,epoch FROM enrichment_component_gates ORDER BY component`).all())
+    .toMatchObject({ results: [
+      { component: "classification", state: "closed", epoch: 0 },
+      { component: "reading", state: "closed", epoch: 0 },
+      { component: "source", state: "closed", epoch: 0 }
+    ] });
+});
+
 it("keeps human curation and stored reading aids when Jev is rerun", async () => {
   const { id, lease_token, source } = await setup();
   expect((await request(`enrichment/jobs/${id}/complete`, { lease_token, original_text: source.original_text,
@@ -71,9 +144,12 @@ it("rejects old classifications after source or note changes", async () => {
   expect((await request(`enrichment/classifications/${id}/complete`, completion(old))).status).toBe(409);
   const current = await claim();
   expect(current.revision).toBeGreaterThan(old.revision);
+  // NOTE: a note is a personal annotation. It must not discard the stored
+  // source snapshot or trigger a refetch (B01-T07), but it does still invalidate
+  // a completion computed against the previous job revision.
   expect((await request(`links/${id}`, { note: "changed" }, "PATCH", "app")).status).toBe(200);
   expect((await request(`enrichment/classifications/${id}/complete`, completion(current))).status).toBe(409);
-  expect((await request(`enrichment/jobs/${id}/source`, undefined, "GET")).status).toBe(204);
+  expect((await request(`enrichment/jobs/${id}/source`, undefined, "GET")).status).toBe(200);
 });
 
 it("backs off classification failures without touching retrieval and allows explicit retry", async () => {
@@ -89,11 +165,215 @@ it("backs off classification failures without touching retrieval and allows expl
   expect((await request(`enrichment/classifications/${id}/complete`, completion(job))).status).toBe(409);
 });
 
+it.each([[480_000, 480_000], [86_400_000, 600_000]])(
+  "persists bounded provider retry hint %d ms without consuming another lease", async (hint, expected) => {
+    const { id } = await setup();
+    const job = await claim();
+    const started = Date.now();
+    expect((await request(`enrichment/classifications/${id}/fail`, {
+      ...job, error: "HTTP 529", retry_after_ms: hint
+    })).status).toBe(200);
+    const row = await env.DB.prepare("SELECT status,attempts,next_retry_at FROM classification_jobs WHERE link_id=?")
+      .bind(id).first<{ status: string; attempts: number; next_retry_at: string }>();
+    const delay = Date.parse(row!.next_retry_at) - started;
+    expect(row).toMatchObject({ status: "failed", attempts: 1 });
+    expect(delay).toBeGreaterThanOrEqual(expected);
+    expect(delay).toBeLessThan(expected + 5000);
+    expect((await request("enrichment/classifications/claim", settings)).status).toBe(204);
+  }
+);
+
+it("adds bounded jitter to a durable classification retry without a provider hint", async () => {
+  const { id } = await setup();
+  const job = await claim();
+  const started = Date.now();
+  expect((await request(`enrichment/classifications/${id}/fail`, { ...job, error: "temporary transport failure" })).status)
+    .toBe(200);
+  const nextRetryAt = await env.DB.prepare("SELECT next_retry_at FROM classification_jobs WHERE link_id=?")
+    .bind(id).first<string>("next_retry_at");
+  const delay = Date.parse(nextRetryAt!) - started;
+  expect(delay).toBeGreaterThanOrEqual(60_000);
+  expect(delay).toBeLessThan(75_000);
+});
+
+it("rejects invalid retry hints before changing a classification lease", async () => {
+  const { id } = await setup();
+  const job = await claim();
+  for (const hint of [-1, "60000", 1.5]) {
+    expect((await request(`enrichment/classifications/${id}/fail`, {
+      ...job, error: "HTTP 529", retry_after_ms: hint
+    })).status).toBe(400);
+  }
+  expect((await request(`enrichment/classifications/${id}/fail`, {
+    ...job, error: "HTTP 529", component_fault: "untrusted_reason"
+  })).status).toBe(400);
+  expect(await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first("status"))
+    .toBe("processing");
+});
+
+it("shares provider cooldown across jobs and grants only one half-open probe", async () => {
+  const first = await setup("https://x.com/a/status/501");
+  const second = await setup("https://x.com/a/status/502");
+  const third = await setup("https://x.com/a/status/503");
+  const failed = await claim();
+  expect(failed.id).toBe(first.id);
+  expect((await request(`enrichment/classifications/${failed.id}/fail`, {
+    ...failed, error: "HTTP 529", retry_after_ms: 480_000, component_fault: "provider_transient"
+  })).status).toBe(200);
+  const gate = await env.DB.prepare(`SELECT state,epoch,failures,retry_at,probe_token FROM enrichment_component_gates
+    WHERE component='classification'`).first<{ state: string; epoch: number; failures: number; retry_at: string; probe_token: string | null }>();
+  expect(gate).toMatchObject({ state: "open", epoch: 1, failures: 1, probe_token: null });
+  expect(Date.parse(gate!.retry_at) - Date.now()).toBeGreaterThan(470_000);
+  const paused = await request("enrichment/classifications/claim", settings);
+  expect(paused.status).toBe(503);
+  expect(await paused.json()).toMatchObject({ error: "component_paused" });
+  const sourceCreate = await request("links", { url: "https://x.com/a/status/504" }, "POST", "app");
+  const sourceID = (await sourceCreate.json() as { id: number }).id;
+  expect((await request(`enrichment/jobs/${sourceID}/claim`)).status).toBe(200);
+  for (const id of [second.id, third.id]) {
+    expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+  }
+  await env.DB.prepare(`UPDATE enrichment_component_gates SET retry_at='2000-01-01T00:00:00.000Z'
+    WHERE component='classification'`).run();
+  const outcomes = await Promise.all([request("enrichment/classifications/claim", settings),
+    request("enrichment/classifications/claim", settings)]);
+  expect(outcomes.map((response) => response.status).sort()).toEqual([200, 503]);
+  const probe = await outcomes.find((response) => response.status === 200)!.json() as
+    { id: number; lease_token: string; revision: number; component_probe: boolean };
+  expect(probe.component_probe).toBe(true);
+  expect([second.id, third.id]).toContain(probe.id);
+  expect(await env.DB.prepare(`SELECT probe_token FROM enrichment_component_gates
+    WHERE component='classification'`).first("probe_token")).toBe(probe.lease_token);
+  const probeUntil = await env.DB.prepare(`SELECT probe_until FROM enrichment_component_gates
+    WHERE component='classification'`).first("probe_until") as string;
+  expect(Date.parse(probeUntil) - Date.now()).toBeGreaterThan(5 * 60_000);
+  expect((await request(`enrichment/classifications/${probe.id}/complete`, completion(probe))).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state FROM enrichment_component_gates
+    WHERE component='classification'`).first("state")).toBe("closed");
+  const remaining = await claim();
+  expect(remaining.id).not.toBe(probe.id);
+  expect([second.id, third.id]).toContain(remaining.id);
+});
+
+it("lets an old Go client recover one probe without new response fields", async () => {
+  await setup("https://x.com/a/status/541");
+  await setup("https://x.com/a/status/542");
+  const pending = await setup("https://x.com/a/status/543");
+  const stillPending = await setup("https://x.com/a/status/544");
+  const oldResponse = await request("enrichment/classifications/claim", settings, "POST", "internal", false);
+  expect(oldResponse.status).toBe(200);
+  const oldJob = await oldResponse.json() as Record<string, unknown>;
+  expect(oldJob).not.toHaveProperty("component_epoch");
+  expect(oldJob).not.toHaveProperty("component_probe");
+  const failed = await claim();
+  expect((await request(`enrichment/classifications/${failed.id}/fail`, {
+    ...failed, error: "HTTP 529", component_fault: "provider_transient"
+  })).status).toBe(200);
+  await env.DB.prepare("UPDATE enrichment_component_gates SET retry_at='2000-01-01' WHERE component='classification'").run();
+  const oldProbe = await request("enrichment/classifications/claim", settings, "POST", "internal", false);
+  expect(oldProbe.status).toBe(200);
+  const oldProbeJob = await oldProbe.json() as { id: number; lease_token: string; revision: number };
+  expect(oldProbeJob.id).toBe(pending.id);
+  expect(oldProbeJob).not.toHaveProperty("component_epoch");
+  expect(oldProbeJob).not.toHaveProperty("component_probe");
+  expect((await request("enrichment/classifications/claim", settings)).status).toBe(503);
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?")
+    .bind(stillPending.id).first("attempts")).toBe(0);
+  expect((await request(`enrichment/classifications/${oldProbeJob.id}/fail`, {
+    ...oldProbeJob, error: "old client saw HTTP 529"
+  })).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state,epoch,failures,reason FROM enrichment_component_gates
+    WHERE component='classification'`).first()).toMatchObject({
+    state: "open", epoch: 2, failures: 2, reason: "probe_failed"
+  });
+  await env.DB.prepare("UPDATE enrichment_component_gates SET retry_at='2000-01-01' WHERE component='classification'").run();
+  const recovered = await request("enrichment/classifications/claim", settings, "POST", "internal", false);
+  expect(recovered.status).toBe(200);
+  const recoveredJob = await recovered.json() as { id: number; lease_token: string; revision: number };
+  expect(recoveredJob.id).toBe(stillPending.id);
+  expect((await request(`enrichment/classifications/${recoveredJob.id}/complete`, completion(recoveredJob))).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state FROM enrichment_component_gates
+    WHERE component='classification'`).first("state")).toBe("closed");
+});
+
+it("keeps a provider fault after an older in-flight job succeeds", async () => {
+  await setup("https://x.com/a/status/511");
+  await setup("https://x.com/a/status/512");
+  const first = await claim();
+  const oldInFlight = await claim();
+  expect((await request(`enrichment/classifications/${first.id}/fail`, {
+    ...first, error: "HTTP 529", component_fault: "provider_transient"
+  })).status).toBe(200);
+  expect((await request(`enrichment/classifications/${oldInFlight.id}/complete`, completion(oldInFlight))).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state FROM enrichment_component_gates
+    WHERE component='classification'`).first("state")).toBe("open");
+});
+
+it("leaves an empty half-open queue faulted and recovers an abandoned probe", async () => {
+  await setup("https://x.com/a/status/521");
+  const first = await claim();
+  expect((await request(`enrichment/classifications/${first.id}/fail`, {
+    ...first, error: "HTTP 529", component_fault: "provider_transient"
+  })).status).toBe(200);
+  await env.DB.prepare("UPDATE enrichment_component_gates SET retry_at='2000-01-01' WHERE component='classification'").run();
+  expect((await request("enrichment/classifications/claim", settings)).status).toBe(204);
+  expect(await env.DB.prepare(`SELECT state FROM enrichment_component_gates
+    WHERE component='classification'`).first("state")).toBe("open");
+  await setup("https://x.com/a/status/522");
+  await setup("https://x.com/a/status/523");
+  const abandoned = await claim();
+  await env.DB.prepare("UPDATE enrichment_component_gates SET probe_until='2000-01-01' WHERE component='classification'").run();
+  const replacement = await claim();
+  expect(replacement.id).not.toBe(abandoned.id);
+  expect((await request(`enrichment/classifications/${abandoned.id}/complete`, completion(abandoned))).status).toBe(200);
+  expect(await env.DB.prepare(`SELECT state,probe_token FROM enrichment_component_gates
+    WHERE component='classification'`).first()).toMatchObject({ state: "probing", probe_token: replacement.lease_token });
+  expect((await request(`enrichment/classifications/${replacement.id}/fail`, {
+    ...replacement, error: "HTTP 529", component_fault: "provider_transient"
+  })).status).toBe(200);
+  const extended = await env.DB.prepare(`SELECT state,epoch,failures,retry_at FROM enrichment_component_gates
+    WHERE component='classification'`).first<{ state: string; epoch: number; failures: number; retry_at: string }>();
+  expect(extended).toMatchObject({ state: "open", epoch: 2, failures: 2 });
+  expect(Date.parse(extended!.retry_at) - Date.now()).toBeGreaterThan(55_000);
+});
+
+it("exports only fixed gate transitions through the existing log switch", async () => {
+  await setup("https://x.com/a/status/531");
+  await setup("https://x.com/a/status/532");
+  expect((await request("internal/observability", { version: 1, logs: "basic" })).status).toBe(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const first = await claim();
+    expect((await request(`enrichment/classifications/${first.id}/fail`, {
+      ...first, error: "private-provider-body", component_fault: "provider_transient"
+    })).status).toBe(200);
+    await env.DB.prepare("UPDATE enrichment_component_gates SET retry_at='2000-01-01' WHERE component='classification'").run();
+    const probe = await claim();
+    expect((await request(`enrichment/classifications/${probe.id}/complete`, completion(probe))).status).toBe(200);
+    const events = log.mock.calls.map(([entry]) => JSON.parse(String(entry)) as Record<string, unknown>)
+      .filter((entry) => entry.kind === "component_gate");
+    expect(events.map((entry) => entry.action)).toEqual(["opened", "probe_started", "closed"]);
+    expect(events.every((entry) => entry.component === "classification" && entry.config_version === 1)).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("private-provider-body");
+    expect(JSON.stringify(events)).not.toContain(first.lease_token);
+    expect((await request("internal/observability", { version: 2, logs: "off" })).status).toBe(200);
+    const count = log.mock.calls.length;
+    expect((await request("enrichment/classifications/claim", settings)).status).toBe(204);
+    expect(log.mock.calls.length).toBe(count);
+  } finally {
+    log.mockRestore();
+  }
+});
+
 it("enforces lease expiry, taxonomy version and internal authentication", async () => {
   const { id, lease_token, source } = await setup();
   expect((await request("enrichment/classifications/claim", settings, "POST", "app")).status).toBe(401);
   expect((await request(`enrichment/jobs/${id}/source`, undefined, "GET", "app")).status).toBe(401);
-  expect((await request("enrichment/classifications/claim", { ...settings, taxonomy_version: "old" })).status).toBe(400);
+  // A consumer compiled against a different taxonomy is a capability mismatch,
+  // not a per-job failure: it must not drain the queue.
+  const mismatch = await request("enrichment/classifications/claim", { ...settings, taxonomy_version: "old" });
+  expect(mismatch.status).toBe(409);
+  expect((await mismatch.json() as { error: string }).error).toBe("capability_mismatch");
   const job = await claim();
   await env.DB.prepare("UPDATE classification_jobs SET lease_until='2000-01-01' WHERE link_id=?").bind(id).run();
   expect((await request(`enrichment/classifications/${id}/complete`, completion(job))).status).toBe(409);
@@ -103,8 +383,259 @@ it("enforces lease expiry, taxonomy version and internal authentication", async 
 
 it("reclassifies enrolled sources after policy changes without grabbing active leases", async () => {
   const { id } = await setup();const job = await claim();
+  // A consumer announcing a different policy no longer redefines the server
+  // target. Under the legacy target it simply finds nothing new to claim, and
+  // the existing lease completes normally.
   const next = { ...settings, policy_version: "jev-tags-v2" };
   expect((await request("enrichment/classifications/claim", next)).status).toBe(204);
   expect((await request(`enrichment/classifications/${id}/complete`, completion(job))).status).toBe(200);
-  expect((await request("enrichment/classifications/claim", next)).status).toBe(200);
+  expect((await request("enrichment/classifications/claim", next)).status).toBe(204);
+});
+
+// --- B01 acceptance: authoritative target, version competition, idempotency ---
+
+const v2Target = {
+  spec_id: "classify-v2",
+  spec_hash: "sha256:classify-v2",
+  taxonomy_version: "2026-09-20.1",
+  policy_version: "jev-tags-v2",
+  requested_model: "jev-pinned-1",
+  protocol: "v2"
+};
+const v2Caps = {
+  protocol: "v2",
+  spec_ids: ["classify-v2"],
+  taxonomy_versions: ["2026-09-20.1"],
+  policy_versions: ["jev-tags-v2"],
+  models: ["jev-pinned-1"]
+};
+
+async function switchTarget(body: Record<string, unknown>) {
+  return request("enrichment/classifications/target", body);
+}
+
+async function registeredSpecHash(specID: string): Promise<string> {
+  const response = await request("v2/question-specs", { spec_id: specID, spec_version: 1, questions: {} });
+  expect(response.status).toBe(200);
+  return (await response.json() as { spec_hash: string }).spec_hash;
+}
+
+async function registeredV2Target() {
+  return { ...v2Target, spec_hash: await registeredSpecHash(v2Target.spec_id) };
+}
+
+it("rejects an unregistered or mismatched v2 spec before changing the target", async () => {
+  const { id } = await setup();
+  const unregistered = await switchTarget(v2Target);
+  expect(unregistered.status).toBe(400);
+  expect((await unregistered.json() as { error: string }).error).toBe("invalid_classification_config");
+  const valid = await registeredV2Target();
+  expect((await switchTarget({ ...valid, spec_hash: "wrong" })).status).toBe(400);
+  const target = await (await request("enrichment/classifications/target", undefined, "GET")).json() as { target: { generation: number } };
+  expect(target.target.generation).toBe(0);
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+  expect((await switchTarget(valid)).status).toBe(200);
+});
+
+it("pauses a corrupted active target without leasing or burning an attempt", async () => {
+  const { id } = await setup();
+  const valid = await registeredV2Target();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO classification_targets(generation,spec_id,spec_hash,taxonomy_version,
+      policy_version,requested_model,protocol,created_at) VALUES (1,?,?,?,?,?,?,'now')`)
+      .bind(valid.spec_id, "wrong", valid.taxonomy_version, valid.policy_version, valid.requested_model, "v2"),
+    env.DB.prepare("UPDATE classification_target_state SET generation=1 WHERE id=1")
+  ]);
+  const handshake = await request("enrichment/classifications/target?protocol=v2&spec_ids=classify-v2&taxonomy_versions=2026-09-20.1&policy_versions=jev-tags-v2&models=jev-pinned-1", undefined, "GET");
+  expect((await handshake.json() as { supported: boolean }).supported).toBe(false);
+  const claim = await request("enrichment/classifications/claim", v2Caps);
+  expect((await claim.json() as { error: string }).error).toBe("configuration_error");
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+  expect((await switchTarget(valid)).status).toBe(200);
+});
+
+it("rejects a target switch between handshake and claim before leasing", async () => {
+  const { id } = await setup();
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
+  const stale = await request("enrichment/classifications/claim", { ...v2Caps, expected_generation: 0 });
+  expect((await stale.json() as { error: string }).error).toBe("target_changed");
+  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);
+  expect((await request("enrichment/classifications/claim", { ...v2Caps, expected_generation: 1 })).status).toBe(200);
+});
+
+it("does not re-claim a completed target across A/B policy alternation (20 rounds)", async () => {
+  const { id, lease_token, source } = await setup();
+  const a = { ...settings, policy_version: "policy-a" };
+  const b = { ...settings, policy_version: "policy-b" };
+  const job = await claim();
+  expect((await request(`enrichment/classifications/${id}/complete`, completion(job))).status).toBe(200);
+  for (let round = 0; round < 20; round++) {
+    expect((await request("enrichment/classifications/claim", round % 2 ? a : b)).status).toBe(204);
+  }
+  const row = await env.DB.prepare("SELECT status, attempts FROM classification_jobs WHERE link_id=?").bind(id).first<any>();
+  expect(row.status).toBe("completed");
+  expect(row.attempts).toBe(1);
+  // The stored source survives the alternation untouched.
+  expect(await (await request(`enrichment/jobs/${id}/source`, undefined, "GET")).json()).toEqual(source);
+  void lease_token;
+});
+
+it("rejects a v2 claim whose declared capabilities do not match the target", async () => {
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
+  const mismatch = await request("enrichment/classifications/claim", { ...v2Caps, models: ["other-model"] });
+  expect(mismatch.status).toBe(409);
+  expect((await mismatch.json() as { error: string }).error).toBe("capability_mismatch");
+  // A legacy consumer cannot grab a v2 job either.
+  const legacy = await request("enrichment/classifications/claim", settings);
+  expect(legacy.status).toBe(409);
+  expect((await legacy.json() as { error: string }).error).toBe("capability_mismatch");
+});
+
+it("only hands v2 jobs to a matching consumer and migrates stale generations", async () => {
+  const { id } = await setup();
+  // Job was enrolled under the legacy generation.
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
+  const before = await env.DB.prepare("SELECT target_generation FROM classification_jobs WHERE link_id=?").bind(id).first<any>();
+  expect(before.target_generation).toBe(0);
+  const claimed = await request("enrichment/classifications/claim", v2Caps);
+  expect(claimed.status).toBe(200);
+  const job = await claimed.json() as { target_generation: number; spec_id: string; lease_token: string; revision: number };
+  expect(job.target_generation).toBe(1);
+  expect(job.spec_id).toBe("classify-v2");
+});
+
+it("binds a v2 claim to the server target and completes it (F02 regression)", async () => {
+  const { id, source } = await setup();
+  const target = {
+    spec_id: "classify-v1",
+    spec_hash: await registeredSpecHash("classify-v1"),
+    taxonomy_version: taxonomy.version,
+    policy_version: "jev-policy-v2",
+    requested_model: "jev-latest",
+    protocol: "v2"
+  };
+  expect((await switchTarget(target)).status).toBe(200);
+  const caps = {
+    protocol: "v2",
+    spec_ids: ["classify-v1"],
+    taxonomy_versions: [taxonomy.version],
+    policy_versions: ["jev-policy-v2"],
+    models: ["jev-latest"]
+  };
+  const response = await request("enrichment/classifications/claim", caps);
+  expect(response.status).toBe(200);
+  const job = await response.json() as { id: number; lease_token: string; revision: number; target_generation: number; spec_id: string; original_text: string };
+  expect(job.id).toBe(id);
+  expect(job.target_generation).toBe(1);
+  expect(job.spec_id).toBe("classify-v1");
+  expect(job.original_text).toBe(source.original_text);
+  // No column may contain the literal "undefined": the old code read singular
+  // policy_version/model fields out of the v2 plural capability body.
+  const bound = await env.DB.prepare(
+    "SELECT taxonomy_version, policy_version, requested_model, spec_id FROM classification_jobs WHERE link_id=?"
+  ).bind(id).first<any>();
+  expect(bound).toEqual({
+    taxonomy_version: taxonomy.version,
+    policy_version: "jev-policy-v2",
+    requested_model: "jev-latest",
+    spec_id: "classify-v1"
+  });
+  const body = {
+    ...job,
+    result: {
+      model: "jev-latest", policy_version: "jev-policy-v2",
+      answers: { topic_llm: { type: "noul", noul: 0.93 } },
+      usage: { input_tokens: 12, output_tokens: 4 },
+      classification: { topics: ["llm"], form: "method", use: "try", uncertainty: false,
+        taxonomy_version: taxonomy.version, why_suggestion: "", entities: [], discarded_tags: [] }
+    }
+  };
+  const complete = await request(`enrichment/classifications/${id}/complete`, body);
+  expect(complete.status).toBe(200);
+  const row = await env.DB.prepare("SELECT classification, original_text FROM links WHERE id=?").bind(id).first<any>();
+  expect(JSON.parse(row.classification).topics).toEqual(["llm"]);
+  expect(row.original_text).toBe(source.original_text);
+  const jobs = await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first<any>();
+  expect(jobs.status).toBe("completed");
+  // The queue stays empty afterwards: the completed v2 job is not re-armed.
+  expect((await request("enrichment/classifications/claim", caps)).status).toBe(204);
+});
+
+it("guards completion against a target switch (no stale overwrite)", async () => {
+  const { id } = await setup();
+  const job = await claim();
+  // Switch to v2 while the legacy completion is in flight.
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
+  const stale = await request(`enrichment/classifications/${id}/complete`, completion(job));
+  expect(stale.status).toBe(409);
+  expect((await stale.json() as { error: string }).error).toBe("target_changed");
+  const row = await env.DB.prepare("SELECT classification FROM links WHERE id=?").bind(id).first<any>();
+  expect(row.classification).toBeNull();
+});
+
+it("rolls a target back with a new generation without rewinding", async () => {
+  expect((await switchTarget(await registeredV2Target())).status).toBe(200);
+  const rollback = await switchTarget({ ...v2Target, spec_id: "classify-v1-rollback", spec_hash: "sha256:classify-v1", policy_version: "jev-tags-v1", protocol: "legacy" });
+  expect(rollback.status).toBe(200);
+  const body = await rollback.json() as { generation: number };
+  expect(body.generation).toBe(2);
+  const target = await (await request("enrichment/classifications/target", undefined, "GET")).json() as { target: { generation: number; spec_id: string }; supported: boolean };
+  expect(target.target.generation).toBe(2);
+  expect(target.target.spec_id).toBe("classify-v1-rollback");
+});
+
+it("commits a lost completion idempotently by operation key without a second run", async () => {
+  const { id } = await setup();
+  const job = await claim();
+  const body = { ...completion(job), operation_key: "op-1", target_generation: job.target_generation };
+  const first = await request(`enrichment/classifications/${id}/complete`, body);
+  expect(first.status).toBe(200);
+  const row = await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first<any>();
+  expect(row.status).toBe("completed");
+  // Replaying the same operation returns the stored response and does not
+  // double-write.
+  const replay = await request(`enrichment/classifications/${id}/complete`, body);
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toEqual({ id, status: "completed" });
+  // Same key, different payload is a hard conflict.
+  const conflicting = await request(`enrichment/classifications/${id}/complete`, { ...body, result: { ...body.result, model: "different" } });
+  expect(conflicting.status).toBe(409);
+  expect((await conflicting.json() as { error: string }).error).toBe("operation_conflict");
+});
+
+it("keeps the target read and claim guard atomic under concurrent claims", async () => {
+  const { id } = await setup();
+  const [a, b] = await Promise.all([
+    request("enrichment/classifications/claim", settings),
+    request("enrichment/classifications/claim", settings)
+  ]);
+  const granted = [a, b].filter((r) => r.status === 200);
+  expect(granted.length).toBe(1);
+  const leases = await Promise.all(granted.map((r) => r.json() as Promise<{ lease_token: string }>));
+  const rows = await env.DB.prepare("SELECT lease_token FROM classification_jobs WHERE link_id=?").bind(id).all<any>();
+  expect(rows.results.filter((r) => r.lease_token === leases[0].lease_token).length).toBe(1);
+});
+
+it("objective classification rejects personal opposition without side effects", async () => {
+ const {id}=await setup(); const job=await claim(); const body=completion(job);
+ body.result.classification.use="contra";
+ const before=await env.DB.prepare("SELECT classification,curation,personal_revision FROM links WHERE id=?").bind(id).first();
+ expect((await request(`enrichment/classifications/${id}/complete`,body)).status).toBe(400);
+ expect(await env.DB.prepare("SELECT classification,curation,personal_revision FROM links WHERE id=?").bind(id).first()).toEqual(before);
+ expect(await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first("status")).toBe("processing");
+ expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM classification_runs WHERE link_id=?").bind(id).first("n")).toBe(0);
+ expect((await request(`enrichment/classifications/${id}/complete`,completion(job))).status).toBe(200);
+});
+
+it("objective guard preserves explicit human opposition and historical readable values", async () => {
+ const {id}=await setup();
+ const manual={topics:["eng"],form:"case",use:"contra"};
+ expect((await request(`enrichment/jobs/${id}/curation`,{why:"explicit human choice",classification:manual},"PATCH")).status).toBe(200);
+ const job=await claim();
+ expect((await request(`enrichment/classifications/${id}/complete`,completion(job))).status).toBe(200);
+ const row=await env.DB.prepare("SELECT curation,classification FROM links WHERE id=?").bind(id).first<any>();
+ expect(JSON.parse(row.curation)).toEqual(manual);
+ expect(JSON.parse(row.classification).use).toBe("try");
+ const effective=await (await request(`v2/links/${id}/effective`,undefined,"GET")).json() as any;
+ expect(effective.effective.use).toBe("contra");
 });

@@ -1,0 +1,304 @@
+type LogMode = "off" | "basic" | "diagnostic";
+
+interface Policy {
+  version: number;
+  logs: LogMode;
+  fallback_logs: "off" | "basic" | null;
+  diagnostic_until: number | null;
+  // A failed refresh can reuse the last confirmed policy while clearly
+  // reporting that this isolate cannot confirm the current desired version.
+  unavailable?: true;
+}
+
+const OFF: Policy = { version: -1, logs: "off", fallback_logs: null, diagnostic_until: null };
+const CACHE_MS = 30_000;
+const FAILURE_RETRY_MS = 5_000;
+const MAX_BODY_BYTES = 1024;
+const CLOCK_SKEW_MS = 5 * 60_000;
+
+// An isolate reads once on first use. Expired reads share one promise; failures
+// retry soon while the last confirmed policy remains available to the runtime.
+let cache: { policy: Policy; until: number } | undefined;
+let lastConfirmed: Policy | undefined;
+let loading: Promise<Policy> | undefined;
+let generation = 0;
+type LogLane = "request" | "business";
+type LaneCounts = { emitted: number; dropped: number; write_errors: number };
+const emptyCounts = (): LaneCounts => ({ emitted: 0, dropped: 0, write_errors: 0 });
+let logWindow = { minute: -1, request: emptyCounts(), business: emptyCounts() };
+let logTotals = { request: emptyCounts(), business: emptyCounts() };
+
+function effective(policy: Policy): LogMode {
+  if (policy.logs === "diagnostic" && Date.now() >= (policy.diagnostic_until ?? 0)) {
+    return policy.fallback_logs ?? "off";
+  }
+  return policy.logs;
+}
+
+async function load(db: D1Database): Promise<Policy> {
+  const row = await db.prepare(
+    "SELECT version, logs, fallback_logs, diagnostic_until FROM observability_policy WHERE singleton = 1"
+  ).first<Policy>();
+  if (!row || !Number.isSafeInteger(row.version) || !validPolicy(row)) throw new Error("invalid observability policy");
+  return row;
+}
+
+export async function requestPolicy(db: D1Database): Promise<Policy> {
+  if (cache && Date.now() < cache.until) return cache.policy;
+  if (!loading) {
+    const startedAtGeneration = generation;
+    loading = load(db).then((policy) => {
+      if (generation === startedAtGeneration) {
+        lastConfirmed = policy;
+        cache = { policy, until: Date.now() + CACHE_MS };
+      }
+      return cache?.policy ?? policy;
+    }).catch(() => {
+      if (generation === startedAtGeneration) {
+        cache = { policy: lastConfirmed ? { ...lastConfirmed, unavailable: true } : OFF,
+          until: Date.now() + FAILURE_RETRY_MS };
+      }
+      return cache?.policy ?? OFF;
+    }).finally(() => { loading = undefined; });
+  }
+  return loading;
+}
+
+export function policyReadAvailable(policy: Policy): boolean {
+  return policy !== OFF && policy.unavailable !== true;
+}
+
+function validPolicy(value: Policy): boolean {
+  if (!Number.isSafeInteger(value.version) || value.version < -1) return false;
+  if (value.logs === "off" || value.logs === "basic") {
+    return value.fallback_logs === null && value.diagnostic_until === null;
+  }
+  return value.logs === "diagnostic" &&
+    (value.fallback_logs === "off" || value.fallback_logs === "basic") &&
+    Number.isSafeInteger(value.diagnostic_until) && (value.diagnostic_until ?? 0) > 0;
+}
+
+async function limitedJSON(request: Request): Promise<unknown> {
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  let size = 0;
+  const chunks: Uint8Array[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY_BYTES) throw new Error("body too large");
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+  return JSON.parse(new TextDecoder().decode(body));
+}
+
+function parsePublished(value: unknown): Policy | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const fields = Object.keys(value);
+  if (fields.some((key) => !["version", "logs", "fallback_logs", "diagnostic_until"].includes(key))) return null;
+  const object = value as Record<string, unknown>;
+  if (!Object.hasOwn(object, "version") || !Object.hasOwn(object, "logs")) return null;
+  const policy: Policy = {
+    version: object.version as number,
+    logs: object.logs as LogMode,
+    fallback_logs: (object.fallback_logs ?? null) as Policy["fallback_logs"],
+    diagnostic_until: (object.diagnostic_until ?? null) as number | null
+  };
+  // Go limits diagnostics to one hour at creation. Allow bounded clock skew
+  // between Go and Cloudflare; an already expired publication stays expired.
+  return policy.version >= 0 && validPolicy(policy) &&
+    (policy.logs !== "diagnostic" || (policy.diagnostic_until ?? 0) <= Date.now() + 3_600_000 + CLOCK_SKEW_MS)
+    ? policy : null;
+}
+
+function reply(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" }
+  });
+}
+
+export async function publishPolicy(request: Request, db: D1Database): Promise<Response> {
+  let proposed: Policy | null;
+  try { proposed = parsePublished(await limitedJSON(request)); } catch { proposed = null; }
+  if (!proposed) return reply({ error: "invalid_observability_policy" }, 400);
+  try {
+    const result = await db.prepare(`UPDATE observability_policy
+      SET version = ?, logs = ?, fallback_logs = ?, diagnostic_until = ?
+      WHERE singleton = 1 AND version < ?`)
+      .bind(proposed.version, proposed.logs, proposed.fallback_logs, proposed.diagnostic_until, proposed.version)
+      .run();
+    if (result.meta.changes === 1) {
+      generation++;
+      lastConfirmed = proposed;
+      cache = { policy: proposed, until: Date.now() + CACHE_MS };
+      return reply({ version: proposed.version, effective_logs: effective(proposed) }, 200);
+    }
+    const current = await load(db);
+    if (current.version === proposed.version && current.logs === proposed.logs &&
+      current.fallback_logs === proposed.fallback_logs && current.diagnostic_until === proposed.diagnostic_until) {
+      generation++;
+      lastConfirmed = current;
+      cache = { policy: current, until: Date.now() + CACHE_MS };
+      return reply({ version: current.version, effective_logs: effective(current) }, 200);
+    }
+    return reply({ error: "observability_version_conflict", version: current.version }, 409);
+  } catch {
+    return reply({ error: "observability_unavailable" }, 503);
+  }
+}
+
+function routeTemplate(path: string): string {
+  if (path === "/api/links" || path === "/api/enrichment/jobs" ||
+    path === "/api/enrichment/overview" || path === "/health") return path;
+  if (path === "/api/v2/links/effective-batch") return path;
+  if (path === "/api/enrichment/provider-attempts") return path;
+  if (["reserve", "settle", "authorize-fallback", "summary", "reconcile", "inspect",
+    "recover-source", "recover-reading"].some((action) =>
+    path === `/api/enrichment/provider-attempts/${action}`)) return path;
+  if (/^\/api\/links\/\d+$/.test(path)) return "/api/links/:id";
+  if (/^\/api\/links\/\d+\/curation$/.test(path)) return "/api/links/:id/curation";
+  if (/^\/api\/enrichment\/jobs\/\d+\/[a-z-]+$/.test(path)) return "/api/enrichment/jobs/:id/:action";
+  if (/^\/api\/enrichment\/jobs\/\d+$/.test(path)) return "/api/enrichment/jobs/:id";
+  if (/^\/api\/v2\/links\/\d+\/[a-z-]+$/.test(path)) return "/api/v2/links/:id/:action";
+  if (/^\/api\/bookmarks\/\d+\/[a-z-]+$/.test(path)) return "/api/bookmarks/:id/:action";
+  return "other";
+}
+
+export type RequestD1Stats = {
+  sql_count: 1;
+  rows_read: number;
+  rows_written: number;
+} & ({ query: "overview_aggregate"; scope: "aggregate_only" } |
+  { query: "effective_batch"; scope: "effective_view_only" });
+
+export type ProviderRecoveryEvent = {
+  stage: "source" | "reading";
+  outcome: "committed" | "replay" | "rejected" | "failed";
+  status: number;
+};
+
+export type WorkerBusinessEvent =
+  | { kind: "component_gate"; component: "source" | "reading" | "classification";
+      action: "opened" | "probe_started" | "closed" }
+  | { kind: "stage_lease"; action: "local_defer" | "fault_without_reservation";
+      stage: "source" | "reading"; outcome: "deferred" | "refused"; status: 200 | 409 }
+  | { kind: "manual_request"; action: "source" | "process";
+      outcome: "accepted" | "replay" | "rejected" | "failed"; status: number }
+  | { kind: "source_claim"; origin: "scheduled" | "by_id";
+      outcome: "claimed"; status: 200 }
+  | { kind: "enrichment_commit"; stage: "source" | "complete";
+      outcome: "stored" | "committed" | "replay" | "receipt_confirmed" | "rejected" | "failed";
+      status: number }
+  | { kind: "provider_attempt"; action: "reserve" | "settle" | "authorize_fallback" | "reconcile";
+      stage: "fetch" | "reading" | "canary" | "unknown";
+      outcome: "reserved" | "already_reserved" | "responded" | "authorized" |
+        "confirmed_not_billed" | "replay" | "rejected" | "failed";
+      status: number; provider_status?: number; response_id_present?: boolean;
+      reason?: "operation_conflict" | "budget_exhausted" | "component_paused" | "lease_conflict" | "invalid_request" |
+        "not_found" | "attempt_not_eligible" | "unclassified" };
+
+function writeLog(lane: LogLane, value: object): void {
+  try {
+    console.log(JSON.stringify({ time_utc: new Date().toISOString(), service: "cairn-share-worker", ...value }));
+  } catch {
+    logWindow[lane].write_errors++;
+    logTotals[lane].write_errors++;
+  }
+}
+
+function takeLogSlot(mode: Exclude<LogMode, "off">, lane: LogLane): boolean {
+  const minute = Math.floor(Date.now() / 60_000);
+  if (minute !== logWindow.minute) {
+    for (const previousLane of ["request", "business"] as const) {
+      const dropped = logWindow[previousLane].dropped;
+      if (dropped > 0) {
+        writeLog(previousLane, { schema: 1, kind: "worker_log_drops", lane: previousLane,
+          count: dropped, minute: logWindow.minute });
+      }
+    }
+    logWindow = { minute, request: emptyCounts(), business: emptyCounts() };
+  }
+  // Request summaries cannot consume the capacity reserved for lifecycle and
+  // provider events. Both lanes remain bounded independently per isolate.
+  const limit = mode === "diagnostic" ? 600 : 120;
+  if (logWindow[lane].emitted >= limit) {
+    logWindow[lane].dropped++;
+    logTotals[lane].dropped++;
+    // The first loss is visible even if the isolate receives no next-minute
+    // request. Later reports grow logarithmically under sustained overload.
+    const dropped = logWindow[lane].dropped;
+    if ((dropped & (dropped - 1)) === 0) {
+      writeLog(lane, { schema: 1, kind: "worker_log_drops", lane,
+        count: dropped, minute });
+    }
+    return false;
+  }
+  logWindow[lane].emitted++;
+  logTotals[lane].emitted++;
+  return true;
+}
+
+// This reports only the isolate that answered. A collector must aggregate
+// across isolates; D1 receipts remain authoritative for paid operations.
+export function logExporterStatus(policy: Policy): object {
+  return { scope: "isolate", config_version: policy.version,
+    effective_logs: effective(policy), policy_available: policyReadAvailable(policy),
+    collector_delivery: "unknown", minute: logWindow.minute,
+    window: logWindow, totals: logTotals };
+}
+
+// Recovery receipts in D1 remain authoritative. This export is deliberately
+// free of operation/link IDs because platform logs cannot be deleted by link.
+export function emitProviderRecovery(policy: Policy, event: ProviderRecoveryEvent | undefined): void {
+  const mode = effective(policy);
+  if (!event || mode === "off" || !takeLogSlot(mode, "business")) return;
+  writeLog("business", { schema: 1, kind: "provider_recovery", config_version: policy.version,
+    stage: event.stage, outcome: event.outcome, status: event.status });
+}
+
+export function emitWorkerBusiness(policy: Policy, event: WorkerBusinessEvent): void {
+  const mode = effective(policy);
+  if (mode === "off" || !takeLogSlot(mode, "business")) return;
+  // The lifecycle facts carry no private IDs. Durable operation receipts and
+  // leases remain the authoritative, deletable record for an individual link.
+  writeLog("business", { schema: 1, config_version: policy.version, ...event });
+}
+
+export function emitRequest(policy: Policy, request: Request, response: Response | null, durationMS: number,
+  d1Stats?: RequestD1Stats): void {
+  const mode = effective(policy);
+  if (mode === "off" || (mode === "basic" && response !== null && response.status < 400 && request.method === "GET")) return;
+  const path = new URL(request.url).pathname;
+  if (path === "/api/internal/observability") return;
+  if (!takeLogSlot(mode, "request")) return;
+  const method = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(request.method) ? request.method : "OTHER";
+  const contentLength = response?.headers.get("content-length");
+  const responseBytes = contentLength && /^\d{1,12}$/.test(contentLength) ? Number(contentLength) : null;
+  const headerCacheState = response?.headers.get("X-Cairn-Cache");
+  const cacheState = headerCacheState === "HIT" || headerCacheState === "MISS" || headerCacheState === "BYPASS"
+    ? headerCacheState : null;
+  // Platform logs cannot promise deletion by bookmark. Never include raw URL,
+  // IDs, request/response bodies, SQL text, tokens or trace identifiers here.
+  writeLog("request", { schema: 1, kind: "worker_request", config_version: policy.version,
+    route: routeTemplate(path), method, status: response?.status ?? null,
+    error_type: response === null ? "unhandled" : response.status >= 400 ? `http_${response.status}` : null,
+    duration_ms: Math.round(durationMS), response_bytes: responseBytes, cache_state: cacheState,
+    d1_stats: d1Stats ?? "unavailable" });
+}
+
+export function resetObservabilityCacheForTest(): void {
+  generation++;
+  cache = undefined;
+  lastConfirmed = undefined;
+  loading = undefined;
+  logWindow = { minute: -1, request: emptyCounts(), business: emptyCounts() };
+  logTotals = { request: emptyCounts(), business: emptyCounts() };
+}

@@ -30,6 +30,9 @@ internal data class MultidimensionalSelection(
     val unknownResetFields: Set<String> = emptySet(),
     val state: SelectionState? = null,
     val pendingFields: Set<String> = emptySet(),
+    val resourceKinds: List<String> = emptyList(),
+    val decisionId: Long? = null,
+    val contentRevision: Long? = null,
 )
 
 internal sealed interface V2Result<out T> {
@@ -60,6 +63,7 @@ internal class V2CurationClient(
         connection.readTimeout = readTimeoutMillis
         connection.instanceFollowRedirects = false
         connection.setRequestProperty("Accept", "application/json")
+        connection.setRequestProperty("X-Cairn-Tag-System", "1")
         connection.setRequestProperty("User-Agent", userAgent)
         if (apiToken.isNotBlank()) {
             connection.setRequestProperty("Authorization", "Bearer ${apiToken.trim()}")
@@ -67,6 +71,13 @@ internal class V2CurationClient(
     }
 
     fun loadSelection(id: Int, apiToken: String): V2Result<MultidimensionalSelection> {
+        when (val tags = loadTagSnapshot(id, apiToken)) {
+            is V2Result.Loaded -> return if ((tags.value.opt("id") as? Number)?.toLong() == id.toLong())
+                decodeSelection(tags.value) else V2Result.Failed(FailureKind.Server)
+            is V2Result.Failed -> return tags
+            is V2Result.Conflict -> return tags
+            V2Result.Unsupported -> Unit
+        }
         val connection = endpoint("/api/bookmarks/$id/v2-selection?include_automatic=1&include_state=1").openConnection() as HttpURLConnection
         return try {
             configure(connection, "GET", apiToken)
@@ -92,6 +103,14 @@ internal class V2CurationClient(
      * empty selection is distinct from resetting to the automatic suggestion.
      */
     fun applyOverride(id: Int, override: FieldOverride, apiToken: String): V2Result<JSONObject> {
+        // Prefer the incremental tag contract so ordinary phone edits retain
+        // operation-level history. The existing durable queue/receipt remains
+        // compatible; old servers still use the field-level endpoint below.
+        if (override.field in setOf("topics", "resource_kinds")) {
+            val tagged = applyTagAction(id, override, apiToken)
+            if (tagged !is V2Result.Unsupported) return tagged
+            if (override.field == "resource_kinds") return V2Result.Unsupported
+        }
         val body = override.encode().toByteArray(StandardCharsets.UTF_8)
         val connection = endpoint("/api/bookmarks/$id/v2-override").openConnection() as HttpURLConnection
         return try {
@@ -128,6 +147,85 @@ internal class V2CurationClient(
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun applyTagAction(id: Int, sent: FieldOverride, apiToken: String): V2Result<JSONObject> {
+        val action = JSONObject().apply {
+            if (sent.action == "set_empty" || (sent.action == "reset" && sent.term.isEmpty())) {
+                put("action", if (sent.action == "reset") "reset_group" else "set_empty")
+                put("dimension", sent.field)
+            } else {
+                put("action", sent.action)
+                put("tag_ref", "system/${sent.field}/${sent.term}")
+            }
+        }
+        // Group operations bind the decision the user read. Read it together
+        // with the expected personal revision; changed state fails CAS.
+        var decision = sent.expectedDecisionId
+        var contentRevision = sent.expectedContentRevision
+        if (sent.term.isEmpty() && (decision == null || contentRevision == null)) when (val snapshot = loadTagSnapshot(id, apiToken)) {
+            is V2Result.Loaded -> {
+                if (snapshot.value.nonnegativeRevision("revision") != sent.expectedRevision)
+                    return V2Result.Conflict(snapshot.value.nonnegativeRevision("revision") ?: 0)
+                decision = snapshot.value.nonnegativeRevision("decision_id")
+                    ?: return V2Result.Failed(FailureKind.Server)
+                contentRevision = snapshot.value.nonnegativeRevision("content_revision")
+                    ?: return V2Result.Failed(FailureKind.Server)
+            }
+            else -> return snapshot
+        }
+        val payload = JSONObject().apply {
+            put("operation_key", sent.operationKey)
+            sent.expectedRevision?.let { put("expected_revision", it) }
+            decision?.let { put("expected_decision_id", it) }
+            contentRevision?.let { put("expected_content_revision", it) }
+            put("actions", JSONArray().put(action))
+        }
+        val result = tagRequest("/api/bookmarks/$id/tags", "POST", apiToken, payload)
+        if (result !is V2Result.Loaded) return result
+        val receipt = result.value
+        val revision = receipt.nonnegativeRevision("operation_revision")
+            ?: return V2Result.Failed(FailureKind.Server)
+        if (receipt.opt("operation_id") != sent.operationKey || (receipt.opt("id") as? Number)?.toLong() != id.toLong() || revision < 1 || receipt.opt("replayed") !is Boolean)
+            return V2Result.Failed(FailureKind.Server)
+        return V2Result.Loaded(JSONObject().apply {
+            put("id", id); put("revision", revision); put("operation_key", sent.operationKey)
+            put("field", sent.field); put("term", sent.term); put("action", sent.action)
+            put("replayed", receipt.getBoolean("replayed"))
+        })
+    }
+
+    fun loadTagSnapshot(id: Int, apiToken: String): V2Result<JSONObject> =
+        tagRequest("/api/bookmarks/$id/tags", "GET", apiToken)
+
+    internal fun tagRequest(path: String, method: String, apiToken: String, payload: JSONObject? = null): V2Result<JSONObject> {
+        val connection = endpoint(path).openConnection() as HttpURLConnection
+        return try {
+            configure(connection, method, apiToken)
+            if (payload != null) {
+                val bytes = payload.toString().toByteArray(StandardCharsets.UTF_8)
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                connection.setFixedLengthStreamingMode(bytes.size)
+                connection.outputStream.use { it.write(bytes) }
+            }
+            when (connection.responseCode) {
+                HttpURLConnection.HTTP_OK, HttpURLConnection.HTTP_CREATED -> V2Result.Loaded(JSONObject(connection.inputStream.bufferedReader().readText()))
+                HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD -> V2Result.Unsupported
+                HttpURLConnection.HTTP_UNAUTHORIZED -> V2Result.Failed(FailureKind.Unauthorized)
+                HttpURLConnection.HTTP_CONFLICT -> {
+                    val data = runCatching { JSONObject(connection.errorStream?.bufferedReader()?.readText() ?: "{}") }.getOrNull()
+                    val revision = data?.nonnegativeRevision("revision")
+                        ?: data?.optJSONObject("current")?.nonnegativeRevision("revision")
+                        ?: data?.optJSONObject("tag")?.nonnegativeRevision("revision")
+                    revision?.let { V2Result.Conflict(it) } ?: V2Result.Failed(FailureKind.Server)
+                }
+                else -> V2Result.Failed(FailureKind.Server)
+            }
+        } catch (_: SocketTimeoutException) { V2Result.Failed(FailureKind.Timeout) }
+        catch (_: IOException) { V2Result.Failed(FailureKind.Network) }
+        catch (_: JSONException) { V2Result.Failed(FailureKind.Server) }
+        finally { connection.disconnect() }
     }
 
     fun loadTaxonomy(apiToken: String): V2Result<BookmarkTaxonomy> {
@@ -171,6 +269,9 @@ internal class V2CurationClient(
         return V2Result.Loaded(
             MultidimensionalSelection(
                 topics = selection.strings("topics"),
+                resourceKinds = selection.strings("resource_kinds"),
+                decisionId = payload.nonnegativeRevision("decision_id"),
+                contentRevision = payload.nonnegativeRevision("content_revision"),
                 contentFunctions = selection.strings("content_functions"),
                 carriers = selection.strings("carriers"),
                 affordances = selection.strings("affordances"),
@@ -191,8 +292,13 @@ internal class V2CurationClient(
             val values = value.optJSONArray(field) ?: return null
             if ((0 until values.length()).any { values.opt(it) !is String }) return null
         }
+        if (value.has("resource_kinds")) {
+            val resources = value.optJSONArray("resource_kinds") ?: return null
+            if ((0 until resources.length()).any { resources.opt(it) !is String }) return null
+        }
         if (value.opt("form") !is String || value.opt("use") !is String) return null
         return MultidimensionalSelection(topics = value.strings("topics"),
+            resourceKinds = value.strings("resource_kinds"),
             contentFunctions = value.strings("content_functions"), carriers = value.strings("carriers"),
             affordances = value.strings("affordances"), form = value.getString("form"), use = value.getString("use"), available = true)
     }
@@ -220,6 +326,8 @@ internal data class QueuedCurationAction(
     val predecessorRevision: Long? = null,
     val conflictRevision: Long? = null,
     val queueVersion: Int = 1,
+    val expectedDecisionId: Long? = null,
+    val expectedContentRevision: Long? = null,
 ) {
     val ready: Boolean get() = expectedRevision != null && (predecessorKey == null || predecessorRevision != null)
 
@@ -232,6 +340,8 @@ internal data class QueuedCurationAction(
         expectedRevision?.let { put("expected_revision", it) }
         put("account_key", accountKey)
         put("queue_version", queueVersion)
+        expectedDecisionId?.let { put("expected_decision_id", it) }
+        expectedContentRevision?.let { put("expected_content_revision", it) }
         predecessorKey?.let { put("predecessor_key", it) }
         predecessorRevision?.let { put("predecessor_revision", it) }
         conflictRevision?.let { put("conflict_revision", it) }
@@ -250,6 +360,8 @@ internal data class QueuedCurationAction(
             predecessorRevision = if (json.has("predecessor_revision")) json.getLong("predecessor_revision") else null,
             conflictRevision = if (json.has("conflict_revision")) json.getLong("conflict_revision") else null,
             queueVersion = json.optInt("queue_version", 0),
+            expectedDecisionId = json.nonnegativeRevision("expected_decision_id"),
+            expectedContentRevision = json.nonnegativeRevision("expected_content_revision"),
         )
     }
 }

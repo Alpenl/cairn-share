@@ -1,11 +1,28 @@
+import { cleanupDeletedImages, maintainPrivacy } from "./privacy";
+import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
+import { tagSystemRoute, attachTagSummaries } from "./tag-system";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
-import { classificationRoute, sourceRoute } from "./classification";
+import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
+import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
+import { applyV1Write } from "./taxonomy-v2";
+import { canonicalJSON } from "./domain";
+import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
+import { readSelectionSnapshot } from "./selection-state";
+import { emitProviderRecovery, emitRequest, emitWorkerBusiness, logExporterStatus, policyReadAvailable, publishPolicy, requestPolicy,
+  type ProviderRecoveryEvent, type RequestD1Stats, type WorkerBusinessEvent } from "./observability";
+import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
+import { MAX_ENRICHMENT_ATTEMPTS, SOURCE_CLAIM_CANDIDATE_SQL, SOURCE_GATE_READY_SQL,
+  SOURCE_NEXT_COMPONENT_SQL, X_LINK_SQL,
+  sourceClaimCandidateBindings, sourceClaimSQL } from "./source-claim";
 
 export interface Env {
+  CAIRN_CLASSIFICATION_MAX_CALLS?: string;
   DB: D1Database;
   ENRICHMENT_IMAGES: R2Bucket;
   CAIRN_API_TOKEN: string;
   CAIRN_ENRICHER_TOKEN: string;
+  CAIRN_OPERATOR_TOKEN?: string;
+  HISTORY_RETENTION_DAYS?: string;
 }
 
 interface LinkRecord {
@@ -34,12 +51,20 @@ interface EnrichmentJobRow {
   enrichment_attempts: number;
   enrichment_lease_token: string;
   enrichment_lease_until: string;
+  refresh_epoch: number;
+  content_revision: number;
+  source_component: "source" | "reading";
 }
 
 type EnrichmentStatus = "pending" | "processing" | "completed" | "failed" | "exhausted";
 type EnrichmentFilter = EnrichmentStatus | "unsupported";
 
 interface EnrichmentListRow {
+  content_revision?: number;
+  personal_revision?: number;
+  app_body_revision?: number;
+  cache_decision_id?: number;
+  cache_entity_revision?: number;
   id: number;
   url: string;
   note: string;
@@ -47,6 +72,8 @@ interface EnrichmentListRow {
   enrichment_status: EnrichmentStatus;
   enrichment_attempts: number;
   enrichment_next_retry_at: string | null;
+  enrichment_paid_uncertain: number;
+  enrichment_paid_stage: string | null;
   ai_title: string | null;
   original_language: string | null;
   original_text: string | null;
@@ -84,6 +111,7 @@ interface EnrichmentCountRow {
 
 type ErrorCode =
   | "invalid_json"
+  | "invalid_expected_revision"
   | "invalid_content_type"
   | "invalid_url"
   | "invalid_note"
@@ -102,14 +130,30 @@ type ErrorCode =
   | "invalid_token"
   | "auth_not_configured"
   | "lease_conflict"
+  | "lease_released"
+  | "component_paused"
+  | "provider_attempt_missing"
+  | "provider_result_unknown"
   | "job_busy"
   | "not_found"
-  | "method_not_allowed";
+  | "method_not_allowed"
+  | "invalid_classification_config"
+  | "invalid_classification"
+  | "invalid_source"
+  | "invalid_operation_key"
+  | "capability_mismatch"
+  | "target_changed"
+  | "input_changed"
+  | "lease_expired"
+  | "already_completed"
+  | "operation_conflict"
+  | "configuration_error";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System",
+  "Access-Control-Expose-Headers": "X-Cairn-Tag-System",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -131,7 +175,6 @@ const MAX_QUERY_LENGTH = 200;
 const CLIENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
-const MAX_ENRICHMENT_ATTEMPTS = 5;
 const ENRICHMENT_LEASE_MILLISECONDS = 15 * 60 * 1000;
 const MAX_ORIGINAL_TEXT_LENGTH = 100_000;
 const MAX_TRANSLATED_TEXT_LENGTH = 100_000;
@@ -145,23 +188,15 @@ const MAX_MODEL_LENGTH = 200;
 const MAX_ENRICHMENT_ERROR_LENGTH = 2_000;
 const ENRICHMENT_RETRY_DELAYS_MILLISECONDS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
 const READ_CACHE_TTL_SECONDS = 15;
-const READ_CACHE_CONTROL = `public, max-age=${READ_CACHE_TTL_SECONDS}, s-maxage=${READ_CACHE_TTL_SECONDS}`;
-const CACHE_VERSION = "3";
+// The overview is polled every 30s. Its generation key changes on writes, so
+// retain an unchanged snapshot across polls without delaying invalidation.
+const OVERVIEW_CACHE_TTL_SECONDS = 15 * 60;
+const CACHE_VERSION = "4";
 const CACHE_ORIGIN = "https://cairn-share-cache.internal";
 const LINKS_CACHE_GENERATION_KEY = "links_generation";
-const X_LINK_SQL = `(
-  lower(url) LIKE 'https://x.com/%'
-  OR lower(url) LIKE 'http://x.com/%'
-  OR lower(url) LIKE 'https://www.x.com/%'
-  OR lower(url) LIKE 'http://www.x.com/%'
-  OR lower(url) LIKE 'https://twitter.com/%'
-  OR lower(url) LIKE 'http://twitter.com/%'
-  OR lower(url) LIKE 'https://www.twitter.com/%'
-  OR lower(url) LIKE 'http://www.twitter.com/%'
-)`;
-
 const LINK_COLUMNS = "id, url, note, created_at, learned, learned_at";
 const ENRICHMENT_COLUMNS = `enrichment_status, enrichment_attempts, enrichment_next_retry_at,
+  enrichment_paid_uncertain, enrichment_paid_stage,
   ai_title, original_language, summary, images, enrichment_model, enrichment_error,
   enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
   CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable`;
@@ -177,12 +212,27 @@ function includeEnrichment(url: URL): boolean {
   return url.searchParams.get("include") === "enrichment";
 }
 
+function includeCacheIdentity(url: URL): boolean {
+  return includeEnrichment(url) && url.searchParams.get("include_cache_identity") === "1";
+}
+
+function cacheIdentityColumns(enabled: boolean): string {
+  // Latest canonical versions are invalidation markers, not provenance of the
+  // legacy classification projection returned alongside them.
+  return enabled ? `, content_revision, app_body_revision, personal_revision,
+    COALESCE((SELECT MAX(d.id) FROM classification_decisions d WHERE d.link_id=links.id),0) AS cache_decision_id,
+    COALESCE((SELECT e.revision FROM entity_states e WHERE e.link_id=links.id),0) AS cache_entity_revision` : "";
+}
+
 type CacheState = "MISS" | "HIT" | "BYPASS";
 
 class TimingCollector {
   private readonly started = performance.now();
   private readonly entries: Array<{ name: string; duration: number }> = [];
   private cacheState: CacheState | null = null;
+  private d1Stats: RequestD1Stats | undefined;
+  private recoveryEvent: ProviderRecoveryEvent | undefined;
+  private readonly businessEvents: WorkerBusinessEvent[] = [];
 
   async measure<T>(name: string, operation: () => Promise<T>): Promise<T> {
     const started = performance.now();
@@ -195,6 +245,31 @@ class TimingCollector {
 
   setCacheState(cacheState: CacheState): void {
     this.cacheState = cacheState;
+  }
+
+  setD1Stats(stats: RequestD1Stats): void {
+    if (Number.isSafeInteger(stats.rows_read) && stats.rows_read >= 0 &&
+      Number.isSafeInteger(stats.rows_written) && stats.rows_written >= 0) this.d1Stats = stats;
+  }
+
+  requestD1Stats(): RequestD1Stats | undefined {
+    return this.d1Stats;
+  }
+
+  setRecoveryEvent(event: ProviderRecoveryEvent): void {
+    this.recoveryEvent = event;
+  }
+
+  providerRecoveryEvent(): ProviderRecoveryEvent | undefined {
+    return this.recoveryEvent;
+  }
+
+  addBusinessEvent(event: WorkerBusinessEvent): void {
+    this.businessEvents.push(event);
+  }
+
+  workerBusinessEvents(): readonly WorkerBusinessEvent[] {
+    return this.businessEvents;
   }
 
   headerValue(): string {
@@ -211,12 +286,69 @@ class TimingCollector {
 }
 
 export default {
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await maintainPrivacy(env);
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     const timing = new TimingCollector();
-    const response = await handleRequest(request, env, timing);
-    return withServerTiming(response, timing);
+    const path = new URL(request.url).pathname;
+    if (path === "/api/internal/observability" || request.method === "OPTIONS") {
+      return withServerTiming(await handleRequest(request, env, timing), timing);
+    }
+    const policy = await requestPolicy(env.DB);
+    const started = performance.now();
+    let response: Response | null = null;
+    try {
+      response = withServerTiming(await handleRequest(request, env, timing), timing);
+      if (request.headers.get("X-Cairn-Tag-System") === "1") response.headers.set("X-Cairn-Tag-System", "1");
+      else if (![204, 304].includes(response.status) && response.headers.get("Content-Type")?.includes("application/json")) {
+        // Strict old clients must never see new optional dimensions.
+        const removeNew = (value: unknown): unknown => Array.isArray(value) ? value.map(removeNew) :
+          value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value as Record<string, unknown>)
+            .filter(([key]) => key !== "resource_kinds" && key !== "custom_tags").map(([key, child]) => [key, removeNew(child)])) : value;
+        const body = await response.clone().json();
+        response = new Response(JSON.stringify(removeNew(body)), { status: response.status, headers: response.headers });
+      }
+      response.headers.set("X-Cairn-Observability-Version", String(policy.version));
+      if (!policyReadAvailable(policy)) response.headers.set("X-Cairn-Observability-Status", "unavailable");
+      else if (policy.version === -1) response.headers.set("X-Cairn-Observability-Status", "unconfigured");
+      return response;
+    } finally {
+      for (const event of timing.workerBusinessEvents()) {
+        try { emitWorkerBusiness(policy, event); } catch { /* optional logs never fail business */ }
+      }
+      try { emitProviderRecovery(policy, timing.providerRecoveryEvent()); } catch { /* optional logs never fail business */ }
+      try { emitRequest(policy, request, response, performance.now() - started, timing.requestD1Stats()); } catch { /* optional logs never fail business */ }
+    }
   }
 };
+
+async function observeManualRoute(timing: TimingCollector, action: "source" | "process",
+  execute: (onResolved: (outcome: "accepted" | "replay") => void) => Promise<Response>): Promise<Response> {
+  let outcome: "accepted" | "replay" | "rejected" = "rejected";
+  try {
+    const response = await execute((resolved) => { outcome = resolved; });
+    timing.addBusinessEvent({ kind: "manual_request", action, outcome, status: response.status });
+    return response;
+  } catch (cause) {
+    timing.addBusinessEvent({ kind: "manual_request", action, outcome: "failed", status: 500 });
+    throw cause;
+  }
+}
+
+async function observeEnrichmentCommit(timing: TimingCollector, stage: "source" | "complete",
+  execute: (onResolved: (outcome: "stored" | "committed" | "replay" | "receipt_confirmed") => void) =>
+    Promise<Response>): Promise<Response> {
+  let outcome: "stored" | "committed" | "replay" | "receipt_confirmed" | "rejected" = "rejected";
+  try {
+    const response = await execute((resolved) => { outcome = resolved; });
+    timing.addBusinessEvent({ kind: "enrichment_commit", stage, outcome, status: response.status });
+    return response;
+  } catch (cause) {
+    timing.addBusinessEvent({ kind: "enrichment_commit", stage, outcome: "failed", status: 500 });
+    throw cause;
+  }
+}
 
 async function handleRequest(request: Request, env: Env, timing: TimingCollector): Promise<Response> {
   if (request.method === "OPTIONS") {
@@ -225,6 +357,24 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   const url = new URL(request.url);
   const path = trimTrailingSlash(url.pathname);
+  // This is an internal cache discriminator for the two negotiated bookmark
+  // read shapes. Aggregate routes reject queries and do not need it. A caller
+  // cannot select the negotiated cache by supplying this query parameter.
+  if (path === "/api/links" || /^\/api\/links\/\d+$/.test(path)) {
+    url.searchParams.delete("tag_system");
+    if (request.headers.get("X-Cairn-Tag-System") === "1") url.searchParams.set("tag_system", "1");
+  }
+  const newTagFilter = ["resource_kinds", "resource_kind", "custom_tags", "custom_tag", "topics_mode", "topic_mode", "resource_mode", "custom_mode"].some(key => url.searchParams.has(key));
+  if (newTagFilter && request.headers.get("X-Cairn-Tag-System") !== "1") return error("capability_mismatch", 409);
+
+  if (path === "/api/internal/observability") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET", "POST"], () => request.method === "GET"
+      ? requestPolicy(env.DB).then((policy) => json(logExporterStatus(policy), 200,
+        { "Cache-Control": "private, no-store" }))
+      : publishPolicy(request, env.DB));
+  }
 
   if (path === "/" || path === "/debug") {
     return routeMethod(request, ["GET"], () => html(apiDebugHtml()));
@@ -266,22 +416,135 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   }
 
   const sourceMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/source$/);
-  if (sourceMatch || path.startsWith("/api/enrichment/classifications/")) {
+  const manualSourceMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/manual-source$/);
+  const manualEnqueueMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/enqueue$/);
+  const refreshMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/refresh-source$/);
+  const refreshAckMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/refresh-source\/ack$/);
+  if (sourceMatch || manualSourceMatch || manualEnqueueMatch || refreshMatch || refreshAckMatch || path.startsWith("/api/enrichment/classifications/")) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
-    return sourceMatch ? sourceRoute(request, env, Number(sourceMatch[1])) : classificationRoute(request, env, path);
+    if (refreshAckMatch) {
+      if (request.method !== "POST") return error("method_not_allowed", 405);
+      return ackSourceRefresh(request, env, Number(refreshAckMatch[1]));
+    }
+    if (refreshMatch) {
+      if (request.method !== "POST") return error("method_not_allowed", 405);
+      return refreshSource(request, env, Number(refreshMatch[1]));
+    }
+    if (manualSourceMatch) {
+      if (request.method !== "POST") return error("method_not_allowed", 405);
+      return observeManualRoute(timing, "source", (onResolved) =>
+        manualSourceRoute(request, env, Number(manualSourceMatch[1]), onResolved));
+    }
+    if (manualEnqueueMatch) {
+      if (request.method !== "POST") return error("method_not_allowed", 405);
+      return observeManualRoute(timing, "process", (onResolved) =>
+        manualEnqueueRoute(request, env, Number(manualEnqueueMatch[1]), onResolved));
+    }
+    if (sourceMatch) {
+      if (request.method === "GET") return sourceRoute(request, env, Number(sourceMatch[1]));
+      return observeEnrichmentCommit(timing, "source", (onResolved) =>
+        sourceRoute(request, env, Number(sourceMatch[1]), () => onResolved("stored"), () =>
+          timing.addBusinessEvent({ kind: "component_gate", component: "source", action: "closed" })));
+    }
+    return classificationRoute(request, env, path, (event) => timing.addBusinessEvent({
+      kind: "component_gate", component: "classification", action: event.action
+    }));
+  }
+
+  // App-facing curation is an exact allowlist, never an alias for arbitrary
+  // internal v2 paths. Reads and human field actions do not invoke a model.
+  const appV2 = path.match(/^\/api\/bookmarks\/(\d+)\/(v2-selection|v2-override)$/);
+  const appTags = path.match(/^\/api\/bookmarks\/(\d+)\/(tags|tag-history)$/);
+  if (appTags || /^\/api\/custom-tags(?:\/[A-Za-z0-9-]+)?$/.test(path) || ["/api/tag-counts", "/api/tag-export"].includes(path)) {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    const route = appTags ? `/api/v2/links/${appTags[1]}/${appTags[2]}` : path.startsWith("/api/custom-tags")
+      ? path.replace("/api/custom-tags", "/api/v2/custom-tags") : path === "/api/tag-counts" ? "/api/v2/tags/counts" : "/api/v2/tags/export";
+    return (await tagSystemRoute(request, env, route)) ?? error("not_found", 404);
+  }
+  if (path === "/api/v2-taxonomy" || appV2) {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    if (path === "/api/v2-taxonomy") {
+      return routeMethod(request, ["GET"], () => taxonomyV2Route(request, env, "/api/v2/taxonomy"));
+    }
+    const [, id, action] = appV2!;
+    if (action === "v2-selection") {
+      return routeMethod(request, ["GET"], () => taxonomyV2Route(request, env, `/api/v2/links/${id}/selection`));
+    }
+    return routeMethod(request, ["POST"], async () => {
+      const body = await request.clone().json().catch(() => null) as Record<string, unknown> | null;
+      if (!body || !Number.isSafeInteger(body.expected_revision) || Number(body.expected_revision) < 0) {
+        return error("invalid_expected_revision", 400);
+      }
+      return domainRoute(request, env, `/api/v2/links/${id}/overrides`);
+    });
+  }
+
+  // Internal v2 domain API (evidence, specs, runs, decisions, overrides).
+  // Management-only and behind the enricher token; the App token cannot reach it.
+  if (path.startsWith("/api/v2/")) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    const tags = await tagSystemRoute(request, env, path);
+    if (tags) return tags;
+    if (path.startsWith("/api/v2/taxonomy") || /^\/api\/v2\/links\/\d+\/selection/.test(path)) {
+      return taxonomyV2Route(request, env, path);
+    }
+    return domainRoute(request, env, path, timing);
   }
 
   if (path === "/api/enrichment/jobs/claim") {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
-    return routeMethod(request, ["POST"], () => claimEnrichmentJob(env, timing));
+    return routeMethod(request, ["POST"], () => claimEnrichmentJob(request, env, timing));
+  }
+
+  if (path.startsWith("/api/enrichment/provider-attempts")) {
+    const operatorOnly = path === "/api/enrichment/provider-attempts/reconcile" ||
+      path === "/api/enrichment/provider-attempts/inspect" ||
+      path === "/api/enrichment/provider-attempts/recover-source" ||
+      path === "/api/enrichment/provider-attempts/recover-reading";
+    if (operatorOnly && (!env.CAIRN_OPERATOR_TOKEN?.trim() ||
+        env.CAIRN_OPERATOR_TOKEN.trim() === env.CAIRN_ENRICHER_TOKEN?.trim() ||
+        env.CAIRN_OPERATOR_TOKEN.trim() === env.CAIRN_API_TOKEN?.trim())) {
+      return authError("auth_not_configured", 500);
+    }
+    const authResult = operatorOnly
+      ? requireBearerToken(request, env.CAIRN_OPERATOR_TOKEN!) : requireEnricherToken(request, env);
+    if (authResult !== null) return authResult;
+    return await providerAttemptRoute(request, env, path, (event) => timing.setRecoveryEvent(event),
+      (event) => timing.addBusinessEvent(event)) ??
+      error("not_found", 404);
+  }
+
+  if (path === "/api/enrichment/source-lease-capability") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => json({ protocol: 1,
+      lease_ms: ENRICHMENT_LEASE_MILLISECONDS, paid_stage_admission: true,
+      provider_result_guard: true, completion_replay: true, provider_attempt_ledger: true,
+      refresh_source_checkpoint: true, source_component_gate: true,
+      source_stage_pause: true }));
+  }
+
+  if (path === "/api/enrichment/source-claimable") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => sourceClaimable(request, env, timing));
   }
 
   if (path === "/api/enrichment/jobs") {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => listEnrichmentJobs(url, env, timing));
+  }
+
+  if (path === "/api/enrichment/overview") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => getEnrichmentOverview(request, url, env, timing));
   }
 
   if (path === "/api/enrichment/taxonomy") {
@@ -306,20 +569,30 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     return routeMethod(request, ["GET"], () => getEnrichmentImage(request, env, key));
   }
 
-  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(claim|complete|fail|images)$/);
+  const enrichmentJobMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/(claim|complete|fail|images|lease-admit|budget-defer|local-defer)$/);
   if (enrichmentJobMatch !== null) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["POST"], () => {
       const id = Number(enrichmentJobMatch[1]);
       if (enrichmentJobMatch[2] === "claim") {
-        return claimEnrichmentJobById(env, id, timing);
+        return claimEnrichmentJobById(request, env, id, timing);
       }
       if (enrichmentJobMatch[2] === "images") {
         return storeEnrichmentImages(request, env, id, timing);
       }
+      if (enrichmentJobMatch[2] === "lease-admit") {
+        return admitPaidSourceStage(request, env, id, timing);
+      }
+      if (enrichmentJobMatch[2] === "budget-defer") {
+        return deferSourceBudget(request, env, id, timing);
+      }
+      if (enrichmentJobMatch[2] === "local-defer") {
+        return deferLocalSourceStage(request, env, id, timing);
+      }
       return enrichmentJobMatch[2] === "complete"
-        ? completeEnrichmentJob(request, env, id, timing)
+        ? observeEnrichmentCommit(timing, "complete", (onResolved) =>
+          completeEnrichmentJob(request, env, id, timing, onResolved))
         : failEnrichmentJob(request, env, id, timing);
     });
   }
@@ -329,8 +602,25 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () =>
-      getEnrichmentJob(env, Number(enrichmentJobDetailMatch[1]), timing)
+      getEnrichmentJob(env, Number(enrichmentJobDetailMatch[1]), timing,
+        url.searchParams.get("include_cache_identity") === "1")
     );
+  }
+
+  const enrichmentIdentityMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/cache-identity$/);
+  if (enrichmentIdentityMatch !== null) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () =>
+      getEnrichmentJobIdentity(env, Number(enrichmentIdentityMatch[1]), timing));
+  }
+
+  const enrichmentReadingMatch = path.match(/^\/api\/enrichment\/jobs\/(\d+)\/reading$/);
+  if (enrichmentReadingMatch !== null) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () =>
+      getEnrichmentReading(env, Number(enrichmentReadingMatch[1]), timing, url.searchParams));
   }
 
   const linkIdMatch = path.match(/^\/api\/links\/(\d+)$/);
@@ -404,7 +694,7 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
 
   return cachedJson(request, env, timing, (generation) => listCacheUrl(url, { limit, beforeId, learned, query }, generation), async () => {
     const pageSize = limit + 1;
-    const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}` : ""} FROM links`;
+    const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""} FROM links`;
     const order = "ORDER BY id DESC LIMIT ?";
     const clauses = [...filters.clauses];
     const bindings = [...filters.bindings];
@@ -430,7 +720,9 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
     const rows = result.results ?? [];
     const items = rows.slice(0, limit);
     const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
-    return { items: items.map((row) => enriched ? mapAppLink(row, false) : mapLink(row)), next_before_id: next };
+    const mapped = items.map((row) => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row));
+    return { items: request.headers.get("X-Cairn-Tag-System") === "1" ? await attachTagSummaries(env, mapped as unknown as Record<string, unknown>[]) : mapped, next_before_id: next,
+      ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {}) };
   });
 }
 
@@ -438,7 +730,7 @@ async function getLink(request: Request, url: URL, id: number, env: Env, timing:
   return cachedJson(request, env, timing, (generation) => detailCacheUrl(id, url, generation), async () => {
     const row = await timing.measure("db", () =>
       env.DB.prepare(
-        `SELECT ${LINK_COLUMNS}${includeEnrichment(url) ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}` : ""} FROM links WHERE id = ?`
+        `SELECT ${LINK_COLUMNS}${includeEnrichment(url) ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""} FROM links WHERE id = ?`
       )
         .bind(id)
         .first<LinkRow & EnrichmentListRow>()
@@ -447,7 +739,8 @@ async function getLink(request: Request, url: URL, id: number, env: Env, timing:
     if (row === null) {
       return null;
     }
-    return includeEnrichment(url) ? mapAppLink(row, true) : mapLink(row);
+    const mapped = includeEnrichment(url) ? mapAppLink(row, true, includeCacheIdentity(url)) : mapLink(row);
+    return request.headers.get("X-Cairn-Tag-System") === "1" ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped;
   });
 }
 
@@ -465,7 +758,13 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
   const body = raw as Record<string, unknown>;
   const updates: string[] = [];
   const bindings: Array<string | number | null> = [];
-  let enrichmentInputChanged = false;
+  // URL and note invalidate different things and must not be coupled:
+  //  - a URL change means the stored snapshot belongs to a different page, so
+  //    source/content is invalidated (human curation is preserved).
+  //  - a note change is a personal annotation. It must not discard the fetched
+  //    source, translation or images, and must not trigger a refetch.
+  let urlChanged = false;
+  let noteChanged = false;
 
   if ("url" in body) {
     if (typeof body.url !== "string") {
@@ -477,7 +776,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     }
     updates.push("url = ?");
     bindings.push(url);
-    enrichmentInputChanged = true;
+    urlChanged = true;
   }
 
   if ("note" in body) {
@@ -486,7 +785,7 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     }
     updates.push("note = ?");
     bindings.push(body.note);
-    enrichmentInputChanged = true;
+    noteChanged = true;
   }
 
   if ("learned" in body) {
@@ -501,13 +800,19 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     return error("invalid_update");
   }
 
-  if (enrichmentInputChanged) {
+  // A URL change invalidates the stored source and the derived reading content
+  // because they describe a different page. Human curation, why and status are
+  // deliberately preserved: they are the user's own decisions.
+  if (urlChanged) {
     updates.push(
       "enrichment_status = 'pending'",
+      "manual_priority = 0",
       "enrichment_attempts = 0",
       "enrichment_next_retry_at = NULL",
       "enrichment_lease_token = NULL",
       "enrichment_lease_until = NULL",
+      "enrichment_paid_uncertain = 0",
+      "enrichment_paid_stage = NULL",
       "ai_title = NULL",
       "original_language = NULL",
       "original_text = NULL",
@@ -524,13 +829,14 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
   }
 
   bindings.push(id);
-  const enriched = includeEnrichment(new URL(request.url));
+  const requestUrl = new URL(request.url);
+  const enriched = includeEnrichment(requestUrl);
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `UPDATE links
         SET ${updates.join(", ")}
         WHERE id = ?
-        RETURNING ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}` : ""}`
+        RETURNING ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(includeCacheIdentity(requestUrl))}` : ""}`
     )
       .bind(...bindings)
       .first<LinkRow & EnrichmentListRow>()
@@ -540,7 +846,20 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     return error("not_found", 404);
   }
   await bumpLinksCacheGeneration(env, timing);
-  return json(enriched ? mapAppLink(row, true) : mapLink(row));
+  if (includeCacheIdentity(requestUrl)) {
+    // SQLite RETURNING precedes AFTER triggers. Read body and identity together
+    // after their revisions have advanced, never attach pre-trigger revisions.
+    const current = await timing.measure("db", () => env.DB.prepare(
+      `SELECT ${LINK_COLUMNS}, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(true)} FROM links WHERE id=?`
+    ).bind(id).first<LinkRow & EnrichmentListRow>());
+    if (!current) return error("not_found", 404);
+    const mapped = mapAppLink(current, true, true);
+    return json(request.headers.get("X-Cairn-Tag-System") === "1"
+      ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped);
+  }
+  const mapped = enriched ? mapAppLink(row, true) : mapLink(row);
+  return json(request.headers.get("X-Cairn-Tag-System") === "1"
+    ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped);
 }
 
 async function deleteLink(env: Env, id: number, timing: TimingCollector): Promise<Response> {
@@ -550,14 +869,16 @@ async function deleteLink(env: Env, id: number, timing: TimingCollector): Promis
       .first<{ id: number }>()
   );
 
-  if (row === null) {
+  if (row === null && !await env.DB.prepare("SELECT link_id FROM privacy_deletions WHERE link_id=?").bind(id).first()) {
     return error("not_found", 404);
   }
-  await bumpLinksCacheGeneration(env, timing);
+  // The trigger removes budgets, invalidates cached reads and records the outbox
+  // in the same transaction as deletion. A lost response can safely be retried.
+  if (!await cleanupDeletedImages(env, id)) return json({ error: "deletion_cleanup_pending" }, 503, { "Retry-After": "300" });
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
-function bookmarkFilters(url: URL, query?: string): { clauses: string[]; bindings: Array<string | number> } | Response {
+export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; bindings: Array<string | number> } | Response {
   const clauses: string[] = [];
   const bindings: Array<string | number> = [];
   const curationStatus = url.searchParams.get("curation_status");
@@ -566,15 +887,10 @@ function bookmarkFilters(url: URL, query?: string): { clauses: string[]; binding
     clauses.push("curation_status = ?");
     bindings.push(curationStatus);
   }
-  for (const [key, dimension, field] of [["topic", "topics", "topics"], ["form", "forms", "form"], ["use", "uses", "use"]] as const) {
-    const value = url.searchParams.get(key);
-    if (!value) continue;
-    if (!validTerm(dimension, value, false)) return error("invalid_query");
-    clauses.push(key === "topic"
-      ? "EXISTS (SELECT 1 FROM json_each(COALESCE(curation, classification, '{}'), '$.topics') WHERE value = ?)"
-      : `json_extract(COALESCE(curation, classification, '{}'), '$.${field}') = ?`);
-    bindings.push(value);
-  }
+  const selection = selectionFilters(url.searchParams);
+  if (!selection) return error("invalid_query");
+  clauses.push(...selection.clauses);
+  bindings.push(...selection.bindings);
   const wechatSQL = "(lower(url) LIKE 'https://mp.weixin.qq.com/%' OR lower(url) LIKE 'http://mp.weixin.qq.com/%')";
   const source = url.searchParams.get("source");
   if (source) {
@@ -599,7 +915,13 @@ function bookmarkFilters(url: URL, query?: string): { clauses: string[]; binding
     for (const term of terms) {
       const like = `%${escapeLike(term)}%`;
       const fields = ["url", "note", "ai_title", "summary", "translated_text", "original_text", "why",
-        "json_extract(classification, '$.why_suggestion')", "json_extract(classification, '$.entities')"];
+        "json_extract(classification, '$.why_suggestion')",
+        // Retain legacy full-text metadata until an independent entity run or
+        // correction exists. Thereafter only current, corrected entities match.
+        `(CASE WHEN NOT EXISTS (SELECT 1 FROM entity_states WHERE link_id=links.id)
+          AND NOT EXISTS (SELECT 1 FROM curation_overrides WHERE link_id=links.id AND field IN ('entity','entities'))
+          THEN json_extract(classification, '$.entities')
+          ELSE (SELECT group_concat(term, ' ') FROM effective_entity_terms WHERE link_id=links.id) END)`];
       clauses.push(`(${fields.map((field) => `COALESCE(${field}, '') LIKE ? ESCAPE '\\'`).join(" OR ")})`);
       bindings.push(...fields.map(() => like));
     }
@@ -609,6 +931,11 @@ function bookmarkFilters(url: URL, query?: string): { clauses: string[]; binding
 }
 
 async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): Promise<Response> {
+  const countsOption = url.searchParams.getAll("counts");
+  if (countsOption.length > 1 || (countsOption.length === 1 && !["0", "1"].includes(countsOption[0]))) {
+    return error("invalid_query");
+  }
+  const includeCounts = countsOption[0] !== "0";
   const limit = parseBoundedInt(url.searchParams.get("limit"), DEFAULT_LIMIT, MAX_LIMIT);
   if (limit === null) return error("invalid_limit");
   const beforeId = parseOptionalPositiveInt(url.searchParams.get("before_id"));
@@ -619,6 +946,10 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
   if (query === null) return error("invalid_query");
   const filters = bookmarkFilters(url, query);
   if (filters instanceof Response) return filters;
+  // Counts are status facets for the filtered collection, independent of the
+  // selected status tab and page cursor. Capture before adding those clauses.
+  const countWhere = includeCounts && filters.clauses.length ? `WHERE ${filters.clauses.join(" AND ")}` : "";
+  const countBindings = includeCounts ? [...filters.bindings] : [];
   const { clauses, bindings } = filters;
   if (beforeId !== undefined) {
     clauses.push("id < ?");
@@ -632,51 +963,113 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector): 
     bindings.push(status);
   }
   const summary = url.searchParams.get("view") === "summary";
+  const withIdentity = url.searchParams.get("include_cache_identity") === "1";
 
   const pageSize = limit + 1;
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const listStatement = env.DB.prepare(
-    `SELECT id, url, note, created_at, ${ENRICHMENT_COLUMNS}, ${contentColumns(summary)}
+    `SELECT id, url, note, created_at, ${ENRICHMENT_COLUMNS}, ${contentColumns(summary)} ${cacheIdentityColumns(withIdentity)}
        FROM links
       ${where}
       ORDER BY id DESC
       LIMIT ?`
   ).bind(...bindings, pageSize);
-  const countStatement = env.DB.prepare(
-    `SELECT COUNT(*) AS total,
+  let rows: EnrichmentListRow[];
+  let countRow: EnrichmentCountRow | null = null;
+  if (includeCounts) {
+    const countStatement = env.DB.prepare(
+      `SELECT COUNT(*) AS total,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'processing' THEN 1 ELSE 0 END), 0) AS processing,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
             COALESCE(SUM(CASE WHEN ${X_LINK_SQL} AND enrichment_status = 'exhausted' THEN 1 ELSE 0 END), 0) AS exhausted,
             COALESCE(SUM(CASE WHEN NOT ${X_LINK_SQL} THEN 1 ELSE 0 END), 0) AS unsupported
-       FROM links`
-  );
-
-  const [listResult, countRow] = await timing.measure("db", () =>
-    Promise.all([
-      listStatement.all<EnrichmentListRow>(),
-      countStatement.first<EnrichmentCountRow>()
-    ])
-  );
-  const rows = listResult.results ?? [];
+       FROM links ${countWhere}`
+    ).bind(...countBindings);
+    // D1 batches are transactional. Do not attach counts read after a
+    // concurrent mutation to a page that predates it.
+    const [listResult, countResult] = await timing.measure("db", () => env.DB.batch([listStatement, countStatement]));
+    rows = (listResult.results ?? []) as unknown as EnrichmentListRow[];
+    countRow = (countResult.results?.[0] ?? null) as unknown as EnrichmentCountRow | null;
+  } else {
+    const listResult = await timing.measure("db", () => listStatement.all());
+    rows = (listResult.results ?? []) as unknown as EnrichmentListRow[];
+  }
   const items = rows.slice(0, limit);
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
   return json({
-    items: items.map((row) => ({ ...mapEnrichmentListItem(row), ...(summary ? { content_loaded: false } : {}) })),
+    items: items.map((row) => ({ ...mapEnrichmentListItem(row, withIdentity), ...(summary ? { content_loaded: false } : {}) })),
     next_before_id: next,
-    counts: mapEnrichmentCounts(countRow)
+    ...(includeCounts ? { counts: mapEnrichmentCounts(countRow) } : {}),
+    ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {})
   });
 }
 
-async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): Promise<Response> {
+interface EnrichmentOverviewRow extends EnrichmentCountRow {
+  view_inbox: number;
+  view_kept: number;
+  view_compiled: number;
+  view_drop: number;
+  view_uncertain: number;
+}
+
+async function getEnrichmentOverview(request: Request, url: URL, env: Env, timing: TimingCollector): Promise<Response> {
+  if ([...url.searchParams.keys()].length > 0) return error("invalid_query");
+  return cachedJson(request, env, timing, generation => enrichmentOverviewCacheUrl(url, generation), async () => {
+    // Reuse the list's predicates, including the exact uncertain projection
+    // rule. The fixed views keep all user-controlled text out of SQL source.
+    const viewFilters = [
+      ["inbox", "curation_status=inbox"], ["kept", "curation_status=kept"],
+      ["compiled", "curation_status=compiled"], ["drop", "curation_status=drop"],
+      ["uncertain", "uncertain=true"]
+    ] as const;
+    const bindings: Array<string | number> = [];
+    const columns = viewFilters.map(([name, query]) => {
+      const filter = bookmarkFilters(new URL(`https://cairn.invalid/api/enrichment/jobs?${query}`));
+      if (filter instanceof Response) throw new Error("invalid fixed overview filter");
+      bindings.push(...filter.bindings);
+      return `COALESCE(SUM(CASE WHEN ${filter.clauses.join(" AND ") || "1"} THEN 1 ELSE 0 END),0) AS view_${name}`;
+    });
+    const statusColumns = ["pending", "processing", "completed", "failed", "exhausted"].map(status =>
+      `COALESCE(SUM(CASE WHEN is_x=1 AND enrichment_status='${status}' THEN n ELSE 0 END),0) AS ${status}`);
+    const statement = env.DB.prepare(`
+      WITH view_counts AS (
+        SELECT COUNT(*) AS total, ${columns.join(", ")}
+        FROM links
+      ), status_groups AS (
+        SELECT is_x, enrichment_status, COUNT(*) AS n
+        FROM links INDEXED BY links_is_x_status_idx
+        GROUP BY is_x, enrichment_status
+      ), status_counts AS (
+        SELECT ${statusColumns.join(", ")},
+          COALESCE(SUM(CASE WHEN is_x=0 THEN n ELSE 0 END),0) AS unsupported
+        FROM status_groups
+      )
+      SELECT * FROM view_counts CROSS JOIN status_counts
+    `).bind(...bindings);
+    const result = await timing.measure("db", () => statement.all<EnrichmentOverviewRow>());
+    const row = result.results[0];
+    if (row === undefined) throw new Error("overview aggregate returned no row");
+    timing.setD1Stats({ query: "overview_aggregate", sql_count: 1, rows_read: result.meta.rows_read,
+      rows_written: result.meta.rows_written, scope: "aggregate_only" });
+    const counts = mapEnrichmentCounts(row);
+    return { version: 1, views: {
+      all: counts.total, inbox: row.view_inbox, kept: row.view_kept,
+      compiled: row.view_compiled, drop: row.view_drop, uncertain: row.view_uncertain
+    }, counts, attention: counts.failed + counts.exhausted, queued: counts.pending + counts.processing };
+  }, OVERVIEW_CACHE_TTL_SECONDS);
+}
+
+async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, withIdentity = false): Promise<Response> {
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
-              enrichment_next_retry_at, ai_title, original_language, original_text,
+              enrichment_next_retry_at, enrichment_paid_uncertain, enrichment_paid_stage,
+              ai_title, original_language, original_text,
               translated_text, summary, related_links, images, enrichment_model,
               enrichment_error, enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
-              CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable
+              CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable${cacheIdentityColumns(withIdentity)}
          FROM links
         WHERE id = ?`
     )
@@ -684,13 +1077,89 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector): 
       .first<EnrichmentDetailRow>()
   );
   if (row === null) return error("not_found", 404);
-  return json(mapEnrichmentListItem(row));
+  return json(mapEnrichmentListItem(row, withIdentity));
+}
+
+async function getEnrichmentJobIdentity(env: Env, id: number, timing: TimingCollector): Promise<Response> {
+  const row = await timing.measure("db", () => env.DB.prepare(`SELECT id,enrichment_status,
+    enrichment_updated_at,enrichment_paid_uncertain${cacheIdentityColumns(true)}
+    FROM links WHERE id=?`).bind(id).first<{
+      id: number; enrichment_status: string; enrichment_updated_at: string | null;
+      enrichment_paid_uncertain: number; content_revision: number; app_body_revision: number;
+      personal_revision: number; cache_decision_id: number; cache_entity_revision: number;
+    }>());
+  if (!row) return error("not_found", 404);
+  return json({ id: row.id, status: row.enrichment_status,
+    updated_at: row.enrichment_updated_at, paid_call_unresolved: row.enrichment_paid_uncertain === 1,
+    cache_identity: { schema_version: 1, content_revision: row.content_revision,
+      body_revision: row.app_body_revision, personal_revision: row.personal_revision,
+      latest_decision_id: row.cache_decision_id,
+      latest_entity_revision: row.cache_entity_revision } });
+}
+
+// One SQLite statement supplies article text, the effective selection and
+// entity state. A sequence of detail/selection/entity reads can combine
+// different revisions when another client writes between requests.
+async function getEnrichmentReading(env: Env, id: number, timing: TimingCollector, params: URLSearchParams): Promise<Response> {
+  if (params.getAll("body_revision").length > 1) return error("invalid_query");
+  const rawRevision = params.get("body_revision");
+  if (rawRevision !== null && (!/^(0|[1-9][0-9]*)$/.test(rawRevision) ||
+      !Number.isSafeInteger(Number(rawRevision)))) return error("invalid_query");
+  const knownBodyRevision = rawRevision === null ? -1 : Number(rawRevision);
+  const snapshot = await timing.measure("db", () => readSelectionSnapshot(env, id, true, knownBodyRevision));
+  if (!snapshot) return error("not_found", 404);
+  const row = snapshot.link as unknown as EnrichmentDetailRow;
+  const bodyUnchanged = knownBodyRevision >= 0 && row.app_body_revision === knownBodyRevision;
+  const processable = /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\//i.test(row.url) ? 1 : 0;
+  const detail = mapEnrichmentListItem({ ...row, processable,
+    cache_decision_id: snapshot.decisionId,
+    cache_entity_revision: snapshot.entity?.revision ?? 0 }, true);
+  const selection = selectionPayload(snapshot, id,
+    new URLSearchParams({ include_automatic: "1", include_state: "1" }));
+  const accepted = new Set<string>();
+  for (const entry of snapshot.overrides) {
+    if (entry.field !== "entities") continue;
+    if (entry.action === "set_empty" || (entry.action === "reset" && entry.term === "")) accepted.clear();
+    else if (entry.action === "accept") accepted.add(entry.term);
+    else accepted.delete(entry.term);
+  }
+  const entity = snapshot.entity;
+  const observations = snapshot.state.entities.observations;
+  let archivedEntities: string[] = [];
+  if (entity) {
+    try {
+      const stored: unknown = JSON.parse(entity.entities);
+      if (Array.isArray(stored)) archivedEntities = stored.filter((value): value is string => typeof value === "string");
+    } catch { /* Match the existing entity read's empty fallback for damaged history. */ }
+  }
+  const entities = {
+    id, state: entity?.state ?? "not_run", state_content_revision: entity?.content_revision ?? 0,
+    evidence_snapshot_id: entity?.evidence_snapshot_id ?? 0,
+    content_hash: entity?.content_hash ?? "", stale: snapshot.entityStale,
+    updated_at: entity?.updated_at ?? null,
+    automatic: snapshot.automatic.entities,
+    archived_entities: archivedEntities,
+    observations,
+    effective_observations: observations.filter((entry) => entry.effective),
+    entities: snapshot.view.entities,
+    human: snapshot.view.entities.filter((term) => accepted.has(term)),
+    overrides: snapshot.overrides.filter((entry) => entry.field === "entities"),
+    revision: snapshot.link.personal_revision
+  };
+  return json({ version: 1, body_unchanged: bodyUnchanged, detail,
+    selection: { available: true, ...selection }, entities });
 }
 
 async function updateCuration(request: Request, env: Env, id: number, timing: TimingCollector, app = false): Promise<Response> {
   const body = await readEnrichmentBody(request);
   if (body instanceof Response) return body;
-  if (Object.keys(body).some((key) => !["why", "curation_status", "classification"].includes(key))) return error("invalid_curation");
+  if (Object.keys(body).some((key) => !["why", "curation_status", "classification", "expected_revision", "operation_key"].includes(key))) return error("invalid_curation");
+  const guardedConfirm = "expected_revision" in body || "operation_key" in body;
+  if (guardedConfirm && (!Number.isSafeInteger(body.expected_revision) || Number(body.expected_revision) < 0 ||
+      typeof body.operation_key !== "string" || body.operation_key.length === 0 || body.operation_key.length > 200 ||
+      !("classification" in body) || body.classification === null || "why" in body || "curation_status" in body)) {
+    return error("invalid_curation");
+  }
   const updates: string[] = [];
   const bindings: Array<string | number | null> = [];
   if ("why" in body) {
@@ -707,86 +1176,175 @@ async function updateCuration(request: Request, env: Env, id: number, timing: Ti
     const selection = validateSelection(body.classification);
     if (body.classification !== null && (selection === null || !record(body.classification) ||
       Object.keys(body.classification).some((key) => !["topics", "form", "use"].includes(key)))) return error("invalid_curation");
-    updates.push("curation = ?");
-    bindings.push(selection === null ? null : JSON.stringify(selection));
   }
-  if (updates.length === 0) return error("invalid_curation");
-  const row = await timing.measure("db", () => env.DB.prepare(
-    `UPDATE links SET ${updates.join(", ")} WHERE id = ? RETURNING id`
-  ).bind(...bindings, id).first<{ id: number }>());
-  if (row === null) return error("not_found", 404);
+  if (updates.length === 0 && !("classification" in body)) return error("invalid_curation");
+  const exists = await timing.measure("db", () => env.DB.prepare(`SELECT id FROM links WHERE id = ?`).bind(id)
+    .first<{ id: number }>());
+  if (exists === null) return error("not_found", 404);
+  if (updates.length > 0) {
+    await timing.measure("db", () => env.DB.prepare(
+      `UPDATE links SET ${updates.join(", ")} WHERE id = ?`
+    ).bind(...bindings, id).run());
+  }
+  // The pre-v2 client writes only topics<=3 plus form/use. That write is
+  // translated into the same field-level override log the v2 UI uses, so the
+  // old endpoint and the new view derive from one effective result and the
+  // hidden v2 dimensions are preserved (R2-03).
+  if ("classification" in body) {
+    const { view } = await computeEffective(env, id);
+    const existing = {
+      topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
+      affordances: view.affordances, form: view.form, use: view.use
+    };
+    const selection = body.classification === null ? null : validateSelection(body.classification);
+    const { selection: desired } = applyV1Write(existing, selection === null
+      ? { topics: [], form: "", use: "" }
+      : { topics: selection.topics, form: selection.form, use: selection.use });
+    // Guarded confirmation has the revision and operation ID from a current
+    // client. Old clients remain on the unguarded legacy path. A null value
+    // restores only the v1-expressible dimensions (B05-T06/R2-03).
+    const digest = guardedConfirm ? await crypto.subtle.digest("SHA-256", new TextEncoder().encode(
+      canonicalJSON({ id, classification: selection, expected_revision: body.expected_revision }))) : null;
+    const payloadHash = digest ? Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0")).join("") : "";
+    const result = await persistSelectionOverrides(env, id, desired, {
+      source: guardedConfirm ? "human" : "legacy_unknown",
+      operationPrefix: guardedConfirm ? String(body.operation_key) : `v1-${id}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+      expectedRevision: guardedConfirm ? Number(body.expected_revision) : undefined,
+      confirmV1Selection: guardedConfirm,
+      operation: guardedConfirm ? { key: String(body.operation_key), payloadHash } : undefined,
+      rejectAutomaticExtras: true,
+      resetFields: selection === null ? ["topics", "form", "use"] : undefined
+    });
+    if ("conflict" in result) return json({ error: "revision_conflict", revision: result.conflict }, 409);
+    if ("operationConflict" in result) return error("operation_conflict", 409);
+  }
   if (app) {
     const item = await timing.measure("db", () => env.DB.prepare(
       `SELECT ${LINK_COLUMNS}, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)} FROM links WHERE id = ?`
     ).bind(id).first<LinkRow & EnrichmentListRow>());
-    return item === null ? error("not_found", 404) : json(mapAppLink(item, true));
+    if (item === null) return error("not_found", 404);
+    const mapped = mapAppLink(item, true);
+    return json(request.headers.get("X-Cairn-Tag-System") === "1"
+      ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped);
   }
   return getEnrichmentJob(env, id, timing);
 }
 
-async function claimEnrichmentJob(env: Env, timing: TimingCollector): Promise<Response> {
+async function sourceClaimable(request: Request, env: Env, timing: TimingCollector): Promise<Response> {
+  const row = await timing.measure("db", () => env.DB.prepare(SOURCE_CLAIM_CANDIDATE_SQL)
+    .bind(...sourceClaimCandidateBindings(new Date(),
+      request.headers.get("X-Cairn-Source-Component-Gate") === "1")).first<{ id: number }>());
+  return json({ claimable: row !== null });
+}
+
+// Claim and acquire an expired component's single probe in one D1 transaction.
+// The probe outlives the 15-minute source lease by one minute, so another
+// process cannot begin a second probe while the first may still commit.
+function sourceGateProbe(env: Env, leaseToken: string, now: Date): D1PreparedStatement {
+  return env.DB.prepare(`UPDATE enrichment_component_gates SET state='probing',
+    probe_token=?,probe_until=?,updated_at=? WHERE component=(
+      SELECT ${SOURCE_NEXT_COMPONENT_SQL} FROM links WHERE enrichment_status='processing'
+        AND enrichment_lease_token=?) AND state<>'closed'`)
+    .bind(leaseToken, new Date(now.getTime() + ENRICHMENT_LEASE_MILLISECONDS + 60_000).toISOString(),
+      now.toISOString(), leaseToken);
+}
+
+async function pausedSourceGate(env: Env, component?: "source" | "reading"): Promise<Response | null> {
+  const nowIso = new Date().toISOString();
+  const gate = await env.DB.prepare(`SELECT component,state,retry_at,probe_until
+    FROM enrichment_component_gates WHERE component IN ('source','reading')
+      AND (? IS NULL OR component=?)
+      AND ((state='open' AND retry_at>?) OR (state='probing' AND probe_until>?))
+    ORDER BY component LIMIT 1`).bind(component ?? null, component ?? null, nowIso, nowIso)
+    .first<{ component: string; state: string; retry_at: string | null; probe_until: string | null }>();
+  if (!gate) return null;
+  const until = gate.state === "open" ? gate.retry_at : gate.probe_until;
+  if (!until || Date.parse(until) <= Date.now()) return null;
+  const delay = Date.parse(until) - Date.now();
+  const response = json({ error: "component_paused", component: gate.component,
+    retry_after_ms: delay }, 503);
+  response.headers.set("Retry-After", String(Math.ceil(delay / 1000)));
+  return response;
+}
+
+async function claimEnrichmentJob(request: Request, env: Env, timing: TimingCollector): Promise<Response> {
+  if (request.headers.get("X-Cairn-Provider-Attempt-Ledger") !== "1") {
+    return error("capability_mismatch", 409);
+  }
   const now = new Date();
   const nowIso = now.toISOString();
   const leaseToken = crypto.randomUUID();
   const leaseUntil = new Date(now.getTime() + ENRICHMENT_LEASE_MILLISECONDS).toISOString();
-  const row = await timing.measure("db", () =>
-    env.DB.prepare(
+  const gateAware = request.headers.get("X-Cairn-Source-Component-Gate") === "1";
+  const stagePauseAware = gateAware && request.headers.get("X-Cairn-Source-Stage-Pause") === "1";
+  const stageMask = request.headers.get("X-Cairn-Source-Stage-Mask") ?? "both";
+  if ((!stagePauseAware && stageMask !== "both") ||
+      (stageMask !== "both" && stageMask !== "source" && stageMask !== "reading")) {
+    return error("invalid_enrichment", 400);
+  }
+  const guarded = request.headers.get("X-Cairn-Source-Lease-Admission") === "1";
+  const results = await timing.measure("db", () =>
+    env.DB.batch([env.DB.prepare(
       `UPDATE links
         SET enrichment_status = 'processing',
-            enrichment_attempts = enrichment_attempts + 1,
+            enrichment_attempts = enrichment_attempts + CASE
+              WHEN enrichment_status='processing' AND enrichment_paid_stage_started=0 THEN 0 ELSE 1 END,
+            enrichment_paid_stage_started = ?,
+            enrichment_paid_uncertain = ?,
+            enrichment_paid_stage = ?,
             enrichment_next_retry_at = NULL,
             enrichment_lease_token = ?,
             enrichment_lease_until = ?,
             enrichment_error = NULL,
             enrichment_updated_at = ?
-        WHERE id = (
-          SELECT id
-          FROM links
-          WHERE ${X_LINK_SQL}
-            AND curation_status <> 'drop'
-            AND enrichment_attempts < ?
-            AND (
-              enrichment_status = 'pending'
-              OR (
-                enrichment_status = 'failed'
-                AND (enrichment_next_retry_at IS NULL OR enrichment_next_retry_at <= ?)
-              )
-              OR (
-                enrichment_status = 'processing'
-                AND (enrichment_lease_until IS NULL OR enrichment_lease_until <= ?)
-              )
-            )
-          ORDER BY id ASC
-          LIMIT 1
-        )
+        WHERE id = (${sourceClaimSQL(stageMask)})
         RETURNING id, url, note, created_at, enrichment_attempts,
-                  enrichment_lease_token, enrichment_lease_until`
+                  enrichment_lease_token, enrichment_lease_until, content_revision,
+                  CASE WHEN refresh_requested_at IS NOT NULL THEN refresh_epoch ELSE 0 END AS refresh_epoch,
+                  ${SOURCE_NEXT_COMPONENT_SQL} AS source_component`
     )
-      .bind(leaseToken, leaseUntil, nowIso, MAX_ENRICHMENT_ATTEMPTS, nowIso, nowIso)
-      .first<EnrichmentJobRow>()
+      .bind(guarded ? 0 : 1, guarded ? 0 : 1, guarded ? null : "legacy_unknown", leaseToken, leaseUntil, nowIso,
+        ...sourceClaimCandidateBindings(now, gateAware, stageMask)), sourceGateProbe(env, leaseToken, now)])
   );
+  const row = results[0].results[0] as EnrichmentJobRow | undefined;
 
-  if (row === null) {
-    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  if (row === undefined) {
+    return await pausedSourceGate(env) ?? new Response(null, { status: 204, headers: CORS_HEADERS });
   }
 
-  return json(mapEnrichmentJob(row));
+  if (Number(results[1].meta.changes) === 1) {
+    timing.addBusinessEvent({ kind: "component_gate", component: row.source_component, action: "probe_started" });
+  }
+  timing.addBusinessEvent({ kind: "source_claim", origin: "scheduled", outcome: "claimed", status: 200 });
+  return json(mapEnrichmentJob(row, stagePauseAware));
 }
 
 async function claimEnrichmentJobById(
+  request: Request,
   env: Env,
   id: number,
   timing: TimingCollector
 ): Promise<Response> {
+  if (request.headers.get("X-Cairn-Provider-Attempt-Ledger") !== "1") {
+    return error("capability_mismatch", 409);
+  }
   const now = new Date();
   const nowIso = now.toISOString();
+  const budgetStart = nowIso.slice(0, 10) + "T00:00:00.000Z";
+  const budgetEnd = new Date(Date.parse(budgetStart) + 86400000).toISOString();
   const leaseToken = crypto.randomUUID();
   const leaseUntil = new Date(now.getTime() + ENRICHMENT_LEASE_MILLISECONDS).toISOString();
-  const row = await timing.measure("db", () =>
-    env.DB.prepare(
+  const gateAware = request.headers.get("X-Cairn-Source-Component-Gate") === "1";
+  const guarded = request.headers.get("X-Cairn-Source-Lease-Admission") === "1";
+  const results = await timing.measure("db", () =>
+    env.DB.batch([env.DB.prepare(
       `UPDATE links
           SET enrichment_status = 'processing',
               enrichment_attempts = 1,
+              enrichment_paid_stage_started = ?,
+              enrichment_paid_uncertain = ?,
+              enrichment_paid_stage = ?,
               enrichment_next_retry_at = NULL,
               enrichment_lease_token = ?,
               enrichment_lease_until = ?,
@@ -794,38 +1352,234 @@ async function claimEnrichmentJobById(
               enrichment_updated_at = ?
         WHERE id = ?
           AND ${X_LINK_SQL}
+          AND enrichment_paid_uncertain=0
+          AND (COALESCE(enrichment_error,'') <> 'budget_exhausted'
+            OR enrichment_next_retry_at IS NULL OR enrichment_next_retry_at<=?)
+          AND COALESCE((SELECT total FROM enrichment_provider_daily_usage
+            WHERE day=?),0) < ?
+          AND (SELECT COUNT(*) FROM enrichment_provider_attempts a
+            WHERE a.link_id=links.id AND a.created_at>=? AND a.created_at<?) < ?
           AND (
             enrichment_status <> 'processing'
             OR enrichment_lease_until IS NULL
             OR enrichment_lease_until <= ?
           )
+          AND ${SOURCE_GATE_READY_SQL}
         RETURNING id, url, note, created_at, enrichment_attempts,
-                  enrichment_lease_token, enrichment_lease_until`
+                  enrichment_lease_token, enrichment_lease_until, content_revision,
+                  CASE WHEN refresh_requested_at IS NOT NULL THEN refresh_epoch ELSE 0 END AS refresh_epoch,
+                  ${SOURCE_NEXT_COMPONENT_SQL} AS source_component`
     )
-      .bind(leaseToken, leaseUntil, nowIso, id, nowIso)
-      .first<EnrichmentJobRow>()
+      .bind(guarded ? 0 : 1, guarded ? 0 : 1, guarded ? null : "legacy_unknown",
+        leaseToken, leaseUntil, nowIso, id, nowIso,
+        budgetStart.slice(0, 10), PROVIDER_ATTEMPT_LIMITS.daily_total,
+        budgetStart, budgetEnd, PROVIDER_ATTEMPT_LIMITS.daily_item, nowIso,
+        gateAware ? 1 : 0, nowIso, nowIso),
+      sourceGateProbe(env, leaseToken, now)])
   );
-  if (row !== null) return json(mapEnrichmentJob(row));
+  const row = results[0].results[0] as EnrichmentJobRow | undefined;
+  if (row !== undefined) {
+    if (Number(results[1].meta.changes) === 1) {
+      timing.addBusinessEvent({ kind: "component_gate", component: row.source_component, action: "probe_started" });
+    }
+    timing.addBusinessEvent({ kind: "source_claim", origin: "by_id", outcome: "claimed", status: 200 });
+    return json(mapEnrichmentJob(row, request.headers.get("X-Cairn-Source-Stage-Pause") === "1"));
+  }
 
   const existing = await timing.measure("db-check", () =>
     env.DB.prepare(`SELECT id FROM links WHERE id = ? AND ${X_LINK_SQL}`)
       .bind(id)
       .first<{ id: number }>()
   );
-  return existing === null ? error("not_found", 404) : error("job_busy", 409);
+  if (existing === null) return error("not_found", 404);
+  const stage = await env.DB.prepare(`SELECT ${SOURCE_NEXT_COMPONENT_SQL} AS component
+    FROM links WHERE id=?`).bind(id).first<{ component: "source" | "reading" }>();
+  return await pausedSourceGate(env, stage?.component) ?? error("job_busy", 409);
+}
+
+// Admit one paid stage only while the caller still owns enough lease time for
+// its request deadline and a bounded commit. A short lease is released in the
+// same request. Only a lease that never admitted paid work refunds its claim
+// attempt; otherwise a crashed or unknown provider call must remain counted.
+async function admitPaidSourceStage(
+  request: Request, env: Env, id: number, timing: TimingCollector
+): Promise<Response> {
+  if (request.headers.get("X-Cairn-Provider-Attempt-Ledger") !== "1") {
+    return error("capability_mismatch", 409);
+  }
+  const body = await readEnrichmentBody(request);
+  if (body instanceof Response) return body;
+  const token = readBoundedString(body.lease_token, 1, 100);
+  const minRemaining = body.min_remaining_ms;
+  const stage = body.stage === undefined ? "legacy_unknown" : readBoundedString(body.stage, 1, 20);
+  if (token === null || !Number.isSafeInteger(minRemaining) ||
+      Number(minRemaining) < 1 || Number(minRemaining) > ENRICHMENT_LEASE_MILLISECONDS ||
+      (stage !== "fetch" && stage !== "reading" && stage !== "legacy_unknown")) {
+    return error("invalid_enrichment");
+  }
+  const now = new Date();
+  const deadline = new Date(now.getTime() + Number(minRemaining)).toISOString();
+  const component = stage === "fetch" ? "source" : stage;
+  const admitted = await timing.measure("db", () => env.DB.prepare(`UPDATE links
+    SET enrichment_paid_stage=?
+    WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+      AND enrichment_lease_until>=? AND enrichment_paid_uncertain=0
+      AND (enrichment_paid_stage IS NULL OR enrichment_paid_stage=?)
+      AND ((?='legacy_unknown' AND NOT EXISTS(SELECT 1 FROM enrichment_component_gates g
+          WHERE g.component IN ('source','reading') AND g.state<>'closed'))
+        OR (?<>'legacy_unknown' AND EXISTS(SELECT 1 FROM enrichment_component_gates g
+          WHERE g.component=? AND (g.state='closed' OR (g.state='probing'
+            AND g.probe_token=? AND g.probe_until>?)))))
+    RETURNING enrichment_lease_until`).bind(stage, id, token, deadline, stage,
+      stage, stage, component, token, now.toISOString())
+    .first<{ enrichment_lease_until: string }>());
+  if (admitted) {
+    return json({ id, status: "admitted",
+      remaining_ms: Math.max(0, Date.parse(admitted.enrichment_lease_until) - Date.now()) });
+  }
+  const current = await timing.measure("db-check", () => env.DB.prepare(`SELECT id,enrichment_status,
+    enrichment_lease_token,enrichment_lease_until,enrichment_paid_uncertain,enrichment_paid_stage FROM links WHERE id=?`).bind(id).first<{
+    id: number; enrichment_status: string; enrichment_lease_token: string | null;
+    enrichment_lease_until: string | null; enrichment_paid_uncertain: number;
+    enrichment_paid_stage: string | null;
+  }>());
+  if (!current) return error("not_found", 404);
+  if (current.enrichment_status !== "processing" || current.enrichment_lease_token !== token ||
+      current.enrichment_lease_until === null) return error("lease_conflict", 409);
+  if (stage !== "legacy_unknown" && current.enrichment_paid_uncertain === 0 &&
+      current.enrichment_lease_until >= deadline &&
+      (current.enrichment_paid_stage === null || current.enrichment_paid_stage === stage)) {
+    const gate = await timing.measure("db-check", () => env.DB.prepare(`SELECT state,probe_token,probe_until,retry_at
+      FROM enrichment_component_gates WHERE component=?`).bind(component)
+      .first<{ state: string; probe_token: string | null; probe_until: string | null; retry_at: string | null }>());
+    if (gate && gate.state !== "closed" &&
+        !(gate.state === "probing" && gate.probe_token === token && gate.probe_until && gate.probe_until > now.toISOString())) {
+      const released = await timing.measure("db", () => env.DB.prepare(`UPDATE links SET
+        enrichment_status='pending',
+        enrichment_attempts=CASE WHEN enrichment_paid_stage_started=0
+          THEN MAX(0,enrichment_attempts-1) ELSE enrichment_attempts END,
+        enrichment_paid_stage_started=0,enrichment_paid_stage=NULL,
+        enrichment_lease_token=NULL,enrichment_lease_until=NULL,enrichment_updated_at=?
+        WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+          AND enrichment_paid_uncertain=0 RETURNING id`)
+        .bind(now.toISOString(), id, token).first<{ id: number }>());
+      if (released) {
+        const until = gate.state === "open" ? gate.retry_at : gate.probe_until;
+        const delay = until ? Math.max(0, Date.parse(until) - Date.now()) : 0;
+        const response = error("component_paused", 503);
+        if (delay > 0) response.headers.set("Retry-After", String(Math.ceil(delay / 1000)));
+        return response;
+      }
+    }
+  }
+  const released = await timing.measure("db", () => env.DB.prepare(`UPDATE links SET
+    enrichment_status='pending',
+    enrichment_attempts=CASE WHEN enrichment_paid_stage_started=0
+      THEN MAX(0,enrichment_attempts-1) ELSE enrichment_attempts END,
+    enrichment_paid_stage_started=0,
+    enrichment_lease_token=NULL,enrichment_lease_until=NULL,
+    enrichment_next_retry_at=NULL,enrichment_updated_at=?
+    WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+      AND enrichment_lease_until=? AND enrichment_lease_until<?
+    RETURNING id`).bind(now.toISOString(), id, token, current.enrichment_lease_until, deadline)
+    .first<{ id: number }>());
+  if (released) return error("lease_released", 409);
+  return current.enrichment_paid_uncertain === 1
+    ? error("provider_result_unknown", 409) : error("lease_conflict", 409);
+}
+
+// A budget denial before this stage obtained a permit is free. Release the
+// lease, refund its queue attempt and wait until the next UTC budget window.
+// A racing permit sets uncertain=1 in its INSERT trigger and fences this write.
+async function deferSourceBudget(request: Request, env: Env, id: number, timing: TimingCollector): Promise<Response> {
+  if (request.headers.get("X-Cairn-Provider-Attempt-Ledger") !== "1") {
+    return error("capability_mismatch", 409);
+  }
+  const body = await readEnrichmentBody(request);
+  if (body instanceof Response) return body;
+  const token = readBoundedString(body.lease_token, 1, 100);
+  const stage = body.stage;
+  if (token === null || (stage !== "fetch" && stage !== "reading")) return error("invalid_enrichment");
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const leaseHash = [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const now = new Date();
+  const nextWindow = new Date(Date.parse(now.toISOString().slice(0, 10) + "T00:00:00.000Z") + 86400000).toISOString();
+  const updated = await timing.measure("db", () => env.DB.prepare(`UPDATE links SET
+    enrichment_status='pending', enrichment_attempts=MAX(0,enrichment_attempts-1),
+    enrichment_paid_stage_started=0,enrichment_paid_stage=NULL,
+    enrichment_lease_token=NULL,enrichment_lease_until=NULL,
+    enrichment_next_retry_at=?,enrichment_error='budget_exhausted',enrichment_updated_at=?
+    WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+      AND enrichment_paid_stage=? AND enrichment_paid_uncertain=0
+      AND NOT EXISTS (SELECT 1 FROM enrichment_provider_attempts a WHERE a.link_id=links.id
+        AND a.lease_hash=? AND a.stage=?) RETURNING id`)
+    .bind(nextWindow, now.toISOString(), id, token, stage, leaseHash, stage).first<{id:number}>());
+  return updated ? json({ id, status: "deferred", retry_at: nextWindow }) : error("provider_result_unknown", 409);
+}
+
+// A per-process provider configuration pause cannot claim more of that stage.
+// Return an unused lease to the shared queue so a healthy instance may take
+// it. A prior paid stage keeps the job attempt; this stage must have no ledger
+// reservation, including a reservation whose HTTP response was lost.
+async function deferLocalSourceStage(request: Request, env: Env, id: number,
+  timing: TimingCollector): Promise<Response> {
+  if (request.headers.get("X-Cairn-Provider-Attempt-Ledger") !== "1") {
+    return error("capability_mismatch", 409);
+  }
+  const body = await readEnrichmentBody(request);
+  if (body instanceof Response) return body;
+  const token = readBoundedString(body.lease_token, 1, 100);
+  const stage = body.stage;
+  if (token === null || (stage !== "fetch" && stage !== "reading")) return error("invalid_enrichment");
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const leaseHash = [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const now = new Date().toISOString();
+  const component = stage === "fetch" ? "source" : "reading";
+  const results = await timing.measure("db", () => env.DB.batch([
+    env.DB.prepare(`UPDATE links SET enrichment_status='pending',
+      enrichment_attempts=CASE WHEN enrichment_paid_stage_started=0
+        THEN MAX(0,enrichment_attempts-1) ELSE enrichment_attempts END,
+      enrichment_paid_stage_started=0,enrichment_paid_stage=NULL,
+      enrichment_lease_token=NULL,enrichment_lease_until=NULL,
+      enrichment_next_retry_at=NULL,enrichment_error=NULL,enrichment_updated_at=?
+      WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+        AND enrichment_paid_uncertain=0
+        AND (enrichment_paid_stage IS NULL OR enrichment_paid_stage=?)
+        AND NOT EXISTS(SELECT 1 FROM enrichment_provider_attempts a
+          WHERE a.link_id=links.id AND a.lease_hash=? AND a.stage=?) RETURNING id`)
+      .bind(now, id, token, stage, leaseHash, stage),
+    env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',epoch=epoch+1,
+      retry_at=?,probe_token=NULL,probe_until=NULL,updated_at=?
+      WHERE component=? AND state='probing' AND probe_token=?
+        AND EXISTS(SELECT 1 FROM links l WHERE l.id=? AND l.enrichment_status='pending'
+          AND l.enrichment_lease_token IS NULL)
+        AND NOT EXISTS(SELECT 1 FROM enrichment_provider_attempts a
+          WHERE a.link_id=? AND a.lease_hash=? AND a.stage=?)`)
+      .bind(now, now, component, token, id, id, leaseHash, stage)
+  ]));
+  const released = results[0].results.length > 0;
+  timing.addBusinessEvent({ kind: "stage_lease", action: "local_defer", stage: component,
+    outcome: released ? "deferred" : "refused", status: released ? 200 : 409 });
+  return released ? json({ id, status: "deferred" }) : error("provider_result_unknown", 409);
 }
 
 async function completeEnrichmentJob(
   request: Request,
   env: Env,
   id: number,
-  timing: TimingCollector
+  timing: TimingCollector,
+  onResolved: (outcome: "stored" | "committed" | "replay" | "receipt_confirmed") => void
 ): Promise<Response> {
   const body = await readEnrichmentBody(request);
   if (body instanceof Response) return body;
 
   const leaseToken = readBoundedString(body.lease_token, 1, 100);
-  const originalText = readBoundedString(body.original_text, 1, MAX_ORIGINAL_TEXT_LENGTH);
+  // The source checkpoint may contain meaningful leading/trailing whitespace
+  // (for example a code block). Validate it without rewriting those bytes.
+  const originalText = typeof body.original_text === "string" &&
+    body.original_text.trim().length > 0 && body.original_text.length <= MAX_ORIGINAL_TEXT_LENGTH &&
+    new TextEncoder().encode(body.original_text).byteLength <= MAX_ORIGINAL_TEXT_LENGTH
+    ? body.original_text : null;
   const aiTitle = readOptionalBoundedString(body.ai_title, 1, MAX_AI_TITLE_LENGTH);
   const originalLanguage = readOptionalBoundedString(body.original_language, 1, MAX_ORIGINAL_LANGUAGE_LENGTH);
   const translatedText = readOptionalBoundedString(body.translated_text, 1, MAX_TRANSLATED_TEXT_LENGTH);
@@ -841,6 +1595,28 @@ async function completeEnrichmentJob(
     return error("invalid_enrichment");
   }
 
+  const digest = async (value: string): Promise<string> => {
+    const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+  const leaseHash = await digest(leaseToken);
+  const payloadHash = await digest(JSON.stringify({ originalText, aiTitle, originalLanguage,
+    translatedText, summary, model, relatedLinks, images, classification }));
+  const readReceipt = () => env.DB.prepare(`SELECT link_id,payload_hash,response
+    FROM enrichment_completion_receipts WHERE lease_hash=?`).bind(leaseHash)
+    .first<{ link_id: number; payload_hash: string; response: string }>();
+  const replay = async (): Promise<Response | null> => {
+    const receipt = await timing.measure("receipt", readReceipt);
+    if (!receipt) return null;
+    if (receipt.link_id !== id || receipt.payload_hash !== payloadHash) return error("operation_conflict", 409);
+    return json(JSON.parse(receipt.response));
+  };
+  const old = await replay();
+  if (old) {
+    if (old.status === 200) onResolved("replay");
+    return old;
+  }
+
   if (images.length > 0) {
     const storedImages = await timing.measure("r2-head", () =>
       Promise.all(images.map((image) => env.ENRICHMENT_IMAGES.head(image.key)))
@@ -849,13 +1625,39 @@ async function completeEnrichmentJob(
   }
 
   const now = new Date().toISOString();
-  const row = await timing.measure("db", () =>
-    env.DB.prepare(
+  const receiptBody = { id, status: "completed", enriched_at: now };
+  const paidGuard = `AND (enrichment_paid_stage IS NULL OR
+    (enrichment_paid_stage='reading' AND EXISTS
+      (SELECT 1 FROM enrichment_provider_attempts a WHERE a.link_id=links.id
+       AND a.lease_hash=? AND a.content_revision=links.content_revision
+       AND a.stage='reading' AND a.state='responded' AND a.http_status=200)))`;
+  // A reading completion may add aids but cannot replace fields from a saved
+  // source. Keep this guard in the same D1 batch as the receipt and update so
+  // a source change between validation and commit cannot create a false ack.
+  const sourceGuard = `AND (NOT EXISTS (SELECT 1 FROM enrichment_sources s WHERE s.link_id=links.id)
+    OR EXISTS (SELECT 1 FROM enrichment_sources s WHERE s.link_id=links.id
+      AND s.url=links.url AND s.original_text=?
+      AND json(json_extract(s.payload,'$.related_links'))=json(?)
+      AND (json_extract(s.payload,'$.original_language')='' OR
+        json_extract(s.payload,'$.original_language')=?)))`;
+  const sourceBindings = [originalText, JSON.stringify(relatedLinks), originalLanguage ?? null];
+  try {
+    const results = await timing.measure("db", () => env.DB.batch([
+      env.DB.prepare(`INSERT INTO enrichment_completion_receipts(lease_hash,link_id,payload_hash,response,created_at)
+        SELECT ?,id,?,?,? FROM links WHERE id=? AND enrichment_status='processing'
+          AND enrichment_lease_token=? ${paidGuard} ${sourceGuard}
+        RETURNING lease_hash`)
+        .bind(leaseHash, payloadHash, JSON.stringify(receiptBody), now, id, leaseToken, leaseHash,
+          ...sourceBindings),
+      env.DB.prepare(
       `UPDATE links
         SET enrichment_status = 'completed',
+            manual_priority = 0,
             enrichment_next_retry_at = NULL,
             enrichment_lease_token = NULL,
             enrichment_lease_until = NULL,
+            enrichment_paid_uncertain = 0,
+            enrichment_paid_stage = NULL,
             ai_title = ?,
             original_language = ?,
             original_text = ?,
@@ -871,18 +1673,45 @@ async function completeEnrichmentJob(
         WHERE id = ?
           AND enrichment_status = 'processing'
           AND enrichment_lease_token = ?
+          ${paidGuard}
+          ${sourceGuard}
         RETURNING id`
     )
       .bind(
         aiTitle ?? null, originalLanguage ?? null, originalText, translatedText ?? null, summary,
         JSON.stringify(relatedLinks), JSON.stringify(images), classification ? JSON.stringify(classification) : null,
-        model, now, now, id, leaseToken
-      )
-      .first<{ id: number }>()
-  );
-
-  if (row === null) return error("lease_conflict", 409);
-  return json({ id: row.id, status: "completed", enriched_at: now });
+        model, now, now, id, leaseToken, leaseHash, ...sourceBindings
+      ),
+      env.DB.prepare(`UPDATE enrichment_component_gates SET state='closed',epoch=epoch+1,
+        failures=0,retry_at=NULL,probe_token=NULL,probe_until=NULL,reason=NULL,updated_at=?
+        WHERE component='reading' AND state='probing' AND probe_token=?
+          AND EXISTS(SELECT 1 FROM enrichment_completion_receipts r JOIN links l ON l.id=r.link_id
+            WHERE r.lease_hash=? AND l.id=? AND l.enrichment_status='completed')
+          AND EXISTS(SELECT 1 FROM enrichment_provider_attempts a WHERE a.link_id=?
+            AND a.lease_hash=? AND a.stage='reading' AND a.state='responded' AND a.http_status=200)`)
+        .bind(now, leaseToken, leaseHash, id, id, leaseHash)
+    ]));
+    if (!results[0].results.length || !results[1].results.length) {
+      const existing = await replay();
+      if (existing?.status === 200) onResolved("replay");
+      return existing ?? error("lease_conflict", 409);
+    }
+    if (Number(results[2].meta.changes) === 1) {
+      timing.addBusinessEvent({ kind: "component_gate", component: "reading", action: "closed" });
+    }
+    onResolved("committed");
+    return json(receiptBody);
+  } catch (cause) {
+    // A concurrent identical completion may win the UNIQUE lease-hash race.
+    // D1 batch rolls back both writes on failure; a different failure remains
+    // visible to the caller after the exact receipt check.
+    const existing = await replay();
+    if (existing) {
+      if (existing.status === 200) onResolved("receipt_confirmed");
+      return existing;
+    }
+    throw cause;
+  }
 }
 
 async function failEnrichmentJob(
@@ -897,6 +1726,12 @@ async function failEnrichmentJob(
   const leaseToken = readBoundedString(body.lease_token, 1, 100);
   const failure = readBoundedString(body.error, 1, MAX_ENRICHMENT_ERROR_LENGTH);
   if (leaseToken === null || failure === null) return error("invalid_enrichment");
+  const componentFault = body.component_fault;
+  const retryAfterMS = body.retry_after_ms;
+  if (componentFault !== undefined && componentFault !== "source_transient" &&
+      componentFault !== "reading_transient") return error("invalid_enrichment");
+  if (retryAfterMS !== undefined && (!Number.isSafeInteger(retryAfterMS) ||
+      Number(retryAfterMS) < 0)) return error("invalid_enrichment");
 
   const current = await timing.measure("db", () =>
     env.DB.prepare(
@@ -909,6 +1744,52 @@ async function failEnrichmentJob(
   );
   if (current === null) return error("lease_conflict", 409);
 
+  // A transient observed before the provider reservation is evidence about
+  // our own admission path, not about the provider. Release the unused lease
+  // and stop this caller's round instead of opening a shared provider gate or
+  // charging another bookmark's attempt on the next claim.
+  const stage = componentFault === "source_transient" ? "fetch"
+    : componentFault === "reading_transient" ? "reading" : null;
+  const leaseBytes = stage ? await crypto.subtle.digest("SHA-256", new TextEncoder().encode(leaseToken)) : null;
+  const leaseHash = leaseBytes
+    ? [...new Uint8Array(leaseBytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("") : null;
+  if (stage) {
+    const reserved = await timing.measure("db-check", () => env.DB.prepare(`SELECT 1
+      FROM enrichment_provider_attempts WHERE link_id=? AND lease_hash=? AND stage=? LIMIT 1`)
+      .bind(id, leaseHash, stage).first());
+    if (!reserved) {
+      const now = new Date().toISOString();
+      const results = await timing.measure("db", () => env.DB.batch([
+        env.DB.prepare(`UPDATE links SET enrichment_status='pending',
+          enrichment_attempts=CASE WHEN enrichment_paid_stage_started=0
+            THEN MAX(0,enrichment_attempts-1) ELSE enrichment_attempts END,
+          enrichment_paid_stage_started=0,enrichment_paid_stage=NULL,
+          enrichment_lease_token=NULL,enrichment_lease_until=NULL,
+          enrichment_next_retry_at=NULL,enrichment_error=NULL,enrichment_updated_at=?
+          WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
+            AND enrichment_paid_uncertain=0
+            AND NOT EXISTS(SELECT 1 FROM enrichment_provider_attempts a
+              WHERE a.link_id=links.id AND a.lease_hash=? AND a.stage=?) RETURNING id`)
+          .bind(now, id, leaseToken, leaseHash, stage),
+        env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',epoch=epoch+1,
+          retry_at=?,probe_token=NULL,probe_until=NULL,updated_at=?
+          WHERE component=? AND state='probing' AND probe_token=?
+            AND EXISTS(SELECT 1 FROM links l WHERE l.id=? AND l.enrichment_status='pending'
+              AND l.enrichment_lease_token IS NULL)
+            AND NOT EXISTS(SELECT 1 FROM enrichment_provider_attempts a
+              WHERE a.link_id=? AND a.lease_hash=? AND a.stage=?)`)
+          .bind(now, now, stage === "fetch" ? "source" : "reading", leaseToken,
+            id, id, leaseHash, stage)
+      ]));
+      const released = results[0].results.length > 0;
+      timing.addBusinessEvent({ kind: "stage_lease", action: "fault_without_reservation",
+        stage: stage === "fetch" ? "source" : "reading",
+        outcome: released ? "deferred" : "refused", status: 409 });
+      return released ? error("provider_attempt_missing", 409)
+        : error("provider_result_unknown", 409);
+    }
+  }
+
   const now = new Date();
   const exhausted = current.enrichment_attempts >= MAX_ENRICHMENT_ATTEMPTS;
   const delayIndex = Math.max(0, Math.min(current.enrichment_attempts - 1, ENRICHMENT_RETRY_DELAYS_MILLISECONDS.length - 1));
@@ -916,21 +1797,58 @@ async function failEnrichmentJob(
     ? null
     : new Date(now.getTime() + ENRICHMENT_RETRY_DELAYS_MILLISECONDS[delayIndex]).toISOString();
   const status = exhausted ? "exhausted" : "failed";
-  const row = await timing.measure("db", () =>
-    env.DB.prepare(
+  const jobFailure = env.DB.prepare(
       `UPDATE links
         SET enrichment_status = ?,
+            manual_priority = CASE WHEN ? = 'exhausted' THEN 0 ELSE manual_priority END,
             enrichment_next_retry_at = ?,
-            enrichment_lease_token = NULL,
-            enrichment_lease_until = NULL,
+            enrichment_lease_token = CASE WHEN enrichment_paid_uncertain=1
+              THEN enrichment_lease_token ELSE NULL END,
+            enrichment_lease_until = CASE WHEN enrichment_paid_uncertain=1
+              THEN enrichment_lease_until ELSE NULL END,
             enrichment_error = ?,
             enrichment_updated_at = ?
         WHERE id = ? AND enrichment_status = 'processing' AND enrichment_lease_token = ?
         RETURNING id`
-    )
-      .bind(status, nextRetryAt, failure, now.toISOString(), id, leaseToken)
-      .first<{ id: number }>()
-  );
+    ).bind(status, status, nextRetryAt, failure, now.toISOString(), id, leaseToken);
+  const ownedProbe = await timing.measure("db-check", () => env.DB.prepare(`SELECT component,epoch,failures
+    FROM enrichment_component_gates WHERE component IN ('source','reading')
+      AND state='probing' AND probe_token=? LIMIT 1`).bind(leaseToken)
+    .first<{ component: "source" | "reading"; epoch: number; failures: number }>());
+  const component = componentFault === "source_transient" ? "source"
+    : componentFault === "reading_transient" ? "reading" : ownedProbe?.component;
+  let row: { id: number } | null;
+  if (component) {
+    const gate = await timing.measure("db-check", () => env.DB.prepare(`SELECT epoch,failures,state,probe_token
+      FROM enrichment_component_gates WHERE component=?`).bind(component)
+      .first<{ epoch: number; failures: number; state: string; probe_token: string | null }>());
+    const backoff = Math.min(600_000, 30_000 * 2 ** Math.min(gate?.failures ?? 0, 5));
+    const hint = Math.min(Number(retryAfterMS ?? 0), 600_000);
+    const retryAt = new Date(now.getTime() + Math.max(backoff, hint)).toISOString();
+    const faultHash = leaseHash ?? [...new Uint8Array(await crypto.subtle.digest("SHA-256",
+      new TextEncoder().encode(leaseToken)))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const gateOpen = env.DB.prepare(`UPDATE enrichment_component_gates SET state='open',
+      epoch=epoch+1,failures=MIN(failures+1,6),retry_at=?,probe_token=NULL,probe_until=NULL,
+      reason=?,updated_at=? WHERE component=? AND epoch=?
+      AND (state='closed' OR (state='probing' AND probe_token=?))
+      AND EXISTS(SELECT 1 FROM links l WHERE l.id=? AND l.enrichment_status='processing'
+        AND l.enrichment_lease_token=? AND l.enrichment_lease_until>?
+        AND (?=1 OR l.enrichment_paid_stage=?))
+      AND (?=1 OR EXISTS(SELECT 1 FROM enrichment_provider_attempts a
+        WHERE a.link_id=? AND a.lease_hash=? AND a.stage=?))`)
+      .bind(retryAt, componentFault ? "provider_transient" : "probe_failed", now.toISOString(),
+        component, gate?.epoch ?? -1, leaseToken, id, leaseToken, now.toISOString(),
+        ownedProbe?.component === component ? 1 : 0, component === "source" ? "fetch" : "reading",
+        ownedProbe?.component === component ? 1 : 0, id, faultHash,
+        component === "source" ? "fetch" : "reading");
+    const results = await timing.measure("db", () => env.DB.batch([gateOpen, jobFailure]));
+    if (Number(results[0].meta.changes) === 1) {
+      timing.addBusinessEvent({ kind: "component_gate", component, action: "opened" });
+    }
+    row = results[1].results[0] as { id: number } | undefined ?? null;
+  } else {
+    row = await timing.measure("db", () => jobFailure.first<{ id: number }>());
+  }
 
   if (row === null) return error("lease_conflict", 409);
   return json({ id: row.id, status, next_retry_at: nextRetryAt });
@@ -963,7 +1881,16 @@ async function storeEnrichmentImages(
   const images: EnrichmentImage[] = [];
   try {
     for (const imageUrl of imageUrls) {
-      images.push(await fetchAndStoreImage(env, id, imageUrl, timing));
+      const image = await fetchAndStoreImage(env, id, imageUrl, timing);
+      images.push(image);
+      const current = await env.DB.prepare("SELECT id FROM links WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?")
+        .bind(id, leaseToken).first();
+      if (!current) {
+        // A delete during put is cleaned here; if this isolate dies, the durable
+        // tombstone/scheduled scan catches the late object without trusting memory.
+        await cleanupDeletedImages(env, id);
+        return error("lease_conflict", 409);
+      }
     }
   } catch {
     return error("image_fetch_failed", 502);
@@ -1007,7 +1934,7 @@ async function fetchAndStoreImage(
     env.ENRICHMENT_IMAGES.put(key, body, {
       httpMetadata: {
         contentType,
-        cacheControl: "private, max-age=86400"
+        cacheControl: "private, no-store"
       },
       customMetadata: { source_url: imageUrl }
     })
@@ -1048,21 +1975,29 @@ async function readBodyWithinLimit(response: Response, limit: number): Promise<U
 async function getEnrichmentImage(request: Request, env: Env, key: string): Promise<Response> {
   if (!isValidImageKey(key)) return error("not_found", 404);
 
+  const id = Number(key.split("/")[1]);
+  if (!Number.isSafeInteger(id) || !await env.DB.prepare("SELECT id FROM links WHERE id=?").bind(id).first()) return error("not_found", 404);
   const object = await env.ENRICHMENT_IMAGES.get(key);
+  // Recheck after storage I/O, including before conditional 304 responses.
+  if (!await env.DB.prepare("SELECT id FROM links WHERE id=?").bind(id).first()) {
+    await object?.body.cancel();
+    return error("not_found", 404);
+  }
   if (object === null) return error("not_found", 404);
 
   const etag = object.httpEtag;
   if (request.headers.get("if-none-match") === etag) {
+    await object.body.cancel();
     return new Response(null, {
       status: 304,
-      headers: { ETag: etag, "Cache-Control": "private, max-age=86400", ...CORS_HEADERS }
+      headers: { ETag: etag, "Cache-Control": "private, no-store", ...CORS_HEADERS }
     });
   }
 
   const headers = new Headers(CORS_HEADERS);
   object.writeHttpMetadata(headers);
   headers.set("ETag", etag);
-  headers.set("Cache-Control", "private, max-age=86400");
+  headers.set("Cache-Control", "private, no-store");
   headers.set("X-Content-Type-Options", "nosniff");
   return new Response(object.body, { headers });
 }
@@ -1189,7 +2124,8 @@ async function cachedJson(
   env: Env,
   timing: TimingCollector,
   cacheUrlForGeneration: (generation: number) => string,
-  producer: () => Promise<unknown | null>
+  producer: () => Promise<unknown | null>,
+  ttlSeconds = READ_CACHE_TTL_SECONDS
 ): Promise<Response> {
   if (shouldBypassReadCache(request)) {
     timing.setCacheState("BYPASS");
@@ -1204,14 +2140,14 @@ async function cachedJson(
   const cached = await timing.measure("cache", () => caches.default.match(cacheRequest));
   if (cached !== undefined) {
     timing.setCacheState("HIT");
-    return withCacheHeader(cached, "HIT");
+    return withCacheHeader(cached, "HIT", ttlSeconds);
   }
 
   timing.setCacheState("MISS");
   const body = await producer();
   if (body === null) return error("not_found", 404);
 
-  const response = cacheableJson(body, "MISS");
+  const response = cacheableJson(body, "MISS", ttlSeconds);
   await timing.measure("cache-put", () => caches.default.put(cacheRequest, response.clone()));
   return response;
 }
@@ -1272,16 +2208,16 @@ function constantTimeEquals(left: string, right: string): boolean {
   return diff === 0;
 }
 
-function cacheableJson(body: unknown, cacheState: CacheState): Response {
+function cacheableJson(body: unknown, cacheState: CacheState, ttlSeconds: number): Response {
   return json(body, 200, {
-    "Cache-Control": READ_CACHE_CONTROL,
+    "Cache-Control": cacheControlFor(ttlSeconds),
     "X-Cairn-Cache": cacheState
   });
 }
 
-function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS"): Response {
+function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS", ttlSeconds: number): Response {
   const headers = new Headers(response.headers);
-  headers.set("Cache-Control", READ_CACHE_CONTROL);
+  headers.set("Cache-Control", cacheControlFor(ttlSeconds));
   headers.set("X-Cairn-Cache", cacheState);
   return new Response(response.body, {
     status: response.status,
@@ -1290,9 +2226,16 @@ function withCacheHeader(response: Response, cacheState: "HIT" | "BYPASS"): Resp
   });
 }
 
+function cacheControlFor(ttlSeconds: number): string {
+  return `public, max-age=${ttlSeconds}, s-maxage=${ttlSeconds}`;
+}
+
 function withServerTiming(response: Response, timing: TimingCollector): Response {
   const headers = new Headers(response.headers);
   headers.set("Server-Timing", timing.headerValue());
+  // Never expose internal generation-keyed cache headers for authenticated
+  // private content to clients.
+  headers.set("Cache-Control", "private, no-store");
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -1345,10 +2288,18 @@ function listCacheUrl(
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
   if (parsed.query !== undefined) url.searchParams.set("q", parsed.query);
-  for (const key of ["include", "curation_status", "topic", "form", "use", "source", "uncertain", "since"]) {
+  for (const key of ["include", "include_cache_identity", "tag_system", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
     const value = requestUrl.searchParams.get(key);
     if (value) url.searchParams.set(key, value);
   }
+  url.searchParams.set("host", requestUrl.host);
+  return url.toString();
+}
+
+function enrichmentOverviewCacheUrl(requestUrl: URL, generation: number): string {
+  const url = new URL("/api/enrichment/overview", CACHE_ORIGIN);
+  url.searchParams.set("v", CACHE_VERSION);
+  url.searchParams.set("g", String(generation));
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
 }
@@ -1358,6 +2309,8 @@ function detailCacheUrl(id: number, requestUrl: URL, generation: number): string
   url.searchParams.set("v", CACHE_VERSION);
   url.searchParams.set("g", String(generation));
   if (includeEnrichment(requestUrl)) url.searchParams.set("include", "enrichment");
+  if (requestUrl.searchParams.get("tag_system") === "1") url.searchParams.set("tag_system", "1");
+  if (includeCacheIdentity(requestUrl)) url.searchParams.set("include_cache_identity", "1");
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
 }
@@ -1483,7 +2436,7 @@ function mapLink(row: LinkRow): LinkRecord {
   };
 }
 
-function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean): LinkRecord & { enrichment: Record<string, unknown> } {
+function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean, withIdentity = false): LinkRecord & { enrichment: Record<string, unknown> } {
   return {
     ...mapLink(row),
     enrichment: {
@@ -1499,6 +2452,11 @@ function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean): LinkReco
       updated_at: row.enrichment_updated_at,
       enriched_at: row.enriched_at,
       content_loaded: detail,
+      ...(withIdentity ? { cache_identity: {
+        schema_version: 1, representation: detail ? "enrichment_detail" : "enrichment_summary",
+        content_revision: row.content_revision, body_revision: row.app_body_revision, personal_revision: row.personal_revision,
+        latest_decision_id: row.cache_decision_id, latest_entity_revision: row.cache_entity_revision
+      } } : {}),
       ...(detail ? {
         original_text: row.original_text,
         translated_text: row.translated_text,
@@ -1509,7 +2467,7 @@ function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean): LinkReco
   };
 }
 
-function mapEnrichmentJob(row: EnrichmentJobRow): Record<string, unknown> {
+function mapEnrichmentJob(row: EnrichmentJobRow, includeComponent = false): Record<string, unknown> {
   return {
     id: row.id,
     url: row.url,
@@ -1517,11 +2475,16 @@ function mapEnrichmentJob(row: EnrichmentJobRow): Record<string, unknown> {
     created_at: row.created_at,
     attempt: row.enrichment_attempts,
     lease_token: row.enrichment_lease_token,
-    lease_until: row.enrichment_lease_until
+    lease_until: row.enrichment_lease_until,
+    content_revision: row.content_revision,
+    // A non-zero epoch is an explicit, one-shot refresh intent the processor
+    // must consume instead of reusing a stored source (R2-06).
+    refresh_epoch: row.refresh_epoch ?? 0,
+    ...(includeComponent ? { source_component: row.source_component } : {})
   };
 }
 
-function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> {
+function mapEnrichmentListItem(row: EnrichmentListRow, withIdentity = false): Record<string, unknown> {
   const processable = row.processable === 1;
   return {
     id: row.id,
@@ -1546,8 +2509,14 @@ function mapEnrichmentListItem(row: EnrichmentListRow): Record<string, unknown> 
     images: parseStoredImages(row.images, row.id),
     model: row.enrichment_model,
     error: row.enrichment_error,
+    paid_call_unresolved: row.enrichment_paid_uncertain === 1,
+    paid_stage: row.enrichment_paid_stage,
     updated_at: row.enrichment_updated_at,
-    enriched_at: row.enriched_at
+    enriched_at: row.enriched_at,
+    ...(withIdentity ? {cache_identity: {
+      schema_version:1, content_revision:row.content_revision, body_revision:row.app_body_revision,
+      personal_revision:row.personal_revision, latest_decision_id:row.cache_decision_id, latest_entity_revision:row.cache_entity_revision
+    }} : {})
   };
 }
 

@@ -532,7 +532,7 @@ private fun LibraryScreen(
             enabled = true,
             onFilterChange = onFilterChange,
         )
-        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange)
+        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken)
         if (querying) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(state.libraryStatusText, Modifier.weight(1f).testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onRetryFilters, enabled = !state.libraryLoading, modifier = Modifier.testTag("retry_library_filters")) { Text("重新筛选") }
@@ -567,7 +567,7 @@ private fun SearchScreen(
             onValueChange = onSearchQueryChange,
             enabled = true,
         )
-        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange)
+        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken)
         if (state.searchQuery.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(state.searchStatusText, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = { onSearchQueryChange(state.searchQuery) }, enabled = !state.searchLoading) { Text("重新搜索") }
@@ -946,6 +946,21 @@ private fun DetailScreen(
                         LinkDetailContent(link, id in state.busyIds, onOpenExternal, onCopy, onToggleLearned)
                     }
                 }
+                item(key = "personal_tags") {
+                    PersonalTagsSection(linkId = id, baseUrl = state.apiBaseUrl, apiToken = state.preferences.apiToken,
+                        onChanged = { onLoadV2(id, true); onEnsureLink(id) })
+                }
+                item(key = "system_tags") {
+                    MultidimensionalCurationSection(
+                        linkId = id, taxonomy = state.v2Taxonomy ?: state.taxonomy,
+                        selection = state.v2Selections[id], draft = state.v2Drafts[id],
+                        conflictRevision = state.v2Conflicts[id], busy = id in state.v2Busy,
+                        queuedCount = state.v2Queued[id] ?: 0, available = state.v2Available,
+                        onLoadTaxonomy = onLoadV2Taxonomy, onAction = onV2Action,
+                        onReapply = onV2Reapply, onDiscard = onV2Discard, onFlush = onFlushV2,
+                        onExport = { onCopy(v2ExportMarkdown(link, state.v2Drafts[id] ?: state.v2Selections[id], state.v2Taxonomy ?: state.taxonomy)) },
+                    )
+                }
                 val legacyActions = state.v2LegacyActions[id].orEmpty()
                 if (legacyActions.isNotEmpty()) item(key = "legacy_curation") {
                     LegacyCurationRecoveryNotice(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken),
@@ -985,31 +1000,7 @@ private fun DetailScreen(
                         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Text(enrichment.statusLabel(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            BookmarkCuration(id, enrichment, state.taxonomy, id in state.busyIds, onLoadTaxonomy, onSaveCuration)
-                            MultidimensionalCurationSection(
-                                linkId = id,
-                                taxonomy = state.v2Taxonomy ?: state.taxonomy,
-                                selection = state.v2Selections[id],
-                                draft = state.v2Drafts[id],
-                                conflictRevision = state.v2Conflicts[id],
-                                busy = id in state.v2Busy,
-                                queuedCount = state.v2Queued[id] ?: 0,
-                                available = state.v2Available,
-                                onLoadTaxonomy = onLoadV2Taxonomy,
-                                onAction = onV2Action,
-                                onReapply = onV2Reapply,
-                                onDiscard = onV2Discard,
-                                onFlush = onFlushV2,
-                                onExport = {
-                                    onCopy(
-                                        v2ExportMarkdown(
-                                            link = link,
-                                            selection = state.v2Drafts[id] ?: state.v2Selections[id],
-                                            taxonomy = state.taxonomy,
-                                        ),
-                                    )
-                                },
-                            )
+                            BookmarkCuration(id, enrichment, state.v2Taxonomy ?: state.taxonomy, id in state.busyIds, onLoadTaxonomy, onSaveCuration)
                             LinkDetailSecondary(link)
                         }
                     }

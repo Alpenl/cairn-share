@@ -2,8 +2,10 @@ package com.alpenl.cairn.share.network
 
 import org.json.JSONObject
 
-internal data class ValueOrigin(val term: String, val origin: String, val confirmed: Boolean, val revision: Long?) {
+internal data class ValueOrigin(val term: String, val origin: String, val confirmed: Boolean, val revision: Long?, val humanAction: String = "") {
     val label: String get() = when {
+        origin == "human" && humanAction == "accept" -> "你添加"
+        origin == "human" && humanAction == "confirm" -> "你已确认"
         origin == "human" && confirmed -> "人工确认"
         origin == "automatic" -> "自动建议"
         origin == "legacy_unknown" -> "历史来源未确认"
@@ -56,7 +58,7 @@ internal fun decodeSelectionState(json: JSONObject?, revision: Long): SelectionS
         val source = value.optString("origin").takeIf { it in setOf("human", "automatic", "legacy_unknown") } ?: "unknown"
         val originRevision = value.nonnegativeRevision("revision")
         return ValueOrigin(value.optString("term"), source,
-            source == "human" && value.opt("confirmed") == true && originRevision != null, originRevision)
+            source == "human" && value.opt("confirmed") == true && originRevision != null, originRevision, value.optString("human_action"))
     }
     fun field(value: JSONObject?): SelectionFieldState? {
         if (value == null) return null
@@ -72,7 +74,9 @@ internal fun decodeSelectionState(json: JSONObject?, revision: Long): SelectionS
         }
         return SelectionFieldState(value.optString("status"), decoded, origin(value.optJSONObject("empty")), decodedCandidates)
     }
-    val decoded = listOf("topics", "content_functions", "carriers", "affordances", "form", "use").associateWith {
+    val dimensions = listOf("topics", "content_functions", "carriers", "affordances", "form", "use") +
+        if (fields.has("resource_kinds")) listOf("resource_kinds") else emptyList()
+    val decoded = dimensions.associateWith {
         field(fields.optJSONObject(it)) ?: return null
     }
     val evidence = json.optJSONObject("evidence")

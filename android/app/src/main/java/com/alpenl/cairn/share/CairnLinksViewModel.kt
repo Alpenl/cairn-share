@@ -348,7 +348,8 @@ internal class CairnLinksViewModel(
         val account = curationAccountKey()
         val generation = uiState.accountGeneration
         val draft = v2Repository.applyLocal(uiState.v2Drafts[id] ?: selection, selection.automatic, field, term, action)
-        val queued = QueuedCurationAction(id, UUID.randomUUID().toString(), field, term, action, selection.revision, account)
+        val queued = QueuedCurationAction(id, UUID.randomUUID().toString(), field, term, action, selection.revision, account,
+            expectedDecisionId = selection.decisionId, expectedContentRevision = selection.contentRevision)
         uiState = uiState.copy(v2Drafts = uiState.v2Drafts + (id to draft), v2Busy = uiState.v2Busy + id)
         viewModelScope.launch {
             try {
@@ -427,7 +428,7 @@ internal class CairnLinksViewModel(
                 val result = withContext(Dispatchers.IO) { v2Repository.load(id, token) }
                 if (account != curationAccountKey() || !isCurrentAccount(generation)) return@withLock
                 if (result is V2Result.Loaded) {
-                    curationActionStore.rebase(account, id, result.value.revision)
+                    curationActionStore.rebase(account, id, result.value.revision, result.value.decisionId, result.value.contentRevision)
                     val actions = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
                     if (account != curationAccountKey() || !isCurrentAccount(generation)) return@withLock
                     val draft = actions.fold(result.value) { current, action ->

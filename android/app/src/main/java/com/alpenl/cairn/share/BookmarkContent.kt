@@ -47,6 +47,8 @@ import com.alpenl.cairn.share.network.CurationUpdate
 import com.alpenl.cairn.share.network.LinkEnrichment
 import com.alpenl.cairn.share.network.LinksApiClient
 import com.alpenl.cairn.share.network.TaxonomyTerm
+import com.alpenl.cairn.share.network.V2CurationClient
+import com.alpenl.cairn.share.network.V2Result
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -61,7 +63,10 @@ internal fun LinkEnrichment.statusLabel(): String = when (status) {
 
 internal fun BookmarkClassification.label(taxonomy: BookmarkTaxonomy?): String {
     fun term(terms: List<TaxonomyTerm>?, id: String) = terms?.firstOrNull { it.id == id }?.label ?: id
-    return (topics.map { term(taxonomy?.topics, it) } + term(taxonomy?.forms, form) + term(taxonomy?.uses, use))
+    val main = topics.map { term(taxonomy?.topics, it) }
+    val other = if (taxonomy?.resourceKinds?.isNotEmpty() == true) resourceKinds.map { term(taxonomy.resourceKinds, it) }
+        else listOf(term(taxonomy?.forms, form), term(taxonomy?.uses, use))
+    return (main + other)
         .filter { it.isNotBlank() }.joinToString(" · ")
 }
 
@@ -85,11 +90,11 @@ internal fun BookmarkCuration(
             }
             enrichment.classification?.let { classification ->
                 Text(classification.label(taxonomy).ifBlank { "尚未分类" }, style = MaterialTheme.typography.bodyMedium)
-                if (!enrichment.classificationReviewed && classification.uncertainty) Text("分类待确认", style = MaterialTheme.typography.labelSmall)
+                if (taxonomy?.resourceKinds.isNullOrEmpty() && !enrichment.classificationReviewed && classification.uncertainty) Text("分类待确认", style = MaterialTheme.typography.labelSmall)
                 if (classification.entities.isNotEmpty()) Text(classification.entities.joinToString(" / "), style = MaterialTheme.typography.bodySmall)
             }
             if (enrichment.why.isNotBlank()) SelectionContainer { Text(enrichment.why) }
-            else if (enrichment.classification?.whySuggestion?.isNotBlank() == true) {
+            else if (taxonomy?.resourceKinds.isNullOrEmpty() && enrichment.classification?.whySuggestion?.isNotBlank() == true) {
                 Text("用途建议：${enrichment.classification.whySuggestion}", style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -133,12 +138,12 @@ private fun CurationDialog(
                     supportingText = { Text("$whyLength / 200") }, isError = whyLength > 200,
                     enabled = !busy, minLines = 2, modifier = Modifier.fillMaxWidth().testTag("curation_why"),
                 )
-                if (enrichment.classification?.whySuggestion?.isNotBlank() == true) TextButton(
+                if (taxonomy?.resourceKinds.isNullOrEmpty() && enrichment.classification?.whySuggestion?.isNotBlank() == true) TextButton(
                     onClick = { why = enrichment.classification.whySuggestion }, enabled = !busy,
                 ) { Text("使用用途建议") }
                 if (taxonomy == null) {
                     TextButton(onClick = onLoadTaxonomy, enabled = !busy) { Text("重新读取标签词表") }
-                } else {
+                } else if (taxonomy.resourceKinds.isEmpty()) {
                     Text("主题（${topics.size}/3）")
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         for (term in taxonomy.topics.filter { it.active || it.id in topics }) FilterChip(
@@ -151,7 +156,7 @@ private fun CurationDialog(
                     TermSelector("形态", form, taxonomy.forms, !busy) { form = it }
                     TermSelector("用途", use, taxonomy.uses, !busy) { use = it }
                 }
-                if (enrichment.classificationReviewed) TextButton(
+                if (enrichment.classificationReviewed && taxonomy?.resourceKinds.isNullOrEmpty()) TextButton(
                     onClick = { onSave(CurationUpdate(why = why, status = status, resetClassification = true)) }, enabled = !busy && whyLength <= 200,
                     modifier = Modifier.testTag("reset_classification"),
                 ) { Text("恢复自动分类") }
@@ -162,7 +167,7 @@ private fun CurationDialog(
                 val chosen = BookmarkClassification(topics = topics, form = form, use = use)
                 val previous = enrichment.classification
                 val changed = topics.toSet() != previous?.topics.orEmpty().toSet() || form != previous?.form.orEmpty() || use != previous?.use.orEmpty()
-                onSave(CurationUpdate(why, status, chosen.takeIf { taxonomy != null && (changed || !enrichment.classificationReviewed) }))
+                onSave(CurationUpdate(why, status, chosen.takeIf { taxonomy != null && taxonomy.resourceKinds.isEmpty() && changed }))
             }, enabled = !busy && whyLength <= 200, modifier = Modifier.testTag("save_curation")) {
                 Text(if (busy) "保存中" else "保存")
             }
@@ -260,6 +265,8 @@ private fun filterPanelLabel(filters: BookmarkFilters): String {
     if (filters.uncertain) parts += "待确认"
     if (filters.recentDays > 0) parts += "近 ${filters.recentDays} 天"
     if (filters.topic.isNotBlank() || filters.topics.isNotEmpty()) parts += "主题"
+    if (filters.resourceKinds.isNotEmpty()) parts += "资源类型"
+    if (filters.customTags.isNotEmpty()) parts += "自定义标记"
     if (filters.contentFunctions.isNotEmpty()) parts += "内容功能"
     if (filters.carriers.isNotEmpty()) parts += "载体"
     if (filters.affordances.isNotEmpty()) parts += "潜在用途"
@@ -271,10 +278,22 @@ private fun filterPanelLabel(filters: BookmarkFilters): String {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTaxonomy?, onChange: (BookmarkFilters) -> Unit) {
+internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTaxonomy?, onChange: (BookmarkFilters) -> Unit,
+    baseUrl: String = "", apiToken: String = "") {
     // 已激活筛选时保持展开，让用户随时看到当前筛选条件；默认收起，
     // 避免一堆标签把真正的链接列表挤到首屏之外。
     var expanded by rememberSaveable { mutableStateOf(filters != BookmarkFilters()) }
+    val account = accountKeyFor(baseUrl, apiToken)
+    var customCatalog by remember(account) { mutableStateOf(emptyList<PersonalTagDefinition>()) }
+    var catalogError by remember(account) { mutableStateOf(false) }
+    var advanced by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(expanded, account, taxonomy?.resourceKinds?.isNotEmpty()) {
+        if (expanded && baseUrl.isNotBlank() && apiToken.isNotBlank() && taxonomy?.resourceKinds?.isNotEmpty() == true) {
+            val result = withContext(Dispatchers.IO) { V2CurationClient(baseUrl).tagRequest("/api/custom-tags", "GET", apiToken) }
+            if (result is V2Result.Loaded) { customCatalog = parsePersonalTags(result.value.optJSONArray("tags")); catalogError = false }
+            else catalogError = true
+        }
+    }
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag("bookmark_filters")) {
@@ -283,7 +302,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
             if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) }) { Text("清除筛选") }
         }
         if (expanded) Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-            Text("同一维度匹配任一所选项，不同维度需同时满足。", style = MaterialTheme.typography.bodySmall)
+            Text("不同组需同时满足；每组可选择匹配任一或全部。", style = MaterialTheme.typography.bodySmall)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (status in CurationStatus.entries) FilterChip(
                     selected = filters.curationStatus == status.apiValue,
@@ -301,6 +320,18 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
             if (taxonomy != null) {
                 val topicValues = (filters.topics + listOf(filters.topic).filter { it.isNotBlank() }).distinct()
                 FilterDimension("主题", "topics", topicValues, taxonomy.topics) { onChange(filters.copy(topic = "", topics = it)) }
+                if (taxonomy.resourceKinds.isNotEmpty()) {
+                    TagFilterMode(filters.topicsMode) { onChange(filters.copy(topicsMode = it)) }
+                    FilterDimension("资源类型", "resource_kinds", filters.resourceKinds, taxonomy.resourceKinds) { onChange(filters.copy(resourceKinds = it)) }
+                    TagFilterMode(filters.resourceMode) { onChange(filters.copy(resourceMode = it)) }
+                    if (customCatalog.isNotEmpty() || filters.customTags.isNotEmpty()) {
+                        FilterDimension("自定义标记", "custom_tags", filters.customTags, customCatalog.map { TaxonomyTerm(it.id, it.label, it.active) }) { onChange(filters.copy(customTags = it)) }
+                        TagFilterMode(filters.customMode) { onChange(filters.copy(customMode = it)) }
+                    }
+                    if (catalogError) Text("自定义标记暂时无法读取；已选条件保留。", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "收起其他条件" else "其他条件") }
+                }
+                if (taxonomy.resourceKinds.isEmpty() || advanced) {
                 if (taxonomy.multiDimensional) {
                     FilterDimension("内容功能", "content_functions", filters.contentFunctions, taxonomy.contentFunctions) { onChange(filters.copy(contentFunctions = it)) }
                     FilterDimension("载体（任一）", "carriers", filters.carriers, taxonomy.carriers) { onChange(filters.copy(carriers = it)) }
@@ -310,7 +341,9 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                     TermSelector("形态", filters.form, taxonomy.forms) { onChange(filters.copy(form = it)) }
                     TermSelector("用途", filters.use, taxonomy.uses) { onChange(filters.copy(use = it)) }
                 }
+                }
             }
+            if (taxonomy?.resourceKinds.isNullOrEmpty() || advanced) {
             Text("实体处理状态（任一）", style = MaterialTheme.typography.labelLarge)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 val selected = filters.entityState.split(',').filter { it.isNotEmpty() }
@@ -320,6 +353,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                         label = { Text(label) }, modifier = Modifier.testTag("filter_entity_state_$value"))
                 }
             }
+            }
         }
     }
 }
@@ -328,11 +362,19 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
 @Composable
 private fun FilterDimension(label: String, key: String, selected: List<String>, terms: List<TaxonomyTerm>, onChange: (List<String>) -> Unit) {
     Text(label, style = MaterialTheme.typography.labelLarge)
-    val choices = terms.map { it.id to (it.label + if (it.active) "" else "（已停用）") } +
+    val choices = terms.filter { it.active || it.id in selected }.map { it.id to (it.label + if (it.active) "" else "（已停用）") } +
         selected.filter { id -> terms.none { it.id == id } }.map { it to "$it（词表不可用）" }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         for ((id, text) in choices) FilterChip(selected = id in selected,
             onClick = { onChange(if (id in selected) selected - id else selected + id) },
             label = { Text(text) }, modifier = Modifier.testTag("filter_${key}_$id"))
+    }
+}
+
+@Composable
+private fun TagFilterMode(mode: String, onChange: (String) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        for ((value, label) in listOf("any" to "任一", "all" to "全部")) FilterChip(
+            selected = mode == value, onClick = { onChange(value) }, label = { Text(label) })
     }
 }

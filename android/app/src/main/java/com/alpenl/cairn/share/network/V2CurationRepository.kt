@@ -66,7 +66,8 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         // state remains unknown rather than being copied from human values.
         val baseline = automatic ?: MultidimensionalSelection()
         val result = when (field) {
-            "topics" -> selection.copy(topics = resolveMulti(selection.topics, baseline.topics, term, action))
+            "topics" -> selection.copy(topics = resolveMulti(selection.topics, baseline.topics, term, if (action == "confirm") "accept" else action))
+            "resource_kinds" -> selection.copy(resourceKinds = resolveMulti(selection.resourceKinds, baseline.resourceKinds, term, if (action == "confirm") "accept" else action))
             "content_functions" -> selection.copy(contentFunctions = resolveMulti(selection.contentFunctions, baseline.contentFunctions, term, action))
             "affordances" -> selection.copy(affordances = resolveMulti(selection.affordances, baseline.affordances, term, action))
             "carriers" -> selection.copy(carriers = resolveSingle(selection.carriers, baseline.carriers, term, action))
@@ -92,6 +93,8 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         expectedRevision: Long,
         apiToken: String,
         operationKey: String = UUID.randomUUID().toString(),
+        expectedDecisionId: Long? = null,
+        expectedContentRevision: Long? = null,
     ): CurationSubmitResult {
         val override = FieldOverride(
             field = field,
@@ -99,6 +102,8 @@ internal class V2CurationRepository(private val transport: V2Transport) {
             action = action,
             operationKey = operationKey,
             expectedRevision = expectedRevision,
+            expectedDecisionId = expectedDecisionId,
+            expectedContentRevision = expectedContentRevision,
         )
         return when (val result = transport.applyOverride(id, override, apiToken)) {
             is V2Result.Loaded -> confirmed(result.value, id, override)
@@ -144,7 +149,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
                 !action.ready -> CurationSubmitResult.Failed(FailureKind.Server)
                 else -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     submit(action.linkId, action.field, action.term, action.action,
-                        action.expectedRevision!!, apiToken, action.operationKey)
+                        action.expectedRevision!!, apiToken, action.operationKey, action.expectedDecisionId, action.expectedContentRevision)
                 }
             }
             when (result) {

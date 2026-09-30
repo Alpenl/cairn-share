@@ -18,6 +18,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,7 +65,7 @@ internal fun MultidimensionalCurationSection(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("多维整理（v2）", style = MaterialTheme.typography.titleMedium)
+            Text("标签整理", style = MaterialTheme.typography.titleMedium)
             if (queuedCount > 0) {
                 TextButton(onClick = onFlush, modifier = Modifier.testTag("v2_flush")) {
                     Text("离线待同步 $queuedCount 条，点击同步")
@@ -94,7 +98,14 @@ internal fun MultidimensionalCurationSection(
                 }
             }
         }
-        DimensionRow("主题", "topics", taxonomy.topics.map { it.id to it.label }, effective.topics, busy, onAction, known = "topics" !in effective.unknownResetFields, state = effective.state?.fields?.get("topics"), pending = "topics" in effective.pendingFields)
+        val newTags = taxonomy.resourceKinds.isNotEmpty()
+        DimensionRow("主题", "topics", taxonomy.topics.filter { it.active || it.id in effective.topics }.map { it.id to it.label }, effective.topics, busy, onAction, known = "topics" !in effective.unknownResetFields, state = effective.state?.fields?.get("topics"), pending = "topics" in effective.pendingFields, separateRemoval = newTags)
+        if (newTags) DimensionRow("资源类型", "resource_kinds", taxonomy.resourceKinds.filter { it.active || it.id in effective.resourceKinds }.map { it.id to it.label }, effective.resourceKinds, busy, onAction, known = "resource_kinds" !in effective.unknownResetFields, state = effective.state?.fields?.get("resource_kinds"), pending = "resource_kinds" in effective.pendingFields, separateRemoval = true)
+        var showSecondary by remember(linkId) { mutableStateOf(false) }
+        if (newTags) TextButton(onClick = { showSecondary = !showSecondary }) {
+            Text(if (showSecondary) "收起其他属性" else "其他属性")
+        }
+        if (!newTags || showSecondary) {
         DimensionRow("内容功能", "content_functions", taxonomy.contentFunctions.map { it.id to it.label }, effective.contentFunctions, busy, onAction, known = "content_functions" !in effective.unknownResetFields, state = effective.state?.fields?.get("content_functions"), pending = "content_functions" in effective.pendingFields)
         DimensionRow("载体", "carriers", taxonomy.carriers.map { it.id to it.label }, effective.carriers, busy, onAction, singleValue = true, known = "carriers" !in effective.unknownResetFields, state = effective.state?.fields?.get("carriers"), pending = "carriers" in effective.pendingFields)
         DimensionRow("潜在用途", "affordances", taxonomy.affordances.map { it.id to it.label }, effective.affordances, busy, onAction, known = "affordances" !in effective.unknownResetFields, state = effective.state?.fields?.get("affordances"), pending = "affordances" in effective.pendingFields)
@@ -107,6 +118,7 @@ internal fun MultidimensionalCurationSection(
         Text("实体：${effective.state?.entityStatusLabel ?: "运行状态未知"}", modifier = Modifier.testTag("v2_entities_status"), style = MaterialTheme.typography.bodySmall)
         entities?.values?.forEach { Text("${it.term} · ${it.label}", style = MaterialTheme.typography.bodySmall) }
         EntityJudgmentDetails(effective.state?.entityObservations)
+        }
         if (effective.state?.evidencePartial == true) Text("来源证据不完整，建议仅基于已取得的内容。", modifier = Modifier.testTag("v2_evidence_partial"), style = MaterialTheme.typography.bodySmall)
         if (effective.state?.answersPartial == true) Text("部分分类问题尚无结果。", style = MaterialTheme.typography.bodySmall)
         Row {
@@ -161,7 +173,16 @@ private fun DimensionRow(
     known: Boolean = true,
     state: SelectionFieldState? = null,
     pending: Boolean = false,
+    separateRemoval: Boolean = false,
 ) {
+    var inspecting by remember(field) { mutableStateOf<String?>(null) }
+    if (inspecting != null) AlertDialog(
+        onDismissRequest = { inspecting = null },
+        title = { Text(terms.firstOrNull { it.first == inspecting }?.second ?: inspecting.orEmpty()) },
+        text = { Text(state?.values?.firstOrNull { it.term == inspecting }?.label ?: "当前有效标签") },
+        confirmButton = { TextButton(onClick = { onAction(field, inspecting.orEmpty(), "confirm"); inspecting = null }, enabled = !busy) { Text("确认保留") } },
+        dismissButton = { TextButton(onClick = { onAction(field, inspecting.orEmpty(), "reset"); inspecting = null }, enabled = !busy) { Text("恢复此标签自动") } },
+    )
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(label, style = MaterialTheme.typography.labelLarge)
@@ -191,12 +212,19 @@ private fun DimensionRow(
                         // Tapping a selected tag rejects it; tapping an
                         // unselected one accepts it. A single-valued dimension
                         // replaces instead of accumulating.
-                        if (isSelected) onAction(field, id, "reject")
+                        if (isSelected && separateRemoval) inspecting = id
+                        else if (isSelected) onAction(field, id, "reject")
                         else if (singleValue) onAction(field, id, "accept")
                         else onAction(field, id, "accept")
                     },
                     enabled = !busy,
-                    label = { Text(if (isSelected) "$termLabel ×" else termLabel) },
+                    label = { Text(if (isSelected && !separateRemoval) "$termLabel ×" else termLabel) },
+                    trailingIcon = if (isSelected && separateRemoval) ({
+                        IconButton(onClick = { onAction(field, id, "reject") }, enabled = !busy,
+                            modifier = Modifier.testTag("v2_${field}_remove_$id")) {
+                            Icon(Icons.Default.Close, contentDescription = "移除$termLabel")
+                        }
+                    }) else null,
                     colors = AssistChipDefaults.assistChipColors(),
                     modifier = Modifier.testTag("v2_${field}_chip_$id"),
                 )
@@ -304,6 +332,7 @@ internal fun v2ExportMarkdown(
         val terms = when (dimension) {
             "topics" -> taxonomy?.topics
             "content_functions" -> taxonomy?.contentFunctions
+            "resource_kinds" -> taxonomy?.resourceKinds
             "carriers" -> taxonomy?.carriers
             "affordances" -> taxonomy?.affordances
             "form", "forms" -> taxonomy?.forms
@@ -329,15 +358,25 @@ internal fun v2ExportMarkdown(
     builder.appendLine("- 链接：${link.url}")
     if (selection != null) {
         builder.appendLine("- 主题：${rendered("topics", selection.topics)}")
+        if (taxonomy?.resourceKinds?.isNotEmpty() == true || selection.resourceKinds.isNotEmpty())
+            builder.appendLine("- 资源类型：${rendered("resource_kinds", selection.resourceKinds)}")
         builder.appendLine("- 内容功能：${rendered("content_functions", selection.contentFunctions)}")
         builder.appendLine("- 载体：${rendered("carriers", selection.carriers)}")
         builder.appendLine("- 潜在用途：${rendered("affordances", selection.affordances)}")
         builder.appendLine("- 形态：${rendered("form", listOf(selection.form).filter { it.isNotEmpty() })}")
         builder.appendLine("- 用途：${rendered("use", listOf(selection.use).filter { it.isNotEmpty() })}")
-        val fieldNames = mapOf("topics" to "主题", "content_functions" to "内容功能", "carriers" to "载体", "affordances" to "潜在用途", "form" to "形态", "use" to "用途")
+        val fieldNames = buildMap {
+            put("topics", "主题")
+            if (taxonomy?.resourceKinds?.isNotEmpty() == true || selection.resourceKinds.isNotEmpty()) put("resource_kinds", "资源类型")
+            putAll(mapOf("content_functions" to "内容功能", "carriers" to "载体", "affordances" to "潜在用途", "form" to "形态", "use" to "用途"))
+        }
         for ((field, name) in fieldNames) builder.appendLine("- $name 自动判断：${selection.state?.fields?.get(field)?.label ?: "运行状态未知"}")
         if (selection.state?.evidencePartial == true) builder.appendLine("- 来源证据：不完整")
         if (selection.state?.answersPartial == true) builder.appendLine("- 分类覆盖：部分问题尚无结果")
+    }
+    if (link.customTags.isNotEmpty()) {
+        builder.appendLine("- 自定义标记：${link.customTags.joinToString(" / ") { "${it.label}（你添加）" }}")
+        link.customTags.forEach { builder.appendLine("- 自定义标记身份：${it.tagRef} · 显示版本 ${it.revision}") }
     }
     enrichment?.why?.takeIf { it.isNotBlank() }?.let { builder.appendLine("- 收藏原因：$it") }
     builder.appendLine("- 整理状态：${enrichment?.curationStatus?.label ?: ""}")

@@ -1,7 +1,8 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { taxonomy, type Classification } from "../src/curation";
+import { storedClassification, validateClassification, taxonomy, type Classification } from "../src/curation";
+import { settleFixtureAttempt } from "./provider-attempt-fixture";
 
 const token = "curation-test-token";
 const appToken = "curation-app-token";
@@ -13,7 +14,9 @@ beforeEach(async () => {
 
 async function request(path: string, method = "GET", body?: unknown, bearer = token): Promise<Response> {
   return worker.fetch(new Request(`https://test.example${path}`, {
-    method, headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+    method, headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json",
+      "X-Cairn-Provider-Attempt-Ledger": "1",
+      ...(path.endsWith("/claim") ? { "X-Cairn-Source-Lease-Admission": "1" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: appToken, CAIRN_ENRICHER_TOKEN: token });
 }
@@ -29,9 +32,17 @@ function classification(extra: Partial<Classification> = {}): Classification {
 }
 
 async function complete(id: number, value: unknown = classification()): Promise<Response> {
-  const claim = await request(`/api/enrichment/jobs/${id}/claim`, "POST");
+  const claim = await worker.fetch(new Request(`https://test.example/api/enrichment/jobs/${id}/claim`, {
+    method: "POST", headers: { Authorization: `Bearer ${token}`, "X-Cairn-Source-Lease-Admission": "1",
+      "X-Cairn-Provider-Attempt-Ledger": "1" }
+  }), { DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES,
+    CAIRN_API_TOKEN: appToken, CAIRN_ENRICHER_TOKEN: token });
   expect(claim.status).toBe(200);
   const job = await claim.json() as { lease_token: string };
+  if (validateClassification(value) !== null) {
+    await settleFixtureAttempt((path, body) => request(`/api/${path}`, "POST", body),
+      id, job.lease_token, "reading");
+  }
   return request(`/api/enrichment/jobs/${id}/complete`, "POST", {
     lease_token: job.lease_token, original_text: "KV cache original-only 100%_literal", summary: "中文部署摘要",
     related_links: [], images: [], model: "fixture", classification: value
@@ -64,6 +75,50 @@ describe("bookmark curation", () => {
     expect(Object.keys(publicItem as object).sort()).toEqual(["created_at", "id", "learned", "learned_at", "note", "url"]);
   });
 
+  it("pins an explicit confirmation and replays it without duplicating overrides", async () => {
+    const id = await create();
+    expect((await complete(id)).status).toBe(200);
+    const row = await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id)
+      .first<{ personal_revision: number }>();
+    const confirm = { classification: { topics: ["llm"], form: "tool", use: "try" },
+      expected_revision: row!.personal_revision, operation_key: `confirm-${id}` };
+    expect((await request(`/api/links/${id}/curation`, "PATCH", confirm, appToken)).status).toBe(200);
+    expect(await detail(id)).toMatchObject({ classification_reviewed: true,
+      classification: { topics: ["llm"], form: "tool", use: "try" } });
+    const overrides = async () => (await env.DB.prepare("SELECT action,field,term,source,confirmed FROM curation_overrides WHERE link_id=? ORDER BY id")
+      .bind(id).all<{ action: string; field: string; term: string; source: string; confirmed: number }>()).results;
+    expect(await overrides()).toEqual([
+      { action: "set_empty", field: "topics", term: "", source: "human", confirmed: 1 },
+      { action: "accept", field: "topics", term: "llm", source: "human", confirmed: 1 },
+      { action: "accept", field: "form", term: "tool", source: "human", confirmed: 1 },
+      { action: "accept", field: "use", term: "try", source: "human", confirmed: 1 }
+    ]);
+    expect((await request(`/api/links/${id}/curation`, "PATCH", confirm, appToken)).status).toBe(200);
+    expect((await overrides()).length).toBe(4);
+    expect((await request(`/api/links/${id}/curation`, "PATCH", {
+      ...confirm, classification: { ...confirm.classification, topics: ["eng"] }
+    }, appToken)).status).toBe(409);
+  });
+
+  it("rejects a stale confirmation after another client edits a tag", async () => {
+    const id = await create();
+    expect((await complete(id)).status).toBe(200);
+    const row = await env.DB.prepare("SELECT personal_revision FROM links WHERE id=?").bind(id)
+      .first<{ personal_revision: number }>();
+    const edit = await request(`/api/bookmarks/${id}/v2-override`, "POST", {
+      field: "topics", term: "llm", action: "reject", operation_key: `reject-${id}`,
+      expected_revision: row!.personal_revision
+    }, appToken);
+    expect(edit.status).toBe(200);
+    const stale = await request(`/api/links/${id}/curation`, "PATCH", {
+      classification: { topics: ["llm"], form: "tool", use: "try" },
+      expected_revision: row!.personal_revision, operation_key: `stale-confirm-${id}`
+    }, appToken);
+    expect(stale.status).toBe(409);
+    expect(await detail(id)).toMatchObject({ classification_reviewed: true,
+      classification: { topics: [] } });
+  });
+
   it("rejects unknown, duplicate, oversized, and stale model classifications", async () => {
     const id = await create();
     for (const value of [classification({ topics: ["invented"] }), classification({ topics: ["llm", "llm"] }),
@@ -78,6 +133,8 @@ describe("bookmark curation", () => {
   it("preserves human labels and intent while an in-flight enrichment completes", async () => {
     const id = await create();
     const claim = await (await request(`/api/enrichment/jobs/${id}/claim`, "POST")).json() as { lease_token: string };
+    await settleFixtureAttempt((path, body) => request(`/api/${path}`, "POST", body),
+      id, claim.lease_token, "reading");
     const edit = { why: "  用于项目评审  ", curation_status: "kept", classification: { topics: ["eng"], form: "method", use: "quote" } };
     expect((await request(`/api/enrichment/jobs/${id}/curation`, "PATCH", edit)).status).toBe(200);
     expect((await request(`/api/enrichment/jobs/${id}/complete`, "POST", {
@@ -153,8 +210,40 @@ describe("bookmark curation", () => {
     await complete(id);
     await request(`/api/enrichment/jobs/${id}/curation`, "PATCH", { why: "自己的理由", curation_status: "kept", classification: { topics: ["eng"], form: "method", use: "try" } });
     await request(`/api/links/${id}`, "PATCH", { note: "更新备注" }, appToken);
-    expect(await detail(id)).toMatchObject({ status: "pending", why: "自己的理由", curation_status: "kept", classification_reviewed: true,
+    // A note is personal: it invalidates the AI classification job but must not
+    // discard the stored reading content or force a refetch (B01-T07).
+    expect(await detail(id)).toMatchObject({ status: "completed", why: "自己的理由", curation_status: "kept", classification_reviewed: true,
       classification: { topics: ["eng"], why_suggestion: "", entities: [] } });
+    const job = await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?").bind(id).first<any>();
+    expect(job.status).toBe("pending");
+  });
+
+  it("does not requeue v2 inference or clear curation for a note-only edit", async () => {
+    const id = await create();
+    expect((await complete(id)).status).toBe(200);
+    expect((await request(`/api/enrichment/jobs/${id}/curation`, "PATCH", {
+      why: "人工理由", classification: { topics: ["eng"], form: "method", use: "try" }
+    })).status).toBe(200);
+    await env.DB.prepare(`INSERT INTO classification_targets
+      (generation,spec_id,spec_hash,taxonomy_version,policy_version,requested_model,protocol,created_at)
+      VALUES (1,'v2-spec','hash','test-taxonomy','test-policy','test-model','v2','t')`).run();
+    await env.DB.prepare("UPDATE classification_target_state SET generation=1 WHERE id=1").run();
+    await env.DB.prepare("UPDATE classification_jobs SET status='completed',attempts=2 WHERE link_id=?")
+      .bind(id).run();
+    const before = await env.DB.prepare("SELECT revision,input_revision,status,attempts FROM classification_jobs WHERE link_id=?")
+      .bind(id).first();
+
+    expect((await request(`/api/links/${id}`, "PATCH", { note: "新的私人备注" }, appToken)).status).toBe(200);
+    expect(await env.DB.prepare("SELECT revision,input_revision,status,attempts FROM classification_jobs WHERE link_id=?")
+      .bind(id).first()).toEqual(before);
+    expect(await detail(id)).toMatchObject({ original_text: "KV cache original-only 100%_literal",
+      why: "人工理由", classification_reviewed: true,
+      classification: { topics: ["eng"], form: "method", use: "try" } });
+
+    // Source changes still invalidate the same v2 job.
+    expect((await request(`/api/links/${id}`, "PATCH", { url: "https://x.com/example/status/456" }, appToken)).status).toBe(200);
+    expect(await env.DB.prepare("SELECT status FROM classification_jobs WHERE link_id=?")
+      .bind(id).first()).toMatchObject({ status: "waiting_source" });
   });
 
   it("leaves shelved bookmarks out of automatic model processing", async () => {
@@ -164,4 +253,12 @@ describe("bookmark curation", () => {
     await request(`/api/enrichment/jobs/${id}/curation`, "PATCH", { curation_status: "inbox" });
     expect((await request("/api/enrichment/jobs/claim", "POST")).status).toBe(200);
   });
+});
+
+it("personal use stays readable as historical data while new model writes reject it",()=>{
+ const old=classification({use:"contra"});
+ expect(validateClassification(old)).toBeNull();
+ expect(validateClassification(old,true)?.use).toBe("contra");
+ expect(storedClassification(JSON.stringify(old),null)?.use).toBe("contra");
+ expect(storedClassification(JSON.stringify(classification()),JSON.stringify({topics:[],form:"",use:"contra"}))?.use).toBe("contra");
 });
