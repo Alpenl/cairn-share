@@ -9,10 +9,19 @@ export const CLASSIFICATION_LIMITS = {
   max_tokens: 20 * 65536, max_tokens_per_item: 5 * 65536
 };
 export type ClassificationLimits = typeof CLASSIFICATION_LIMITS;
-export function validClassificationLimits(value: unknown): value is ClassificationLimits {
+// Default operation stays at 20/day. An operator can explicitly raise the
+// deployment ceiling for an authorized rollout; callers cannot raise it, and
+// all consumers continue charging the same ledger without resetting usage.
+export function serverClassificationLimits(env?: Env): ClassificationLimits {
+  const raw = (env as (Env & { CAIRN_CLASSIFICATION_MAX_CALLS?: string }) | undefined)?.CAIRN_CLASSIFICATION_MAX_CALLS;
+  const calls = raw === undefined ? CLASSIFICATION_LIMITS.max_calls_total : Number(raw);
+  if (!Number.isSafeInteger(calls) || calls < 1 || calls > 200) return { ...CLASSIFICATION_LIMITS, max_calls_total: 0, max_tokens: 0 };
+  return { ...CLASSIFICATION_LIMITS, max_calls_total: calls, max_tokens: calls * 65536 };
+}
+export function validClassificationLimits(value: unknown, env?: Env): value is ClassificationLimits {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== 4) return false;
   const limits = value as Record<string, unknown>;
-  return Object.entries(CLASSIFICATION_LIMITS).every(([key, max]) => Number.isSafeInteger(limits[key]) && Number(limits[key]) >= 1 && Number(limits[key]) <= max);
+  return Object.entries(serverClassificationLimits(env)).every(([key, max]) => Number.isSafeInteger(limits[key]) && Number(limits[key]) >= 1 && Number(limits[key]) <= max);
 }
 export function classificationWindow() {
   const now = new Date().toISOString();
@@ -63,7 +72,7 @@ export async function classificationBudgetRoute(request: Request, env: Env, path
     !["link_id","revision","input_revision","content_revision","evidence_snapshot_id"].every(k=>positive(body[k])) ||
     !Number.isSafeInteger(body.target_generation) || Number(body.target_generation)<0 ||
     typeof body.spec_id!=="string" || !body.spec_id || body.spec_id.length>100 || typeof body.evidence_hash!=="string" || !body.evidence_hash || body.evidence_hash.length>100 ||
-    body.model!=="jev-1.13.0" || body.tokens!==65536 || !validClassificationLimits(body.limits))return fail("invalid_reservation");
+    body.model!=="jev-1.13.0" || body.tokens!==65536 || !validClassificationLimits(body.limits, env))return fail("invalid_reservation");
   const limits=body.limits;
   const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(canonicalJSON(body)));
   const payloadHash=[...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,"0")).join("");

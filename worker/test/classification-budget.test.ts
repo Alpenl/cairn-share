@@ -2,6 +2,7 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it } from "vitest";
 import worker from "../src/index";
 import { taxonomy } from "../src/curation";
+import { serverClassificationLimits, validClassificationLimits } from "../src/classification-budget";
 
 beforeEach(async()=>{await reset();await applyD1Migrations(env.DB,env.TEST_MIGRATIONS);});
 const limits={max_calls_total:20,max_calls_per_item:5,max_tokens:20*65536,max_tokens_per_item:5*65536};
@@ -104,4 +105,23 @@ it("rejects a pre-budget consumer before any new lease or attempt",async()=>{
  const response=await worker.fetch(new Request("https://test/api/enrichment/classifications/claim",{method:"POST",headers:{Authorization:"Bearer internal","Content-Type":"application/json"},body:JSON.stringify({taxonomy_version:taxonomy.version,policy_version:"fixture",model:"jev-1.13.0"})}),fixtureEnv());
  expect(response.status).toBe(409);expect(await response.json()).toMatchObject({error:"capability_mismatch"});
  expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=1").first("attempts")).toBe(0);expect(await count()).toBe(0);
+});
+
+it("requires a deployment-owned ceiling for an authorized bulk run and preserves existing charges", async () => {
+ const bodies = await Promise.all([1,2].map(id => seed(id)));
+ for (let i=0;i<20;i++) await env.DB.prepare("INSERT INTO budget_ledger(scope,link_id,units,operation_key,created_at) VALUES ('classification_global',NULL,?,?,?)")
+  .bind(JSON.stringify({calls:1,tokens:65536}),`previous:${i}`,new Date().toISOString()).run();
+ const bulkLimits={...limits,max_calls_total:21,max_tokens:21*65536};
+ expect((await reserve({...bodies[0],limits:bulkLimits})).status).toBe(400);
+ const operatorEnv={...fixtureEnv(),CAIRN_CLASSIFICATION_MAX_CALLS:"60"};
+ const responses=await Promise.all(bodies.map(body=>worker.fetch(new Request("https://test/api/v2/classification-budget/reserve",{
+  method:"POST",headers:{Authorization:"Bearer internal","Content-Type":"application/json"},body:JSON.stringify({...body,limits:bulkLimits})
+ }),operatorEnv)));
+ const grants=await Promise.all(responses.map(r=>r.json() as Promise<{granted:boolean}>));
+ expect(grants.filter(g=>g.granted)).toHaveLength(1);
+ expect(await count()).toBe(21);
+ expect(serverClassificationLimits()).toEqual(limits);
+ expect(validClassificationLimits({...limits,max_calls_total:61},operatorEnv)).toBe(false);
+ expect(validClassificationLimits(bulkLimits,{...operatorEnv,CAIRN_CLASSIFICATION_MAX_CALLS:"201"})).toBe(false);
+ expect(validClassificationLimits(limits,{...operatorEnv,CAIRN_CLASSIFICATION_MAX_CALLS:"bad"})).toBe(false);
 });

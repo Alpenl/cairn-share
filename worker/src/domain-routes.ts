@@ -811,12 +811,15 @@ function normalizeAutomatic(value: Record<string, unknown>): AutomaticView | nul
   const contentFunctions = list(value.content_functions ?? []);
   const carriers = list(value.carriers ?? []);
   const affordances = list(value.affordances ?? []);
+  const resources = value.resource_kinds === undefined ? undefined : list(value.resource_kinds);
   const entities = list(value.entities ?? []);
   if (!topics || !contentFunctions || !carriers || !affordances || !entities) return null;
+  if (resources === null || (resources && resources.length > 6)) return null;
   if (topics.length > 64 || contentFunctions.length > 8 || carriers.length > 1 || affordances.length > 8) return null;
   return {
     ...(value.assessment === undefined ? {} : { assessment: value.assessment }),
     topics, content_functions: contentFunctions, carriers, affordances, entities,
+    ...(resources ? { resource_kinds: resources } : {}),
     form: typeof value.form === "string" ? value.form : "",
     use: typeof value.use === "string" ? value.use : ""
   };
@@ -1177,15 +1180,15 @@ export function projectionStatements(env: Env, id: number, personalRevision: num
          effective=excluded.effective, updated_at=excluded.updated_at RETURNING link_id`
     ).bind(id, contentRevision, canonicalJSON({ ...view, projected, stale }), now, ...guard.bindings),
     env.DB.prepare(
-      `INSERT INTO link_selections_v2(link_id, taxonomy_version, definition_version, topics, content_functions, carriers, affordances, form, use, provenance, revised_at)
-       SELECT ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}
+      `INSERT INTO link_selections_v2(link_id, taxonomy_version, definition_version, topics, content_functions, carriers, affordances, form, use, provenance, revised_at, resource_kinds)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}
        ON CONFLICT(link_id) DO UPDATE SET topics=excluded.topics, content_functions=excluded.content_functions,
          carriers=excluded.carriers, affordances=excluded.affordances, form=excluded.form, use=excluded.use,
-         provenance=excluded.provenance, revised_at=excluded.revised_at`
-    ).bind(id, taxonomyV2().version, JSON.stringify(view.topics), JSON.stringify(view.content_functions),
+         provenance=excluded.provenance, revised_at=excluded.revised_at, resource_kinds=excluded.resource_kinds`
+    ).bind(id, taxonomyV2().version, taxonomyV2().definition_version, JSON.stringify(view.topics), JSON.stringify(view.content_functions),
       JSON.stringify(view.carriers), JSON.stringify(view.affordances), view.form, view.use,
       canonicalJSON({ source: projected ? "decision" : "legacy", overrides: view.reviewed, revision: view.revision }),
-      now, ...guard.bindings)
+      now, JSON.stringify(view.resource_kinds ?? []), ...guard.bindings)
   ];
 }
 
@@ -1194,7 +1197,7 @@ type SelectionSnapshot = NonNullable<Awaited<ReturnType<typeof readSelectionSnap
 // Pin every input used to precompute a future effective view. A changed entity
 // result or legacy write can otherwise race even while personal/content remain
 // unchanged. Every domain statement in the batch must use this predicate.
-function projectionInputGuard(id: number, snapshot: SelectionSnapshot): WriteGuard {
+export function projectionInputGuard(id: number, snapshot: SelectionSnapshot): WriteGuard {
   return {
     sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
       AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?
@@ -1265,7 +1268,7 @@ function entityProjectionGuard(id: number, snapshot: SelectionSnapshot, operatio
   };
 }
 
-function projectionWrites(
+export function projectionWrites(
   env: Env, id: number, personalRevision: number, view: EffectiveView, automatic: AutomaticView,
   projected: boolean, contentRevision: number, stale: boolean, decisionId: number,
   priorClassification: string | null, guard?: WriteGuard

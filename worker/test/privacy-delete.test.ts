@@ -131,6 +131,9 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("classification_decisions",{link_id:id,run_id:Number(run.meta.last_row_id),content_revision:1,policy_version:"p",policy:"{}",automatic:"{}",operation_key:"decision",created_at:"t"});
   await insert("curation_overrides",{link_id:id,field:"topics",term:"llm",action:"accept",source:"human",revision:1,operation_key:"human",created_at:"t"});
   await insert("curation_events",{link_id:id,kind:"why",payload:'{"why":"private"}',revision:1,operation_key:"event",created_at:"t"});
+  await insert("custom_tags",{id:"custom-private",label:"project",normalized_label:"project",created_at:"t",updated_at:"t"});
+  await insert("custom_tag_links",{link_id:id,tag_id:"custom-private",created_at:"t"});
+  await insert("tag_operations",{link_id:id,operation_key:"tags",payload_hash:"h",revision:1,actions:"[]",before_overrides:"[]",before_custom:"[]",before_effective:"{}",after_effective:"{}",context:"{}",created_at:"t"});
   await insert("current_projections",{link_id:id,content_revision:1,effective:"{}",updated_at:"t"});
   await insert("entity_states",{link_id:id,entities:'["private entity"]',updated_at:"t"});
   await insert("entity_operations",{link_id:id,operation_key:"entity",request_hash:"h",evidence_snapshot_id:snapshotID,content_revision:1,content_hash:"h",payload:"{}",outcome:"completed",created_at:"t"});
@@ -153,7 +156,7 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("rerank_cache",{cache_key:"private-rank",owner_token:"owner",status:"pending",request_json:"private query",scope_hash:"scope",spec_hash:"spec",model:"model",items:"[]",created_at:1,expires_at:2});
   await insert("rerank_cache_links",{cache_key:"private-rank",link_id:id});
   await insert("entity_cache",{cache_key:"private-entity",link_id:id,evidence_snapshot_id:snapshotID,content_revision:1,content_hash:"hash",source_links:"[]",owner_token:"owner",status:"completed",request_json:"private entity material",candidates:"[]",spec_hash:"spec",answers:"{}",created_at:1,expires_at:Date.now()+86400000});
-  const tables=["entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links"];
+  const tables=["entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links","custom_tag_links","tag_operations","tag_change_facts"];
   const schema=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_*'").all<{name:string}>();
   const linked:string[]=[];
   for(const {name} of schema.results) {

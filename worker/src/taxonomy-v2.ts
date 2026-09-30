@@ -28,6 +28,9 @@ export interface TermDefinition {
   relations?: TermRelation[];
   /** Facets are cross-cutting (for example evaluation as a method). */
   facet?: boolean;
+  definition_version?: number;
+  display_revision?: number;
+  status?: "active" | "deprecated";
 }
 
 export interface Taxonomy {
@@ -40,18 +43,20 @@ export interface Taxonomy {
   content_functions: TermDefinition[];
   carriers: TermDefinition[];
   affordances: TermDefinition[];
+  resource_kinds?: TermDefinition[];
 }
 
 // Dimensions that may be selected independently. Topics, content functions and
 // affordances are multi-select; carrier is single-valued by real structure.
-export type Dimension = "topics" | "content_functions" | "carriers" | "affordances";
+export type Dimension = "topics" | "content_functions" | "carriers" | "affordances" | "resource_kinds";
 
-export const MULTI_SELECT_DIMENSIONS: Dimension[] = ["topics", "content_functions", "affordances"];
+export const MULTI_SELECT_DIMENSIONS: Dimension[] = ["topics", "content_functions", "affordances", "resource_kinds"];
 // forms and uses are the v1 single-valued dimensions, retained for projection.
 export type V1Dimension = "forms" | "uses";
 export const SINGLE_SELECT_DIMENSIONS: Array<Dimension | V1Dimension> = ["carriers", "forms", "uses"];
 
 export interface V2Selection {
+  resource_kinds?: string[];
   topics: string[];
   content_functions: string[];
   carriers: string[];
@@ -63,7 +68,7 @@ export interface V2Selection {
 
 // The v2 vocabulary. `forms`/`uses` are the v1 dimensions kept for projection;
 // the new dimensions are purely additive.
-const v2: Taxonomy = {
+const legacyV2: Taxonomy = {
   ...(taxonomy as unknown as Taxonomy),
   definition_version: 2,
   content_functions: [
@@ -91,6 +96,40 @@ export function taxonomyV2(): Taxonomy {
   return v2;
 }
 
+export function legacyTaxonomyV2(): Taxonomy { return legacyV2; }
+
+const term = (id: string, label: string, description: string, excludes: string[]): TermDefinition =>
+  ({ id, label, description, excludes, includes: [], aliases: [], active: true,
+    definition_version: 1, display_revision: 1, status: "active" });
+
+const v2: Taxonomy = {
+  ...legacyV2, version: "2026-09-30.1", definition_version: 3,
+  topics: [
+    term("ai_coding", "AI编程", "AI 辅助开发、代码审查、调试、重构和专门的编程环境。", ["仅用 Codex 做图、写作或运行其他任务"]),
+    term("agent_workflow", "Agent配置与自动化", "上下文、长期指令、工具接入、会话配置和任务自动化。", ["仅发布面向写作或生图的 Skill"]),
+    term("image_creation", "图像生成", "生图、图像编辑、写真复拍、人物一致性和文章配图。", ["普通图片展示、网页 UI、视频动画"]),
+    term("video_creation", "视频制作", "视频生成、动画、分镜、B-roll、录屏和剪辑。", ["网页加载动效、微交互组件"]),
+    term("writing_creation", "写作与文风", "文章、小说、文风复用、去 AI 腔和表达方法。", ["材料仅是一篇长文、只涉及版式"]),
+    term("ui_design", "界面设计", "网页和 App 的视觉、交互、设计规范、组件和微交互。", ["写真生成、普通产品发布"]),
+    term("knowledge_workflow", "信息采集与知识库", "文章或聊天记录的采集、导出、归档、检索和复用。", ["单纯推荐社区入口、偶然提及 RAG"]),
+    term("information_sources", "信息源", "持续信息来源、社区、站点、素材入口的筛选和导航。", ["单个工具发布、资料库的检索实现"]),
+    term("model_practice", "模型训练与部署", "训练、微调、量化、部署和推理性能取舍。", ["普通云端 AI 使用、提示词文风蒸馏"]),
+    term("creator_business", "内容运营与变现", "账号定位、选题增长、分发、商单和创作者接单。", ["一般写作技巧、软件星标致谢、证券投资"]),
+    term("finance_resources", "投资理财", "行情、回测、资产配置、金融学习和金融平台开户资源。", ["接单收入、内容商单"]),
+    term("document_layout", "文档与公文排版", "Word、WPS、DOCX、公文版式、模板和格式保真。", ["表达方法、网页 UI、训练用 PDF 提取"]),
+    ...legacyV2.topics.map(t => ({ ...t, active: false, deprecated: true, status: "deprecated" as const,
+      definition_version: 1, display_revision: 1 }))
+  ],
+  resource_kinds: [
+    term("skill", "Skill", "明确介绍或提供可安装、可复用的 Agent 技能包。", ["只讨论 SKILL.md 配置文件、泛泛提到技能"]),
+    { ...term("prompt", "提示词", "给出可复用指令、模板，或明确提供提示词集合入口。", ["只说 AI 可以完成某项工作"]), aliases: ["Prompt"] },
+    term("software", "软件与服务", "可运行软件、CLI、插件、浏览器工具或 API 服务。", ["纯观点、单独 Skill、仅有开源链接"]),
+    term("component", "代码组件", "可复用 UI、动画或交互代码组件和组件库。", ["普通设计图片、设计规范、视频动画"]),
+    term("model", "模型资源", "模型权重、明确的训练实现、适配器或可运行模型项目。", ["仅介绍云端模型能力、仅引用模型名"]),
+    term("reference", "参考资料", "明确可复用的规范、指南、模板、素材库或资源导航。", ["仅因为是一篇文章、泛泛认为值得参考"])
+  ]
+};
+
 // Validate the v2 vocabulary: unique IDs, no alias collisions inside a
 // dimension, relations that resolve, and no synonym/broader cycles.
 export function validateTaxonomy(candidate: Taxonomy = v2): string[] {
@@ -101,6 +140,7 @@ export function validateTaxonomy(candidate: Taxonomy = v2): string[] {
   const dimensions: Array<[string, TermDefinition[]]> = [
     ["topics", candidate.topics], ["forms", candidate.forms], ["uses", candidate.uses],
     ["content_functions", candidate.content_functions], ["carriers", candidate.carriers], ["affordances", candidate.affordances],
+    ...(candidate.resource_kinds ? [["resource_kinds", candidate.resource_kinds] as [string, TermDefinition[]]] : []),
   ];
   for (const [name, terms] of dimensions) {
     if (!Array.isArray(terms) || terms.length === 0) {
@@ -140,7 +180,10 @@ export function findTerm(dimension: string, id: string): TermDefinition | undefi
 
 export function validV2Term(dimension: string, id: string): boolean {
   const term = findTerm(dimension, id);
-  return term !== undefined && term.active && !term.deprecated;
+  // Legacy endpoints may preserve old manual values. New tag actions separately
+  // enforce selectable status; no old meaning is mapped to a nearby new label.
+  return term !== undefined && ((term.active && !term.deprecated) ||
+    (dimension === "topics" && legacyV2.topics.some(t => t.id === id)));
 }
 
 // A v2 selection is valid when every selected ID exists and is active, the
@@ -155,9 +198,12 @@ export function validateV2Selection(value: unknown): V2Selection | null {
   const functions = stringArray(record.content_functions);
   const carriers = stringArray(record.carriers);
   const affordances = stringArray(record.affordances);
+  const resources = record.resource_kinds === undefined ? undefined : stringArray(record.resource_kinds);
   if (!topics || !functions || !carriers || !affordances) return null;
+  if (resources === null) return null;
   const dimensions: Array<[string, string[], number]> = [
     ["topics", topics, 64], ["content_functions", functions, 8], ["carriers", carriers, 1], ["affordances", affordances, 8],
+    ...(resources ? [["resource_kinds", resources, 6] as [string, string[], number]] : []),
   ];
   for (const [name, ids, max] of dimensions) {
     if (ids.length > max) return null;
@@ -170,7 +216,8 @@ export function validateV2Selection(value: unknown): V2Selection | null {
   const use = typeof record.use === "string" ? record.use : "";
   if (form !== "" && !validV2Term("forms", form)) return null;
   if (use !== "" && !validV2Term("uses", use)) return null;
-  return { topics, content_functions: functions, carriers, affordances, form, use };
+  return { topics, content_functions: functions, carriers, affordances, form, use,
+    ...(resources ? { resource_kinds: resources } : {}) };
 }
 
 // The v1 projection is intentionally lossy but legal: at most three topics,
@@ -193,6 +240,7 @@ export function applyV1Write(existing: V2Selection, payload: { topics?: string[]
     content_functions: existing.content_functions.slice(),
     carriers: existing.carriers.slice(),
     affordances: existing.affordances.slice(),
+    ...(existing.resource_kinds ? { resource_kinds: existing.resource_kinds.slice() } : {}),
   };
   if (payload.topics !== undefined) {
     // A v1 write replaces only the first three positions; topics beyond the v1

@@ -120,7 +120,7 @@ export function validQuestionSpec(value: unknown): value is QuestionSpec {
 }
 
 export type OverrideField =
-  | "topics" | "content_functions" | "carriers" | "affordances"
+  | "topics" | "content_functions" | "carriers" | "affordances" | "resource_kinds"
   | "form" | "use" | "entities";
 export type OverrideAction = "accept" | "reject" | "set_empty" | "reset";
 
@@ -128,10 +128,10 @@ export type OverrideAction = "accept" | "reject" | "set_empty" | "reset";
 // from old clients and normalized before they are stored, so one effective
 // view exists regardless of which client wrote last (F04).
 export const OVERRIDE_FIELDS: OverrideField[] = [
-  "topics", "content_functions", "carriers", "affordances", "form", "use", "entities"
+  "topics", "content_functions", "carriers", "affordances", "resource_kinds", "form", "use", "entities"
 ];
 export const TERM_FIELDS: OverrideField[] = [
-  "topics", "content_functions", "carriers", "affordances", "form", "use", "entities"
+  "topics", "content_functions", "carriers", "affordances", "resource_kinds", "form", "use", "entities"
 ];
 export const OVERRIDE_ACTIONS: OverrideAction[] = ["accept", "reject", "set_empty", "reset"];
 
@@ -140,6 +140,7 @@ const FIELD_ALIASES: Record<string, OverrideField> = {
   affordance: "affordances", entity: "entities",
   topics: "topics", content_functions: "content_functions", carriers: "carriers",
   affordances: "affordances", form: "form", use: "use", entities: "entities"
+  , resource_kind: "resource_kinds", resource_kinds: "resource_kinds"
 };
 
 export function normalizeField(value: unknown): OverrideField | null {
@@ -160,6 +161,7 @@ export function validOverride(field: OverrideField, action: OverrideAction, term
     if (field === "content_functions") return validV2Term("content_functions", term);
     if (field === "carriers") return validV2Term("carriers", term);
     if (field === "affordances") return validV2Term("affordances", term);
+    if (field === "resource_kinds") return validV2Term("resource_kinds", term);
     if (field === "form") return validV2Term("forms", term);
     if (field === "use") return validV2Term("uses", term);
     return term.length > 0 && term.length <= 80;
@@ -247,6 +249,38 @@ function applyOverride(state: FieldState, override: Override): void {
   }
 }
 
+// Snapshot the current manual state, not the unbounded event log. Undo restores
+// this compact representation; repeated edit/undo must not duplicate history
+// exponentially. Single fields retain the last accept and following rejection
+// for each term, preserving A -> B -> reset B behavior.
+export function compactOverrides(overrides: Override[]): Override[] {
+  const ordered = [...overrides].sort((a, b) => a.revision - b.revision);
+  const out: Override[] = [];
+  for (const field of OVERRIDE_FIELDS) {
+    const state = newFieldState();
+    const entries = ordered.filter(o => o.field === field);
+    for (const entry of entries) applyOverride(state, entry);
+    const latest = (term: string, action: OverrideAction) => [...entries].reverse().find(o => o.term === term && o.action === action);
+    if (state.clearedAutomatic && state.emptyOverride) out.push(state.emptyOverride);
+    for (const term of state.readmit) { const reset = latest(term, "reset"); if (reset) out.push(reset); }
+    if (["carriers", "form", "use"].includes(field)) {
+      const indices = new Set<number>();
+      for (const term of state.order) {
+        let accept = -1, reject = -1;
+        state.history.forEach((e, i) => { if (e.term === term && e.action === "accept") accept = i;
+          if (e.term === term && e.action === "reject") reject = i; });
+        if (accept >= 0) indices.add(accept);
+        if (reject > accept) indices.add(reject);
+      }
+      for (const index of [...indices].sort((a, b) => a - b)) {
+        const entry = state.history[index], original = latest(entry.term, entry.action);
+        if (original) out.push(original);
+      }
+    } else for (const term of state.order) { const original = state.origins.get(term); if (original) out.push(original); }
+  }
+  return out;
+}
+
 // resolveMulti resolves a multi-valued field: accepts accumulate, rejects are
 // removed and reset restores the automatic value.
 export function resolveMulti(automatic: string[], state: FieldState): string[] {
@@ -284,6 +318,7 @@ export function resolveSingle(automatic: string, state: FieldState): string {
 }
 
 export interface AutomaticView {
+  resource_kinds?: string[];
   topics: string[];
   content_functions: string[];
   carriers: string[];
@@ -352,7 +387,7 @@ export function effectiveOrigins(view: EffectiveView, overrides: Override[], aut
     confirmed: override?.source === "human" && override.confirmed === true, revision: override?.revision ?? null });
   return Object.fromEntries(OVERRIDE_FIELDS.map((field) => {
     const state = states[field];
-    const values = typeof view[field] === "string" ? (view[field] ? [view[field] as string] : []) : view[field] as string[];
+    const values = typeof view[field] === "string" ? (view[field] ? [view[field] as string] : []) : (view[field] ?? []) as string[];
     return [field, {
       values: values.map((term) => ({ term, ...origin(state.action.get(term) === "accept" ? state.origins.get(term) : undefined) })),
       empty: state.empty ? origin(state.emptyOverride) : null,
@@ -372,6 +407,7 @@ export interface EffectiveView extends AutomaticView {
   empty: {
     topics: boolean; content_functions: boolean; carriers: boolean;
     affordances: boolean; form: boolean; use: boolean;
+    resource_kinds?: boolean;
   };
   reviewed: boolean;
   /** Latest human override revision the view incorporates. */
@@ -392,6 +428,8 @@ export function effectiveView(automatic: AutomaticView, overrides: Override[]): 
   const carrier = resolveSingle(automatic.carriers[0] ?? "", states.carriers);
   return {
     topics: resolveMulti(automatic.topics, states.topics),
+    ...(automatic.resource_kinds !== undefined || overrides.some(o => o.field === "resource_kinds")
+      ? { resource_kinds: resolveMulti(automatic.resource_kinds ?? [], states.resource_kinds) } : {}),
     content_functions: resolveMulti(automatic.content_functions, states.content_functions),
     // Carrier is single-valued: an accept replaces the automatic carrier.
     carriers: carrier === "" ? [] : [carrier],
@@ -406,6 +444,8 @@ export function effectiveView(automatic: AutomaticView, overrides: Override[]): 
       affordances: states.affordances.empty,
       form: states.form.empty,
       use: states.use.empty
+      , ...(automatic.resource_kinds !== undefined || overrides.some(o => o.field === "resource_kinds")
+        ? { resource_kinds: states.resource_kinds.empty } : {})
     },
     reviewed: Object.values(states).some((state) => state.action.size > 0 || state.clearedAutomatic || state.empty),
     revision: ordered.length > 0 ? ordered[ordered.length - 1].revision : 0

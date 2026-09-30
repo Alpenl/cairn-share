@@ -59,6 +59,8 @@ async function seed(automatic: AutomaticView, actions: Action[], legacy?: { payl
   // Freeze the old defect independently of the new resolver: term resets did
   // not clear the empty bit set by the last non-term-reset action.
   for (const field of OVERRIDE_FIELDS) {
+    // 0024 predates independent resources; it must not manufacture newer state.
+    if (field === "resource_kinds") continue;
     const ordered = layered.filter(a => a.field === field).sort((a, b) => a.revision - b.revision);
     const last = ordered.filter(a => !(a.action === "reset" && a.term !== "")).at(-1);
     if (last?.action === "set_empty") {
@@ -142,7 +144,7 @@ it("0024 repairs legacy empty barriers, noncurrent entities and absent terms whi
     for (const revision of [1, 2, 3]) cases.push(await seed(automatic, actions, { payload, revision }, false, true));
   }
   for (const field of OVERRIDE_FIELDS) {
-    const terms = automatic[field];
+    const terms = automatic[field] ?? [];
     const term = Array.isArray(terms) ? terms[0] ?? "absent" : terms;
     const empty: Action = { field, action: "set_empty", term: "", revision: 1 };
     const resetTerm: Action = { field, action: "reset", term, revision: 2 };

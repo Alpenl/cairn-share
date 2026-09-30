@@ -3,7 +3,7 @@ import type { Env } from "./index";
 import { computeEffective, persistSelectionOverrides, rebuildProjection, selectionOperationReceipt } from "./domain-routes";
 import { canonicalJSON } from "./domain";
 import {
-  applyV1Write, findTerm, proposalImpact, projectV1, taxonomyV2, validateTaxonomy, validateV2Selection,
+  applyV1Write, findTerm, proposalImpact, projectV1, taxonomyV2, legacyTaxonomyV2, validateTaxonomy, validateV2Selection,
   type TaxonomyProposal, type V2Selection
 } from "./taxonomy-v2";
 import { V1_V2_MAPPING, validateMapping } from "./taxonomy-mapping";
@@ -70,7 +70,7 @@ export async function taxonomyV2Route(request: Request, env: Env, path: string):
   // definitions are untouched so no stored decision is invalidated.
   if (path === "/api/v2/taxonomy") {
     if (request.method !== "GET") return fail("method_not_allowed", 405);
-    return reply(await taxonomyWithDisplayOverrides(env));
+    return reply(await taxonomyWithDisplayOverrides(env, request.headers.get("X-Cairn-Tag-System") === "1"));
   }
   if (path === "/api/v2/taxonomy/validate") {
     const problems = validateTaxonomy();
@@ -86,7 +86,11 @@ export async function taxonomyV2Route(request: Request, env: Env, path: string):
   let match = path.match(/^\/api\/v2\/links\/(\d+)\/selection$/);
   if (match) {
     const id = Number(match[1]);
-    if (request.method === "GET") return getSelection(env, id, new URL(request.url).searchParams);
+    if (request.method === "GET") {
+      const params = new URL(request.url).searchParams;
+      if (request.headers.get("X-Cairn-Tag-System") === "1") params.set("tag_system", "1");
+      return getSelection(env, id, params);
+    }
     if (request.method === "PATCH") return patchSelection(request, env, id);
     return fail("method_not_allowed", 405);
   }
@@ -154,18 +158,19 @@ async function generateProposals(env: Env): Promise<Response> {
 // taxonomyWithDisplayOverrides returns the executable vocabulary with approved
 // display-only renames applied to labels. Definitions, ids and relations are
 // unchanged, so the model input and every stored decision stay valid.
-async function taxonomyWithDisplayOverrides(env: Env): Promise<Record<string, unknown>> {
-  const vocabulary = taxonomyV2() as unknown as Record<string, unknown>;
-  const rows = await env.DB.prepare(`SELECT term_id, dimension, label FROM taxonomy_display_overrides`).all<{ term_id: string; dimension: string; label: string }>();
+async function taxonomyWithDisplayOverrides(env: Env, tags = false): Promise<Record<string, unknown>> {
+  const vocabulary = (tags ? taxonomyV2() : legacyTaxonomyV2()) as unknown as Record<string, unknown>;
+  const rows = await env.DB.prepare(`SELECT term_id, dimension, label,display_revision FROM taxonomy_display_overrides`).all<{ term_id: string; dimension: string; label: string; display_revision: number }>();
   if (rows.results.length === 0) return vocabulary;
-  const overlays = new Map(rows.results.map((row) => [`${row.dimension}:${row.term_id}`, row.label]));
+  const overlays = new Map(rows.results.map((row) => [`${row.dimension}:${row.term_id}`, row]));
   const result: Record<string, unknown> = { ...vocabulary };
-  for (const dimension of ["topics", "forms", "uses", "content_functions", "carriers", "affordances"]) {
+  for (const dimension of ["topics", "forms", "uses", "content_functions", "carriers", "affordances", "resource_kinds"]) {
     const terms = vocabulary[dimension];
     if (!Array.isArray(terms)) continue;
     result[dimension] = terms.map((term) => {
-      const label = overlays.get(`${dimension}:${(term as { id: string }).id}`);
-      return label === undefined ? term : { ...(term as Record<string, unknown>), label, display_overridden: true };
+      const display = overlays.get(`${dimension}:${(term as { id: string }).id}`);
+      return display === undefined ? term : { ...(term as Record<string, unknown>), label: display.label, display_overridden: true,
+        ...(tags ? { display_revision: display.display_revision } : {}) };
     });
   }
   return result;
@@ -195,8 +200,9 @@ async function applyProposal(request: Request, env: Env, id: string): Promise<Re
   await env.DB.prepare(
     `INSERT INTO taxonomy_display_overrides(term_id, dimension, label, proposal_id, applied_at)
      VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(term_id) DO UPDATE SET dimension=excluded.dimension, label=excluded.label,
-       proposal_id=excluded.proposal_id, applied_at=excluded.applied_at`
+     ON CONFLICT(dimension,term_id) DO UPDATE SET label=excluded.label,
+       proposal_id=excluded.proposal_id, applied_at=excluded.applied_at,
+       display_revision=taxonomy_display_overrides.display_revision+1`
   ).bind(proposal.term_id, proposal.dimension, payload.label.trim(), id, new Date().toISOString()).run();
   return reply({ id, applied: true, display_only: true, vocabulary_changed: false });
 }
@@ -219,6 +225,7 @@ export function selectionPayload(snapshot: SelectionSnapshot, id: number, params
   const includeAutomatic = params.get("include_automatic") === "1";
   const selection: V2Selection = {
     topics: view.topics, content_functions: view.content_functions, carriers: view.carriers,
+    ...(params.get("tag_system") === "1" ? { resource_kinds: view.resource_kinds ?? [] } : {}),
     affordances: view.affordances, form: view.form, use: view.use
   };
   return {
@@ -227,7 +234,8 @@ export function selectionPayload(snapshot: SelectionSnapshot, id: number, params
     // This is the same baseline used to derive view, before human overrides.
     // Return only the six selection dimensions; entity state is independent.
     ...(includeAutomatic ? { automatic: { topics: automatic.topics, content_functions: automatic.content_functions,
-      carriers: automatic.carriers, affordances: automatic.affordances, form: automatic.form, use: automatic.use } } : {}),
+      carriers: automatic.carriers, affordances: automatic.affordances, form: automatic.form, use: automatic.use,
+      ...(params.get("tag_system") === "1" ? { resource_kinds: automatic.resource_kinds ?? [] } : {}) } } : {}),
     taxonomy_version: taxonomyV2().version, definition_version: taxonomyV2().definition_version,
     provenance: { source: projected ? "decision" : "legacy", overrides: view.reviewed, revision: view.revision, stale },
     v1_only: !projected,
@@ -249,6 +257,7 @@ async function loadSelection(env: Env, id: number): Promise<V2Selection> {
 async function patchSelection(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
+  if (body.resource_kinds !== undefined) return fail("unsupported_field", 409, { field: "resource_kinds", endpoint: `/api/v2/links/${id}/tags` });
   const operation = await selectionOperation(env, id, "v2", body);
   if (operation instanceof Response) return operation;
   const link = await env.DB.prepare(`SELECT id FROM links WHERE id = ?`).bind(id).first<{ id: number }>();

@@ -1,5 +1,6 @@
 import { cleanupDeletedImages, maintainPrivacy } from "./privacy";
 import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
+import { tagSystemRoute, attachTagSummaries } from "./tag-system";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
@@ -15,6 +16,7 @@ import { MAX_ENRICHMENT_ATTEMPTS, SOURCE_CLAIM_CANDIDATE_SQL, SOURCE_GATE_READY_
   sourceClaimCandidateBindings, sourceClaimSQL } from "./source-claim";
 
 export interface Env {
+  CAIRN_CLASSIFICATION_MAX_CALLS?: string;
   DB: D1Database;
   ENRICHMENT_IMAGES: R2Bucket;
   CAIRN_API_TOKEN: string;
@@ -150,7 +152,8 @@ type ErrorCode =
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System",
+  "Access-Control-Expose-Headers": "X-Cairn-Tag-System",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -297,6 +300,15 @@ export default {
     let response: Response | null = null;
     try {
       response = withServerTiming(await handleRequest(request, env, timing), timing);
+      if (request.headers.get("X-Cairn-Tag-System") === "1") response.headers.set("X-Cairn-Tag-System", "1");
+      else if (![204, 304].includes(response.status) && response.headers.get("Content-Type")?.includes("application/json")) {
+        // Strict old clients must never see new optional dimensions.
+        const removeNew = (value: unknown): unknown => Array.isArray(value) ? value.map(removeNew) :
+          value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value as Record<string, unknown>)
+            .filter(([key]) => key !== "resource_kinds" && key !== "custom_tags").map(([key, child]) => [key, removeNew(child)])) : value;
+        const body = await response.clone().json();
+        response = new Response(JSON.stringify(removeNew(body)), { status: response.status, headers: response.headers });
+      }
       response.headers.set("X-Cairn-Observability-Version", String(policy.version));
       if (!policyReadAvailable(policy)) response.headers.set("X-Cairn-Observability-Status", "unavailable");
       else if (policy.version === -1) response.headers.set("X-Cairn-Observability-Status", "unconfigured");
@@ -345,6 +357,9 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   const url = new URL(request.url);
   const path = trimTrailingSlash(url.pathname);
+  if (request.headers.get("X-Cairn-Tag-System") === "1") url.searchParams.set("tag_system", "1");
+  const newTagFilter = ["resource_kinds", "resource_kind", "custom_tags", "custom_tag", "topics_mode", "topic_mode", "resource_mode", "custom_mode"].some(key => url.searchParams.has(key));
+  if (newTagFilter && request.headers.get("X-Cairn-Tag-System") !== "1") return error("capability_mismatch", 409);
 
   if (path === "/api/internal/observability") {
     const authError = requireEnricherToken(request, env);
@@ -434,6 +449,14 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   // App-facing curation is an exact allowlist, never an alias for arbitrary
   // internal v2 paths. Reads and human field actions do not invoke a model.
   const appV2 = path.match(/^\/api\/bookmarks\/(\d+)\/(v2-selection|v2-override)$/);
+  const appTags = path.match(/^\/api\/bookmarks\/(\d+)\/(tags|tag-history)$/);
+  if (appTags || /^\/api\/custom-tags(?:\/[A-Za-z0-9-]+)?$/.test(path) || ["/api/tag-counts", "/api/tag-export"].includes(path)) {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    const route = appTags ? `/api/v2/links/${appTags[1]}/${appTags[2]}` : path.startsWith("/api/custom-tags")
+      ? path.replace("/api/custom-tags", "/api/v2/custom-tags") : path === "/api/tag-counts" ? "/api/v2/tags/counts" : "/api/v2/tags/export";
+    return (await tagSystemRoute(request, env, route)) ?? error("not_found", 404);
+  }
   if (path === "/api/v2-taxonomy" || appV2) {
     const authError = requireApiToken(request, env);
     if (authError !== null) return authError;
@@ -458,6 +481,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   if (path.startsWith("/api/v2/")) {
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
+    const tags = await tagSystemRoute(request, env, path);
+    if (tags) return tags;
     if (path.startsWith("/api/v2/taxonomy") || /^\/api\/v2\/links\/\d+\/selection/.test(path)) {
       return taxonomyV2Route(request, env, path);
     }
@@ -689,7 +714,8 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
     const rows = result.results ?? [];
     const items = rows.slice(0, limit);
     const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
-    return { items: items.map((row) => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row)), next_before_id: next,
+    const mapped = items.map((row) => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row));
+    return { items: request.headers.get("X-Cairn-Tag-System") === "1" ? await attachTagSummaries(env, mapped as unknown as Record<string, unknown>[]) : mapped, next_before_id: next,
       ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {}) };
   });
 }
@@ -707,7 +733,8 @@ async function getLink(request: Request, url: URL, id: number, env: Env, timing:
     if (row === null) {
       return null;
     }
-    return includeEnrichment(url) ? mapAppLink(row, true, includeCacheIdentity(url)) : mapLink(row);
+    const mapped = includeEnrichment(url) ? mapAppLink(row, true, includeCacheIdentity(url)) : mapLink(row);
+    return request.headers.get("X-Cairn-Tag-System") === "1" ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped;
   });
 }
 
@@ -840,7 +867,7 @@ async function deleteLink(env: Env, id: number, timing: TimingCollector): Promis
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
-function bookmarkFilters(url: URL, query?: string): { clauses: string[]; bindings: Array<string | number> } | Response {
+export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; bindings: Array<string | number> } | Response {
   const clauses: string[] = [];
   const bindings: Array<string | number> = [];
   const curationStatus = url.searchParams.get("curation_status");
@@ -2247,7 +2274,7 @@ function listCacheUrl(
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
   if (parsed.query !== undefined) url.searchParams.set("q", parsed.query);
-  for (const key of ["include", "include_cache_identity", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
+  for (const key of ["include", "include_cache_identity", "tag_system", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
     const value = requestUrl.searchParams.get(key);
     if (value) url.searchParams.set(key, value);
   }
@@ -2268,6 +2295,7 @@ function detailCacheUrl(id: number, requestUrl: URL, generation: number): string
   url.searchParams.set("v", CACHE_VERSION);
   url.searchParams.set("g", String(generation));
   if (includeEnrichment(requestUrl)) url.searchParams.set("include", "enrichment");
+  if (requestUrl.searchParams.get("tag_system") === "1") url.searchParams.set("tag_system", "1");
   if (includeCacheIdentity(requestUrl)) url.searchParams.set("include_cache_identity", "1");
   url.searchParams.set("host", requestUrl.host);
   return url.toString();

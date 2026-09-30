@@ -2,7 +2,7 @@ import { CLASSIFICATION_LIMITS, classificationBudgetAvailable, classificationWin
 import { validEnrichmentSource } from "./source-validation";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
-import { record, taxonomy, validateClassification } from "./curation";
+import { personalUse, record, taxonomy, validateClassification } from "./curation";
 import { contentHash, objectivePayload, objectiveUseAllowed, validAssessment,
   type AutomaticView, type EvidenceSnapshot } from "./domain";
 import { completionProjectionPlan, decisionInsertStatement, rebuildProjection, runInsertStatement, type WriteGuard } from "./domain-routes";
@@ -198,12 +198,15 @@ function automaticView(value: unknown): AutomaticView | null {
   const contentFunctions = list(value.content_functions, 8);
   const carriers = list(value.carriers, 1);
   const affordances = list(value.affordances, 8);
+  const resources = value.resource_kinds === undefined ? undefined : list(value.resource_kinds, 6);
   const entities = list(value.entities, 10);
   if (!topics || !contentFunctions || !carriers || !affordances || !entities) return null;
+  if (resources === null) return null;
   if (value.assessment !== undefined && !validAssessment(value.assessment)) return null;
   return {
     ...(value.assessment === undefined ? {} : { assessment: value.assessment }),
     topics, content_functions: contentFunctions, carriers, affordances, entities,
+    ...(resources ? { resource_kinds: resources } : {}),
     form: typeof value.form === "string" && value.form.length <= 40 ? value.form : "",
     use: typeof value.use === "string" && value.use.length <= 40 ? value.use : ""
   };
@@ -391,7 +394,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       return fail("capability_mismatch", { target_generation: target.generation, protocol: target.protocol });
     }
     const budgetLimits = body.budget_limits ?? CLASSIFICATION_LIMITS;
-    if (!validClassificationLimits(budgetLimits)) return fail("invalid_classification_config");
+    if (!validClassificationLimits(budgetLimits, env)) return fail("invalid_classification_config");
     if (!await classificationBudgetAvailable(env, budgetLimits)) return fail("budget_exhausted");
     const budgetWindow = classificationWindow();
     const token = crypto.randomUUID();
@@ -528,13 +531,15 @@ export async function classificationRoute(request: Request, env: Env, path: stri
   if (match[2] === "complete") {
     if (!record(body.result)) return fail("invalid_classification");
     const result = body.result;
-    const classification = validateClassification(result.classification);
-    if (!classification || !text(result.model, 200) || !text(result.policy_version, 100) || !record(result.answers)) {
+    const isV2 = v2ResultShape(result);
+    // A negotiated v2 projection uses its immutable target vocabulary; the old
+    // v1 executable taxonomy cannot validate the new stable topic identities.
+    const classification = validateClassification(result.classification, isV2);
+    if (!classification || (isV2 && personalUse(classification.use)) || !text(result.model, 200) || !text(result.policy_version, 100) || !record(result.answers)) {
       return fail("invalid_classification");
     }
     // A v2 completion must carry its immutable identity and the typed answers,
     // because those are what the replayable run is built from.
-    const isV2 = v2ResultShape(result);
     const automatic = isV2 ? automaticView(result.automatic) : null;
     if (isV2 && (!text(result.spec_id, 64) || !text(result.spec_hash, 128) || automatic === null)) {
       return fail("invalid_classification");
@@ -552,6 +557,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     const response = await idempotent(env, key, payloadHash, id, async () => {
       const target = await activeTarget(env);
       if (!target) return { failure: "configuration_error" as const };
+      if (isV2 && classification.taxonomy_version !== target.taxonomy_version) return { failure: "target_changed" as const };
       // Reject completions that no longer match the active target *before*
       // touching storage, so a stale worker cannot overwrite the projection.
       const job = await env.DB.prepare(`SELECT status, target_generation, spec_id, taxonomy_version, revision, input_revision, lease_token, lease_until, content_revision, evidence_hash, evidence_snapshot_id, attempts, component_epoch

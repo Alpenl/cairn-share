@@ -2,7 +2,7 @@ import type { Env } from "./index";
 import { effectiveView, effectiveOrigins, EMPTY_AUTOMATIC, normalizeField, validAssessment,
   type AutomaticView, type Override, type OverrideField } from "./domain";
 
-const dimensions = ["topics", "content_functions", "carriers", "affordances", "form", "use"] as const;
+const dimensions = ["topics", "content_functions", "carriers", "affordances", "form", "use", "resource_kinds"] as const;
 const parse = <T>(value: string | null, fallback: T): T => {
   try { return value === null ? fallback : JSON.parse(value) as T; } catch { return fallback; }
 };
@@ -134,7 +134,7 @@ function selectionFromRow(link: Row) {
   const fields = Object.fromEntries(dimensions.map((field) => {
     const candidates = assessment?.decisions.filter((entry) => entry.dimension === field) ?? [];
     const incomplete = assessment?.incomplete.includes(field) ?? false;
-    const values = automatic[field];
+    const values = automatic[field] ?? [];
     let status = "unknown";
     if (stale) status = "stale";
     else if (!decision && link.classification === null) {
