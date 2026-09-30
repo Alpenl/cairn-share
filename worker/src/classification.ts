@@ -3,7 +3,7 @@ import { validEnrichmentSource } from "./source-validation";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
 import { personalUse, record, taxonomy, validateClassification, type Classification } from "./curation";
-import { legacyTaxonomyV2, taxonomyV2, type TermDefinition } from "./taxonomy-v2";
+import { classificationTaxonomy, taxonomyV2, type TermDefinition } from "./taxonomy-v2";
 import { contentHash, objectivePayload, objectiveUseAllowed, validAssessment,
   type AutomaticView, type EvidenceSnapshot } from "./domain";
 import { completionProjectionPlan, decisionInsertStatement, rebuildProjection, runInsertStatement, type WriteGuard } from "./domain-routes";
@@ -220,8 +220,7 @@ function automaticView(value: unknown): AutomaticView | null {
 function validAutomaticProjection(classification: Classification, automatic: AutomaticView, version: string): boolean {
   if (JSON.stringify(classification.topics) !== JSON.stringify(automatic.topics.slice(0, 3)) ||
     classification.form !== automatic.form || classification.use !== automatic.use) return false;
-  const catalog = version === taxonomyV2().version ? taxonomyV2() :
-    version === legacyTaxonomyV2().version ? legacyTaxonomyV2() : null;
+  const catalog = classificationTaxonomy(version);
   if (!catalog) return false;
   const active = (terms: TermDefinition[] | undefined, ids: string[]) => ids.every(id =>
     terms?.some(term => term.id === id && term.active && !term.deprecated));
@@ -580,7 +579,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         result.spec_id !== target.spec_id || result.spec_hash !== target.spec_hash ||
         (result.requested_model ?? result.model) !== target.requested_model ||
         result.policy_version !== target.policy_version)) return { failure: "target_changed" as const };
-      if (target.taxonomy_version === taxonomyV2().version && (!isV2 ||
+      if (classificationTaxonomy(target.taxonomy_version)?.resource_kinds !== undefined && (!isV2 ||
         !record(result.raw_judgments) || result.raw_judgments.metadata_version !== 1 ||
         automatic?.resource_kinds === undefined)) return { failure: "invalid_classification" as const };
       if (isV2 && automatic && !validAutomaticProjection(classification, automatic, target.taxonomy_version)) {

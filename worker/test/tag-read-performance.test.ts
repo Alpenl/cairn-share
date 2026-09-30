@@ -9,9 +9,10 @@ import vectors from "./fixtures/override-vectors.json";
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 const date = "2026-09-30T00:00:00Z";
 const settings = (DB = env.DB) => ({ DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
-function call(path: string, DB = env.DB, internal = false, aware = true) {
+function call(path: string, DB = env.DB, internal = false, aware = true, functions = false) {
   return worker.fetch(new Request(`https://test/api/${path}`, { headers: {
-    Authorization: `Bearer ${internal ? "internal" : "app"}`, ...(aware ? { "X-Cairn-Tag-System": "1" } : {})
+    Authorization: `Bearer ${internal ? "internal" : "app"}`, ...(aware ? { "X-Cairn-Tag-System": "1" } : {}),
+    ...(functions ? { "X-Cairn-Content-Functions": "1" } : {})
   } }), settings(DB));
 }
 function instrument(afterRead?: (sql: string) => Promise<void>) {
@@ -75,17 +76,25 @@ it("lightweight summaries preserve canonical ordering, legacy barriers, aliases,
       { field: "resource_kind", term: "component", action: "accept", revision: 4 }]));
   for (const legacy of [null, {}, { topics: [] }, { topics: ["llm", "design"] }, { form: "method" }]) {
     for (const noDecision of [false, true]) ids.push(await seed({ ...EMPTY_AUTOMATIC,
-      topics: ["ai_coding", "image_creation", "video_creation", "ui_design"], resource_kinds: ["skill"] },
+      topics: ["ai_coding", "image_creation", "video_creation", "ui_design"], resource_kinds: ["skill"], content_functions: ["tool", "method"] },
     [{ field: "topic", term: "llm", action: "reset", revision: 4 },
-      { field: "resource_kind", term: "prompt", action: "accept", revision: 5 }], legacy, noDecision));
+      { field: "resource_kind", term: "prompt", action: "accept", revision: 5 },
+      { field: "content_function", term: "method", action: "reject", revision: 6 },
+      { field: "content_functions", term: "data", action: "accept", revision: 7 }], legacy, noDecision));
   }
+  ids.push(await seed({ ...EMPTY_AUTOMATIC, content_functions: ["tool", "method"] }, [
+    { field: "content_function", term: "", action: "set_empty", revision: 1 },
+    { field: "content_functions", term: "tool", action: "reset", revision: 2 },
+    { field: "content_functions", term: "case", action: "accept", revision: 3 }
+  ]));
   await env.DB.prepare("UPDATE links SET content_revision=2").run();
   const canonical = await readSelectionSnapshots(settings(), ids);
   const counted = instrument();
   const light = await readTagSummaries(settings(counted.DB), ids);
   expect(counted.reads).toHaveLength(1);
   for (const id of ids) expect(light.summaries.get(id)).toEqual({ topics: canonical.snapshots.get(id)!.view.topics,
-    resource_kinds: canonical.snapshots.get(id)!.view.resource_kinds ?? [], custom_tags: [] });
+    resource_kinds: canonical.snapshots.get(id)!.view.resource_kinds ?? [],
+    content_functions: canonical.snapshots.get(id)!.view.content_functions, custom_tags: [] });
   expect((await readTagSummaries(settings(counted.DB), [])).summaries.size).toBe(0);
   expect(counted.reads).toHaveLength(1);
 });
@@ -106,7 +115,8 @@ async function scaleFixture() {
   await env.DB.prepare(`INSERT INTO classification_decisions(link_id,run_id,content_revision,policy_version,policy,automatic,operation_key,created_at)
     SELECT id,id,1,'p','{}',json_object('topics',json(CASE WHEN id%3=0 THEN '["ai_coding","image_creation"]' ELSE '["ai_coding"]' END),
       'resource_kinds',json(CASE WHEN id%4=0 THEN '["skill","prompt"]' ELSE '["software"]' END),
-      'content_functions',json('[]'),'carriers',json('[]'),'affordances',json('[]'),'form','','use','','entities',json('[]'),
+      'content_functions',json(CASE WHEN id%7=0 THEN '["method","tool"]' ELSE '["opinion"]' END),
+      'carriers',json('[]'),'affordances',json('[]'),'form','','use','','entities',json('[]'),
       'assessment',json(?)),'decision-'||id,? FROM links`).bind(JSON.stringify(assessment), date).run();
   await env.DB.prepare(`INSERT INTO curation_overrides(link_id,field,term,action,revision,source,confirmed,operation_key,created_at)
     SELECT id,'topic','ai_coding','reject',1,'human',1,'reject-'||id,? FROM links WHERE id%5=0`).bind(date).run();
@@ -114,6 +124,8 @@ async function scaleFixture() {
     SELECT id,'resource_kind','','set_empty',2,'human',1,'clear-'||id,? FROM links WHERE id%8=0`).bind(date).run();
   await env.DB.prepare(`INSERT INTO curation_overrides(link_id,field,term,action,revision,source,confirmed,operation_key,created_at)
     SELECT id,'resource_kind','skill','reset',3,'human',1,'readmit-'||id,? FROM links WHERE id%8=0`).bind(date).run();
+  await env.DB.prepare(`INSERT INTO curation_overrides(link_id,field,term,action,revision,source,confirmed,operation_key,created_at)
+    SELECT id,'content_function','opinion','reject',4,'human',1,'reject-function-'||id,? FROM links WHERE id%11=0`).bind(date).run();
   await env.DB.prepare(`INSERT INTO legacy_curation_history(link_id,payload,revision,provenance,created_at)
     SELECT id,'{"topics":["llm"]}',4,'legacy_unknown',? FROM links WHERE id%9=0`).bind(date).run();
   for (const [id, owner, status] of [["shared-a", "default", "active"], ["shared-b", "default", "deprecated"], ["private-c", "other", "active"]]) {
@@ -141,6 +153,7 @@ it("counts all 500 matches in one query and retains ANY/ALL/custom/source/search
   const { ids, snapshots } = await scaleFixture();
   const queries = ["", "topics=ai_coding,image_creation&topics_mode=any", "topics=ai_coding,image_creation&topics_mode=all",
     "resource_kind=skill,prompt&resource_mode=all", "custom_tag=shared-a,shared-b&custom_mode=all",
+    "content_functions=method,tool", "content_functions=opinion&topics=ai_coding",
     "topics=llm&custom_tags=shared-a,shared-b&custom_mode=any", "source=wechat&curation_status=kept&q=commonNeedle",
     "source=x&since=2026-09-20T00:00:00Z&learned=1", "topics=finance_resources", "custom_tags=absent"];
   for (const query of queries) {
@@ -153,6 +166,7 @@ it("counts all 500 matches in one query and retains ANY/ALL/custom/source/search
         const requested = params.get(param)!.split(",");
         if (params.get(mode) === "all" ? !requested.every(value => values.includes(value)) : !requested.some(value => values.includes(value))) return false;
       }
+      if (params.has("content_functions") && !params.get("content_functions")!.split(",").some(term => view.content_functions.includes(term))) return false;
       if (params.get("source") === "wechat" && id%4!==0) return false;
       if (params.get("source") === "x" && id%4!==1 && id%4!==3) return false;
       if (params.get("curation_status") === "kept" && id%2!==0) return false;
@@ -160,18 +174,19 @@ it("counts all 500 matches in one query and retains ANY/ALL/custom/source/search
       if (params.get("learned") === "1" && id%3!==0) return false;
       return true;
     });
-    const expected = { topics: new Map<string, number>(), resource_kinds: new Map<string, number>(), custom_tags: new Map<string, number>() };
+    const expected = { topics: new Map<string, number>(), resource_kinds: new Map<string, number>(),
+      content_functions: new Map<string, number>(), custom_tags: new Map<string, number>() };
     for (const id of matching) {
       const view = snapshots.get(id)!.view;
-      for (const field of ["topics", "resource_kinds"] as const) for (const term of view[field] ?? []) expected[field].set(term, (expected[field].get(term) ?? 0)+1);
+      for (const field of ["topics", "resource_kinds", "content_functions"] as const) for (const term of view[field] ?? []) expected[field].set(term, (expected[field].get(term) ?? 0)+1);
       for (const tag of [...(id%2===0 ? ["shared-a"] : []), ...(id%3===0 ? ["shared-b"] : [])]) expected.custom_tags.set(tag, (expected.custom_tags.get(tag) ?? 0)+1);
     }
     const counted = instrument();
-    const response = await call(`tag-counts?${query}`, counted.DB);
+    const response = await call(`tag-counts?${query}`, counted.DB, false, true, true);
     expect(response.status, query).toBe(200);
     const body = await response.json() as any;
     expect(body.total, query).toBe(matching.length);
-    for (const field of ["topics", "resource_kinds", "custom_tags"] as const) expect(new Map(body[field].map((entry: any) => [entry.id, entry.count])), query).toEqual(expected[field]);
+    for (const field of ["topics", "resource_kinds", "content_functions", "custom_tags"] as const) expect(new Map(body[field].map((entry: any) => [entry.id, entry.count])), query).toEqual(expected[field]);
     expect(counted.businessReads, query).toHaveLength(1);
     // The existing isolate policy may add one cold-start read; it must not
     // conceal extra business queries or per-bookmark reads.
@@ -197,9 +212,9 @@ it("counts all 500 matches in one query and retains ANY/ALL/custom/source/search
 
 it("negotiated lists use one tag read and old strict lists retain their shape and query budget", async () => {
   await scaleFixture();
-  for (const aware of [false, true]) {
+  for (const [aware, functions] of [[false, false], [true, false], [true, true]]) {
     const counted = instrument();
-    const response = await call("enrichment/jobs?limit=100&view=summary&counts=0", counted.DB, true, aware);
+    const response = await call("enrichment/jobs?limit=100&view=summary&counts=0", counted.DB, true, aware, functions);
     expect(response.status).toBe(200);
     const body = await response.json() as any;
     expect(body.items).toHaveLength(100);
@@ -211,6 +226,8 @@ it("negotiated lists use one tag read and old strict lists retain their shape an
       expect(body.items[0].classification.topics).toEqual([]); // human rejects automatic AI coding
       expect(body.items[0].custom_tags.map((tag: any) => tag.id)).toEqual(["shared-a"]);
     } else expect(body.items[0]).not.toHaveProperty("custom_tags");
+    if (functions) expect(body.items[0].classification.content_functions).toEqual(["opinion"]);
+    else expect(body.items[0].classification?.content_functions).toBeUndefined();
   }
   const counted = instrument();
   const page = await call("enrichment/jobs?limit=40&topics=llm&resource_kind=skill&custom_tag=shared-a", counted.DB, true);
@@ -226,7 +243,7 @@ it("negotiated lists use one tag read and old strict lists retain their shape an
 }, 30_000);
 
 it("system and custom membership stay in one read snapshot across a concurrent update", async () => {
-  const id = await seed({ ...EMPTY_AUTOMATIC, topics: ["ai_coding"], resource_kinds: ["skill"] }, []);
+  const id = await seed({ ...EMPTY_AUTOMATIC, topics: ["ai_coding"], resource_kinds: ["skill"], content_functions: ["method"] }, []);
   await env.DB.prepare(`INSERT INTO custom_tags(id,label,normalized_label,created_at,updated_at) VALUES('later','later','later',?,?)`).bind(date, date).run();
   let mutated = false;
   const observed = instrument(async sql => {
@@ -234,14 +251,14 @@ it("system and custom membership stay in one read snapshot across a concurrent u
     mutated = true;
     await env.DB.prepare(`INSERT INTO classification_decisions(link_id,run_id,content_revision,policy_version,policy,automatic,operation_key,created_at)
       VALUES(?,?,1,'p','{}',?,'later-decision',?)`)
-      .bind(id, id, JSON.stringify({ ...EMPTY_AUTOMATIC, topics: ["image_creation"], resource_kinds: ["prompt"] }), date).run();
+      .bind(id, id, JSON.stringify({ ...EMPTY_AUTOMATIC, topics: ["image_creation"], resource_kinds: ["prompt"], content_functions: ["case"] }), date).run();
     await env.DB.prepare("INSERT INTO custom_tag_links(link_id,tag_id,created_at) VALUES(?,'later',?)").bind(id, date).run();
   });
-  const first = (await attachTagSummaries(settings(observed.DB), [{ id, classification: {} }], true))[0] as any;
-  expect(first.classification).toMatchObject({ topics: ["ai_coding"], resource_kinds: ["skill"] });
+  const first = (await attachTagSummaries(settings(observed.DB), [{ id, classification: {} }], true, true))[0] as any;
+  expect(first.classification).toMatchObject({ topics: ["ai_coding"], resource_kinds: ["skill"], content_functions: ["method"] });
   expect(first.custom_tags).toEqual([]);
   expect(observed.reads).toHaveLength(1);
-  const next = (await attachTagSummaries(settings(), [{ id, classification: {} }], true))[0] as any;
-  expect(next.classification).toMatchObject({ topics: ["image_creation"], resource_kinds: ["prompt"] });
+  const next = (await attachTagSummaries(settings(), [{ id, classification: {} }], true, true))[0] as any;
+  expect(next.classification).toMatchObject({ topics: ["image_creation"], resource_kinds: ["prompt"], content_functions: ["case"] });
   expect(next.custom_tags.map((tag: any) => tag.id)).toEqual(["later"]);
 });

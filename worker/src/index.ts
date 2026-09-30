@@ -1,6 +1,6 @@
 import { cleanupDeletedImages, maintainPrivacy } from "./privacy";
 import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
-import { tagSystemRoute, attachTagSummaries } from "./tag-system";
+import { tagSystemRoute, attachTagSummaries, contentFunctionsAware } from "./tag-system";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
@@ -152,8 +152,8 @@ type ErrorCode =
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System",
-  "Access-Control-Expose-Headers": "X-Cairn-Tag-System",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions",
+  "Access-Control-Expose-Headers": "X-Cairn-Tag-System, X-Cairn-Content-Functions",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -300,6 +300,7 @@ export default {
     let response: Response | null = null;
     try {
       response = withServerTiming(await handleRequest(request, env, timing), timing);
+      if (contentFunctionsAware(request)) response.headers.set("X-Cairn-Content-Functions", "1");
       if (request.headers.get("X-Cairn-Tag-System") === "1") response.headers.set("X-Cairn-Tag-System", "1");
       else if (![204, 304].includes(response.status) && response.headers.get("Content-Type")?.includes("application/json")) {
         // Strict old clients must never see new optional dimensions.
@@ -357,12 +358,16 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   const url = new URL(request.url);
   const path = trimTrailingSlash(url.pathname);
+  const functionsFlag = request.headers.get("X-Cairn-Content-Functions");
+  if (functionsFlag !== null && (functionsFlag !== "1" || !contentFunctionsAware(request))) return error("capability_mismatch", 409);
   // This is an internal cache discriminator for the two negotiated bookmark
   // read shapes. Aggregate routes reject queries and do not need it. A caller
   // cannot select the negotiated cache by supplying this query parameter.
   if (path === "/api/links" || /^\/api\/links\/\d+$/.test(path)) {
     url.searchParams.delete("tag_system");
+    url.searchParams.delete("content_functions_view");
     if (request.headers.get("X-Cairn-Tag-System") === "1") url.searchParams.set("tag_system", "1");
+    if (contentFunctionsAware(request)) url.searchParams.set("content_functions_view", "1");
   }
   const newTagFilter = ["resource_kinds", "resource_kind", "custom_tags", "custom_tag", "topics_mode", "topic_mode", "resource_mode", "custom_mode"].some(key => url.searchParams.has(key));
   if (newTagFilter && request.headers.get("X-Cairn-Tag-System") !== "1") return error("capability_mismatch", 409);
@@ -539,7 +544,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => listEnrichmentJobs(url, env, timing,
-      request.headers.get("X-Cairn-Tag-System") === "1"));
+      request.headers.get("X-Cairn-Tag-System") === "1", contentFunctionsAware(request)));
   }
 
   if (path === "/api/enrichment/overview") {
@@ -604,7 +609,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () =>
       getEnrichmentJob(env, Number(enrichmentJobDetailMatch[1]), timing,
-        url.searchParams.get("include_cache_identity") === "1", request.headers.get("X-Cairn-Tag-System") === "1")
+        url.searchParams.get("include_cache_identity") === "1", request.headers.get("X-Cairn-Tag-System") === "1", contentFunctionsAware(request))
     );
   }
 
@@ -722,7 +727,8 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
     const items = rows.slice(0, limit);
     const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
     const mapped = items.map((row) => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row));
-    return { items: request.headers.get("X-Cairn-Tag-System") === "1" ? await attachTagSummaries(env, mapped as unknown as Record<string, unknown>[]) : mapped, next_before_id: next,
+    return { items: request.headers.get("X-Cairn-Tag-System") === "1" ? await attachTagSummaries(env,
+      mapped as unknown as Record<string, unknown>[], false, contentFunctionsAware(request)) : mapped, next_before_id: next,
       ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {}) };
   });
 }
@@ -741,7 +747,8 @@ async function getLink(request: Request, url: URL, id: number, env: Env, timing:
       return null;
     }
     const mapped = includeEnrichment(url) ? mapAppLink(row, true, includeCacheIdentity(url)) : mapLink(row);
-    return request.headers.get("X-Cairn-Tag-System") === "1" ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped;
+    return request.headers.get("X-Cairn-Tag-System") === "1" ? (await attachTagSummaries(env,
+      [mapped as unknown as Record<string, unknown>], false, contentFunctionsAware(request)))[0] : mapped;
   });
 }
 
@@ -856,11 +863,11 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     if (!current) return error("not_found", 404);
     const mapped = mapAppLink(current, true, true);
     return json(request.headers.get("X-Cairn-Tag-System") === "1"
-      ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped);
+      ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>], false, contentFunctionsAware(request)))[0] : mapped);
   }
   const mapped = enriched ? mapAppLink(row, true) : mapLink(row);
   return json(request.headers.get("X-Cairn-Tag-System") === "1"
-    ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped);
+    ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>], false, contentFunctionsAware(request)))[0] : mapped);
 }
 
 async function deleteLink(env: Env, id: number, timing: TimingCollector): Promise<Response> {
@@ -931,7 +938,7 @@ export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; 
   return { clauses, bindings };
 }
 
-async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, tagAware = false): Promise<Response> {
+async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, tagAware = false, includeContentFunctions = false): Promise<Response> {
   const countsOption = url.searchParams.getAll("counts");
   if (countsOption.length > 1 || (countsOption.length === 1 && !["0", "1"].includes(countsOption[0]))) {
     return error("invalid_query");
@@ -1001,7 +1008,7 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, t
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
   const mapped = items.map((row) => ({ ...mapEnrichmentListItem(row, withIdentity), ...(summary ? { content_loaded: false } : {}) }));
   return json({
-    items: tagAware ? await attachTagSummaries(env, mapped, true) : mapped,
+    items: tagAware ? await attachTagSummaries(env, mapped, true, includeContentFunctions) : mapped,
     next_before_id: next,
     ...(includeCounts ? { counts: mapEnrichmentCounts(countRow) } : {}),
     ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {})
@@ -1063,7 +1070,7 @@ async function getEnrichmentOverview(request: Request, url: URL, env: Env, timin
   }, OVERVIEW_CACHE_TTL_SECONDS);
 }
 
-async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, withIdentity = false, tagAware = false): Promise<Response> {
+async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, withIdentity = false, tagAware = false, includeContentFunctions = false): Promise<Response> {
   const row = await timing.measure("db", () =>
     env.DB.prepare(
       `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
@@ -1080,7 +1087,7 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, w
   );
   if (row === null) return error("not_found", 404);
   const mapped = mapEnrichmentListItem(row, withIdentity);
-  return json(tagAware ? (await attachTagSummaries(env, [mapped], true))[0] : mapped);
+  return json(tagAware ? (await attachTagSummaries(env, [mapped], true, includeContentFunctions))[0] : mapped);
 }
 
 async function getEnrichmentJobIdentity(env: Env, id: number, timing: TimingCollector): Promise<Response> {
@@ -1229,9 +1236,9 @@ async function updateCuration(request: Request, env: Env, id: number, timing: Ti
     if (item === null) return error("not_found", 404);
     const mapped = mapAppLink(item, true);
     return json(request.headers.get("X-Cairn-Tag-System") === "1"
-      ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped);
+      ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>], false, contentFunctionsAware(request)))[0] : mapped);
   }
-  return getEnrichmentJob(env, id, timing);
+  return getEnrichmentJob(env, id, timing, false, request.headers.get("X-Cairn-Tag-System") === "1", contentFunctionsAware(request));
 }
 
 async function sourceClaimable(request: Request, env: Env, timing: TimingCollector): Promise<Response> {
@@ -2291,7 +2298,7 @@ function listCacheUrl(
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
   if (parsed.query !== undefined) url.searchParams.set("q", parsed.query);
-  for (const key of ["include", "include_cache_identity", "tag_system", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
+  for (const key of ["include", "include_cache_identity", "tag_system", "content_functions_view", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
     const value = requestUrl.searchParams.get(key);
     if (value) url.searchParams.set(key, value);
   }
@@ -2313,6 +2320,7 @@ function detailCacheUrl(id: number, requestUrl: URL, generation: number): string
   url.searchParams.set("g", String(generation));
   if (includeEnrichment(requestUrl)) url.searchParams.set("include", "enrichment");
   if (requestUrl.searchParams.get("tag_system") === "1") url.searchParams.set("tag_system", "1");
+  if (requestUrl.searchParams.get("content_functions_view") === "1") url.searchParams.set("content_functions_view", "1");
   if (includeCacheIdentity(requestUrl)) url.searchParams.set("include_cache_identity", "1");
   url.searchParams.set("host", requestUrl.host);
   return url.toString();
