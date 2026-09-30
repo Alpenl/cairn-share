@@ -20,7 +20,8 @@ legacy_fields AS (
 ), raw_events AS (
   SELECT revision,1 AS layer,id AS ordinal,
     CASE field WHEN 'topic' THEN 'topics' WHEN 'content_function' THEN 'content_functions'
-      WHEN 'carrier' THEN 'carriers' WHEN 'affordance' THEN 'affordances' ELSE field END AS field,
+      WHEN 'carrier' THEN 'carriers' WHEN 'affordance' THEN 'affordances'
+      WHEN 'resource_kind' THEN 'resource_kinds' ELSE field END AS field,
     term,action FROM curation_overrides WHERE link_id=links.id
   UNION ALL
   SELECT revision,0,0,field,'',CASE WHEN json_type(payload)='null' THEN 'reset' ELSE 'set_empty' END FROM legacy_fields

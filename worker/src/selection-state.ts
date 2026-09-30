@@ -19,6 +19,51 @@ type Row = { id: number; personal_revision: number; content_revision: number; cl
   why: string | null; curation_status: string | null; decision: string | null; overrides: string;
   legacy: string | null; entity: string | null; queue: string | null; evidence: string | null };
 
+export type SummaryCustomTag = { id: string; owner_id: string; label: string; revision: number; status: string };
+type TagSummaryRow = { id: number; automatic: string; overrides: string; legacy: string | null; custom_tags: string };
+
+// Lists need effective membership, not the detailed assessment, evidence,
+// entity observations or run coverage. Fold the same authoritative inputs in
+// one bounded read, keeping custom membership in that read snapshot as well.
+// The JSON id parameter also avoids D1's per-statement bind limit on big pages.
+export async function readTagSummaries(env: Env,
+  selection: number[] | { clauses: string[]; bindings: Array<string | number> }, owner = "default") {
+  const ids = Array.isArray(selection) ? selection : null;
+  if (ids && !ids.length) return { summaries: new Map<number, { topics: string[]; resource_kinds: string[]; custom_tags: SummaryCustomTag[] }>() };
+  const filters = Array.isArray(selection) ? null : selection;
+  const where = ids ? "links.id IN (SELECT value FROM json_each(?))" : filters!.clauses.join(" AND ") || "1";
+  const bindings = ids ? [JSON.stringify(ids)] : filters!.bindings;
+  const rows = await env.DB.prepare(`SELECT links.id,
+    COALESCE((SELECT json_object('topics',json_extract(CASE WHEN json_valid(d.automatic) THEN d.automatic ELSE '{}' END,'$.topics'),
+      'resource_kinds',json_extract(CASE WHEN json_valid(d.automatic) THEN d.automatic ELSE '{}' END,'$.resource_kinds')) FROM classification_decisions d
+      WHERE d.link_id=links.id ORDER BY d.id DESC LIMIT 1),
+      json_object('topics',json_extract(CASE WHEN json_valid(links.classification) THEN links.classification ELSE '{}' END,'$.topics'))) AS automatic,
+    (SELECT json_group_array(json_object('field',o.field,'term',o.term,'action',o.action,
+      'source',o.source,'confirmed',o.confirmed,'revision',o.revision)) FROM
+      (SELECT field,term,action,source,confirmed,revision FROM curation_overrides
+        WHERE link_id=links.id AND field IN ('topics','topic','resource_kinds','resource_kind') ORDER BY revision,id) o) AS overrides,
+    (SELECT json_object('id',h.id,'payload',h.payload,'revision',h.revision,'provenance',h.provenance)
+      FROM legacy_curation_history h WHERE h.link_id=links.id ORDER BY h.id DESC LIMIT 1) AS legacy,
+    (SELECT json_group_array(json_object('id',t.id,'owner_id',t.owner_id,'label',t.label,'revision',t.revision,'status',t.status))
+      FROM (SELECT t.id,t.owner_id,t.label,t.revision,t.status FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id
+        WHERE a.link_id=links.id AND t.owner_id=? ORDER BY t.label,t.id) t) AS custom_tags
+    FROM links WHERE ${where} ORDER BY links.id DESC`).bind(owner, ...bindings).all<TagSummaryRow>();
+  const summaries = new Map(rows.results.map(row => {
+    const generated = parse<Record<string, unknown>>(row.automatic, {});
+    const automatic = { ...EMPTY_AUTOMATIC, topics: strings(generated.topics), resource_kinds: strings(generated.resource_kinds) };
+    const overrides = parse<Array<Omit<Override, "confirmed"> & { confirmed: number }>>(row.overrides, [])
+      .flatMap((entry): Override[] => {
+        const field = normalizeField(entry.field);
+        return field ? [{ ...entry, field, confirmed: entry.confirmed === 1 }] : [];
+      });
+    const legacy = legacyOverrides(parse<Legacy | null>(row.legacy, null)).filter(entry => entry.field === "topics");
+    const view = effectiveView(automatic, [...legacy, ...overrides]);
+    return [row.id, { topics: view.topics, resource_kinds: view.resource_kinds ?? [],
+      custom_tags: parse<SummaryCustomTag[]>(row.custom_tags, []) }] as const;
+  }));
+  return { summaries, meta: rows.meta };
+}
+
 // The reading endpoint extends the same statement that folds the effective
 // selection. Keep these columns explicit: links also holds private source and
 // lease material which a detail read must not fetch or expose.

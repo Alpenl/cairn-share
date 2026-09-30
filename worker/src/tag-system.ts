@@ -1,10 +1,9 @@
 import { bookmarkFilters, type Env } from "./index";
 import { canonicalJSON, compactOverrides, effectiveView, normalizeField, type Override, type OverrideField, type OverrideAction } from "./domain";
 import { projectionInputGuard, projectionWrites, rebuildProjection } from "./domain-routes";
-import { readSelectionSnapshot, readSelectionSnapshots } from "./selection-state";
+import { readSelectionSnapshot, readSelectionSnapshots, readTagSummaries } from "./selection-state";
 import { selectionPayload } from "./taxonomy-routes";
 import { findTerm, taxonomyV2, normalizeTerm } from "./taxonomy-v2";
-import { selectionFilters } from "./selection-filter";
 
 const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, no-store", "X-Cairn-Tag-System": "1" };
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers });
@@ -46,27 +45,24 @@ async function customOf(env: Env, id: number) {
 export async function attachTagSummaries(env: Env, items: Array<Record<string, unknown>>, internal = false) {
   if (!items.length) return items;
   const ids = items.map(item => Number(item.id));
-  const snapshots = await readSelectionSnapshots(env, ids);
-  const customs = await env.DB.prepare(`SELECT a.link_id,t.id,t.owner_id,t.label,t.revision,t.status
-    FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id WHERE t.owner_id=? AND a.link_id IN(SELECT value FROM json_each(?))`)
-    .bind(owner, JSON.stringify(ids)).all<Custom & { link_id: number }>();
+  const { summaries } = await readTagSummaries(env, ids, owner);
   return items.map(item => {
-    const snapshot = snapshots.snapshots.get(Number(item.id));
-    if (!snapshot) return item;
+    const summary = summaries.get(Number(item.id));
+    if (!summary) return item;
     const enrichment = object(item.enrichment) ? { ...item.enrichment } : null;
     const classification = (value: unknown) => {
       // Keep an unclassified internal item null when it has no system labels;
       // optional custom labels never fabricate a completed classification.
-      if (internal && value === null && !snapshot.view.topics.length && !(snapshot.view.resource_kinds ?? []).length) return null;
+      if (internal && value === null && !summary.topics.length && !summary.resource_kinds.length) return null;
       const prior = object(value) ? value : {
         why_suggestion: "", entities: [], uncertainty: false, taxonomy_version: taxonomyV2().version, discarded_tags: [], form: "", use: ""
       };
-      return { ...prior, topics: snapshot.view.topics, resource_kinds: snapshot.view.resource_kinds ?? [] };
+      return { ...prior, topics: summary.topics, resource_kinds: summary.resource_kinds };
     };
     if (enrichment) enrichment.classification = classification(enrichment.classification);
     return { ...item, ...(enrichment ? { enrichment } : {}),
       ...(internal ? { classification: classification(item.classification) } : {}),
-      custom_tags: customs.results.filter(t => t.link_id === item.id).map(tagged) };
+      custom_tags: summary.custom_tags.map(tagged) };
   });
 }
 async function manualOrigins(env: Env, id: number, revision: number) {
@@ -359,33 +355,47 @@ async function queryTags(request: Request, env: Env, mode: "counts" | "export") 
     filters.clauses.push("learned=?"); filters.bindings.push(["1", "true"].includes(learned) ? 1 : 0);
   }
   const where = filters.clauses.length ? `WHERE ${filters.clauses.join(" AND ")}` : "";
+  if (mode === "counts") {
+    // Count the complete matched collection from one lightweight, authoritative
+    // read snapshot. Detailed source/assessment state belongs to export and
+    // individual tag reads; no page limit or mutable projection enters counts.
+    const { summaries } = await readTagSummaries(env, filters, owner);
+    const counts = { topics: new Map<string, number>(), resource_kinds: new Map<string, number>(), custom_tags: new Map<string, number>() };
+    for (const summary of summaries.values()) {
+      for (const field of ["topics", "resource_kinds"] as const) for (const id of summary[field]) {
+        counts[field].set(id, (counts[field].get(id) ?? 0) + 1);
+      }
+      for (const tag of summary.custom_tags) counts.custom_tags.set(tag.id, (counts.custom_tags.get(tag.id) ?? 0) + 1);
+    }
+    return reply({ total: summaries.size, ...Object.fromEntries(Object.entries(counts).map(([field, terms]) =>
+      [field, Array.from(terms, ([id, count]) => ({ id, count }))])) });
+  }
   const rows = await env.DB.prepare(`SELECT id,url,note FROM links ${where} ORDER BY id DESC`).bind(...filters.bindings).all<{ id: number; url: string; note: string }>();
-  // Current personal library is small. Bound each set read, while counts include
-  // the entire query and never use the UI page size or stale projections.
+  // Export includes origin metadata, so retain full canonical state in bounded
+  // reads. Its matched set is never limited by the UI cursor or page size.
   const all = new Map<number, NonNullable<Awaited<ReturnType<typeof readSelectionSnapshot>>>>();
   for (let start = 0; start < rows.results.length; start += 100) {
     const batch = await readSelectionSnapshots(env, rows.results.slice(start, start + 100).map(r => r.id));
     for (const [id, snapshot] of batch.snapshots) all.set(id, snapshot);
   }
   const customs = (await env.DB.prepare(`SELECT a.link_id,t.id,t.owner_id,t.label,t.revision,t.status
-    FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id WHERE t.owner_id=?`).bind(owner).all<Custom & { link_id: number }>()).results;
+    FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id WHERE t.owner_id=? AND a.link_id IN (SELECT value FROM json_each(?))`)
+    .bind(owner, JSON.stringify(rows.results.map(row => row.id))).all<Custom & { link_id: number }>()).results;
+  const customByLink = new Map<number, Custom[]>();
+  for (const tag of customs) {
+    const group = customByLink.get(tag.link_id) ?? [];
+    group.push(tag); customByLink.set(tag.link_id, group);
+  }
   const links = rows.results.map(row => {
     const snapshot = all.get(row.id)!;
     const fields = snapshot.state.fields;
     return { ...row, topics: snapshot.view.topics, resource_kinds: snapshot.view.resource_kinds ?? [],
-      custom_tags: customs.filter(t => t.link_id === row.id).map(tagged),
+      custom_tags: (customByLink.get(row.id) ?? []).map(tagged),
       tags: ["topics", "resource_kinds"].flatMap(dimension => (snapshot.view[dimension as "topics" | "resource_kinds"] ?? []).map(id => ({
         tag_ref: `system/${dimension}/${id}`, dimension, id, label: findTerm(dimension, id)?.label ?? id,
         ...fields[dimension].values.find(v => v.term === id) }))) };
   });
-  if (mode === "export") return reply({ taxonomy_version: taxonomyV2().version, links, total: links.length });
-  const counts = (dimension: "topics" | "resource_kinds") => Object.entries(links.reduce<Record<string, number>>((out, link) => {
-    for (const id of link[dimension]) out[id] = (out[id] ?? 0) + 1; return out;
-  }, {})).map(([id, count]) => ({ id, count }));
-  const customCounts = new Map<string, number>();
-  for (const link of links) for (const tag of link.custom_tags) customCounts.set(tag.id, (customCounts.get(tag.id) ?? 0) + 1);
-  return reply({ total: links.length, topics: counts("topics"), resource_kinds: counts("resource_kinds"),
-    custom_tags: Array.from(customCounts, ([id, count]) => ({ id, count })) });
+  return reply({ taxonomy_version: taxonomyV2().version, links, total: links.length });
 }
 
 export async function tagSystemRoute(request: Request, env: Env, path: string): Promise<Response | null> {
