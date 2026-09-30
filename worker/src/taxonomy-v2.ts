@@ -98,11 +98,16 @@ export function taxonomyV2(): Taxonomy {
 
 export function legacyTaxonomyV2(): Taxonomy { return legacyV2; }
 
+// Historical completion validation uses the catalog its immutable run recorded.
+export function classificationTaxonomy(version: string): Taxonomy | null {
+  return [v2, previousTagV2, legacyV2].find(catalog => catalog.version === version) ?? null;
+}
+
 const term = (id: string, label: string, description: string, excludes: string[]): TermDefinition =>
   ({ id, label, description, excludes, includes: [], aliases: [], active: true,
     definition_version: 1, display_revision: 1, status: "active" });
 
-const v2: Taxonomy = {
+const previousTagV2: Taxonomy = {
   ...legacyV2, version: "2026-09-30.1", definition_version: 3,
   topics: [
     term("ai_coding", "AI编程", "AI 辅助开发、代码审查、调试、重构和专门的编程环境。", ["仅用 Codex 做图、写作或运行其他任务"]),
@@ -127,6 +132,16 @@ const v2: Taxonomy = {
     term("component", "代码组件", "可复用 UI、动画或交互代码组件和组件库。", ["普通设计图片、设计规范、视频动画"]),
     term("model", "模型资源", "模型权重、明确的训练实现、适配器或可运行模型项目。", ["仅介绍云端模型能力、仅引用模型名"]),
     term("reference", "参考资料", "明确可复用的规范、指南、模板、素材库或资源导航。", ["仅因为是一篇文章、泛泛认为值得参考"])
+  ]
+};
+
+const v2: Taxonomy = {
+  ...previousTagV2, version: "2026-09-30.2", definition_version: 4,
+  topics: [
+    ...previousTagV2.topics,
+    { ...term("clothing_style", "服饰与穿搭", "服饰品牌、款式、面料和穿搭选择的具体介绍、体验或评价。",
+      ["只有价格或泛泛购物感想", "AI 生成服饰图片但不讨论服饰本身", "仅偶然提到穿着"]),
+      includes: ["服饰品牌和款式评价", "面料体验", "穿搭选择"] }
   ]
 };
 

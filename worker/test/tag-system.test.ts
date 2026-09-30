@@ -5,6 +5,7 @@ import { pruneLiveHistory } from "../src/history-retention";
 import { compactOverrides, effectiveView, EMPTY_AUTOMATIC, type Override } from "../src/domain";
 import vectors from "./fixtures/override-vectors.json";
 import goCompletion from "./fixtures/tag-system-go-completion.json";
+import { classificationTaxonomy, validateTaxonomy } from "../src/taxonomy-v2";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 const fixtureEnv = () => ({ DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
@@ -31,14 +32,20 @@ async function act(id: number, actions: unknown[], key = crypto.randomUUID()) {
     expected_decision_id: state.decision_id, expected_content_revision: state.content_revision, actions });
 }
 
-it("publishes 12 independent topics and 6 resources only to negotiated readers", async () => {
+it("publishes 13 independent topics and 6 resources while preserving historical catalog identities", async () => {
   const old = await (await call("v2-taxonomy", undefined, "GET", false)).json() as any;
   expect(old.version).toBe("2026-09-20.1"); expect(old).not.toHaveProperty("resource_kinds");
   const current = await (await call("v2-taxonomy")).json() as any;
-  expect(current.version).toBe("2026-09-30.1");
-  expect(current.topics.filter((t: any) => t.active && !t.deprecated)).toHaveLength(12);
+  expect(current.version).toBe("2026-09-30.2");
+  expect(current.topics.filter((t: any) => t.active && !t.deprecated)).toHaveLength(13);
   expect(current.resource_kinds).toHaveLength(6);
   expect(current.topics.find((t: any) => t.id === "llm").deprecated).toBe(true);
+  expect(validateTaxonomy()).toEqual([]);
+  const previous = classificationTaxonomy("2026-09-30.1")!;
+  expect(previous.topics.filter(t => t.active && !t.deprecated)).toHaveLength(12);
+  expect(previous.topics.some(t => t.id === "clothing_style")).toBe(false);
+  expect(previous.resource_kinds).toEqual(current.resource_kinds);
+  expect(classificationTaxonomy("unknown")).toBeNull();
 });
 
 it("rejects one automatic label without pinning its neighbours or future new labels", async () => {

@@ -42,7 +42,10 @@ async function customOf(env: Env, id: number) {
     JOIN custom_tag_links a ON a.tag_id=t.id WHERE a.link_id=? AND t.owner_id=? ORDER BY t.label,t.id`).bind(id, owner).all<Custom>();
   return rows.results.map(tagged);
 }
-export async function attachTagSummaries(env: Env, items: Array<Record<string, unknown>>, internal = false) {
+export function contentFunctionsAware(request: Request): boolean {
+  return request.headers.get("X-Cairn-Tag-System") === "1" && request.headers.get("X-Cairn-Content-Functions") === "1";
+}
+export async function attachTagSummaries(env: Env, items: Array<Record<string, unknown>>, internal = false, includeContentFunctions = false) {
   if (!items.length) return items;
   const ids = items.map(item => Number(item.id));
   const { summaries } = await readTagSummaries(env, ids, owner);
@@ -53,11 +56,13 @@ export async function attachTagSummaries(env: Env, items: Array<Record<string, u
     const classification = (value: unknown) => {
       // Keep an unclassified internal item null when it has no system labels;
       // optional custom labels never fabricate a completed classification.
-      if (internal && value === null && !summary.topics.length && !summary.resource_kinds.length) return null;
+      if (internal && value === null && !summary.topics.length && !summary.resource_kinds.length &&
+        !(includeContentFunctions && summary.content_functions.length)) return null;
       const prior = object(value) ? value : {
         why_suggestion: "", entities: [], uncertainty: false, taxonomy_version: taxonomyV2().version, discarded_tags: [], form: "", use: ""
       };
-      return { ...prior, topics: summary.topics, resource_kinds: summary.resource_kinds };
+      return { ...prior, topics: summary.topics, resource_kinds: summary.resource_kinds,
+        ...(includeContentFunctions ? { content_functions: summary.content_functions } : {}) };
     };
     if (enrichment) enrichment.classification = classification(enrichment.classification);
     return { ...item, ...(enrichment ? { enrichment } : {}),
@@ -349,6 +354,8 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
 async function queryTags(request: Request, env: Env, mode: "counts" | "export") {
   const url = new URL(request.url), query = url.searchParams.get("q")?.trim(), filters = bookmarkFilters(url, query);
   if (filters instanceof Response) return filters;
+  const includeContentFunctions = contentFunctionsAware(request);
+  const visibleFields = includeContentFunctions ? ["topics", "resource_kinds", "content_functions"] as const : ["topics", "resource_kinds"] as const;
   const learned = url.searchParams.get("learned");
   if (learned && learned !== "all") {
     if (!["1", "0", "true", "false"].includes(learned)) return fail("invalid_filter");
@@ -360,14 +367,16 @@ async function queryTags(request: Request, env: Env, mode: "counts" | "export") 
     // read snapshot. Detailed source/assessment state belongs to export and
     // individual tag reads; no page limit or mutable projection enters counts.
     const { summaries } = await readTagSummaries(env, filters, owner);
-    const counts = { topics: new Map<string, number>(), resource_kinds: new Map<string, number>(), custom_tags: new Map<string, number>() };
+    const counts = { topics: new Map<string, number>(), resource_kinds: new Map<string, number>(),
+      content_functions: new Map<string, number>(), custom_tags: new Map<string, number>() };
     for (const summary of summaries.values()) {
-      for (const field of ["topics", "resource_kinds"] as const) for (const id of summary[field]) {
+      for (const field of visibleFields) for (const id of summary[field]) {
         counts[field].set(id, (counts[field].get(id) ?? 0) + 1);
       }
       for (const tag of summary.custom_tags) counts.custom_tags.set(tag.id, (counts.custom_tags.get(tag.id) ?? 0) + 1);
     }
-    return reply({ total: summaries.size, ...Object.fromEntries(Object.entries(counts).map(([field, terms]) =>
+    return reply({ total: summaries.size, ...Object.fromEntries(Object.entries(counts)
+      .filter(([field]) => includeContentFunctions || field !== "content_functions").map(([field, terms]) =>
       [field, Array.from(terms, ([id, count]) => ({ id, count }))])) });
   }
   const rows = await env.DB.prepare(`SELECT id,url,note FROM links ${where} ORDER BY id DESC`).bind(...filters.bindings).all<{ id: number; url: string; note: string }>();
@@ -390,8 +399,9 @@ async function queryTags(request: Request, env: Env, mode: "counts" | "export") 
     const snapshot = all.get(row.id)!;
     const fields = snapshot.state.fields;
     return { ...row, topics: snapshot.view.topics, resource_kinds: snapshot.view.resource_kinds ?? [],
+      ...(includeContentFunctions ? { content_functions: snapshot.view.content_functions } : {}),
       custom_tags: (customByLink.get(row.id) ?? []).map(tagged),
-      tags: ["topics", "resource_kinds"].flatMap(dimension => (snapshot.view[dimension as "topics" | "resource_kinds"] ?? []).map(id => ({
+      tags: visibleFields.flatMap(dimension => (snapshot.view[dimension] ?? []).map(id => ({
         tag_ref: `system/${dimension}/${id}`, dimension, id, label: findTerm(dimension, id)?.label ?? id,
         ...fields[dimension].values.find(v => v.term === id) }))) };
   });
