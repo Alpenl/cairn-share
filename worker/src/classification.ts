@@ -2,7 +2,8 @@ import { CLASSIFICATION_LIMITS, classificationBudgetAvailable, classificationWin
 import { validEnrichmentSource } from "./source-validation";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
-import { personalUse, record, taxonomy, validateClassification } from "./curation";
+import { personalUse, record, taxonomy, validateClassification, type Classification } from "./curation";
+import { legacyTaxonomyV2, taxonomyV2, type TermDefinition } from "./taxonomy-v2";
 import { contentHash, objectivePayload, objectiveUseAllowed, validAssessment,
   type AutomaticView, type EvidenceSnapshot } from "./domain";
 import { completionProjectionPlan, decisionInsertStatement, rebuildProjection, runInsertStatement, type WriteGuard } from "./domain-routes";
@@ -192,7 +193,8 @@ function automaticView(value: unknown): AutomaticView | null {
   const list = (entry: unknown, max: number): string[] | null => {
     if (entry === undefined) return [];
     if (!Array.isArray(entry) || entry.length > max) return null;
-    return entry.every((item) => typeof item === "string" && item.length > 0 && item.length <= 80) ? entry as string[] : null;
+    return entry.every((item) => typeof item === "string" && item.length > 0 && item.length <= 80) &&
+      new Set(entry).size === entry.length ? entry as string[] : null;
   };
   const topics = list(value.topics, 64);
   const contentFunctions = list(value.content_functions, 8);
@@ -210,6 +212,23 @@ function automaticView(value: unknown): AutomaticView | null {
     form: typeof value.form === "string" && value.form.length <= 40 ? value.form : "",
     use: typeof value.use === "string" && value.use.length <= 40 ? value.use : ""
   };
+}
+
+// The legacy fields are a projection of this same automatic decision, never a
+// second model result. Check against the target's vocabulary, including its
+// historical active status, rather than today's display catalog.
+function validAutomaticProjection(classification: Classification, automatic: AutomaticView, version: string): boolean {
+  if (JSON.stringify(classification.topics) !== JSON.stringify(automatic.topics.slice(0, 3)) ||
+    classification.form !== automatic.form || classification.use !== automatic.use) return false;
+  const catalog = version === taxonomyV2().version ? taxonomyV2() :
+    version === legacyTaxonomyV2().version ? legacyTaxonomyV2() : null;
+  if (!catalog) return false;
+  const active = (terms: TermDefinition[] | undefined, ids: string[]) => ids.every(id =>
+    terms?.some(term => term.id === id && term.active && !term.deprecated));
+  return active(catalog.topics, automatic.topics) && active(catalog.resource_kinds, automatic.resource_kinds ?? []) &&
+    active(catalog.content_functions, automatic.content_functions) && active(catalog.carriers, automatic.carriers) &&
+    active(catalog.affordances, automatic.affordances) && active(catalog.forms, automatic.form ? [automatic.form] : []) &&
+    active(catalog.uses, automatic.use ? [automatic.use] : []);
 }
 
 // v2ResultShape reports whether a completion carries the multidimensional
@@ -557,7 +576,16 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     const response = await idempotent(env, key, payloadHash, id, async () => {
       const target = await activeTarget(env);
       if (!target) return { failure: "configuration_error" as const };
-      if (isV2 && classification.taxonomy_version !== target.taxonomy_version) return { failure: "target_changed" as const };
+      if (isV2 && (classification.taxonomy_version !== target.taxonomy_version ||
+        result.spec_id !== target.spec_id || result.spec_hash !== target.spec_hash ||
+        (result.requested_model ?? result.model) !== target.requested_model ||
+        result.policy_version !== target.policy_version)) return { failure: "target_changed" as const };
+      if (target.taxonomy_version === taxonomyV2().version && (!isV2 ||
+        !record(result.raw_judgments) || result.raw_judgments.metadata_version !== 1 ||
+        automatic?.resource_kinds === undefined)) return { failure: "invalid_classification" as const };
+      if (isV2 && automatic && !validAutomaticProjection(classification, automatic, target.taxonomy_version)) {
+        return { failure: "invalid_classification" as const };
+      }
       // Reject completions that no longer match the active target *before*
       // touching storage, so a stale worker cannot overwrite the projection.
       const job = await env.DB.prepare(`SELECT status, target_generation, spec_id, taxonomy_version, revision, input_revision, lease_token, lease_until, content_revision, evidence_hash, evidence_snapshot_id, attempts, component_epoch
@@ -573,7 +601,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       const declaredGeneration = body.target_generation === undefined ? job.target_generation : Number(body.target_generation);
       const declaredSpec = body.spec_id === undefined ? job.spec_id : String(body.spec_id);
       if (declaredGeneration !== job.target_generation || declaredSpec !== job.spec_id ||
-        job.target_generation !== target.generation) {
+        job.target_generation !== target.generation || (isV2 && job.spec_id !== result.spec_id)) {
         return { failure: "target_changed" as const };
       }
       if (body.input_revision !== undefined && Number(body.input_revision) !== job.input_revision) {

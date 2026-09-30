@@ -4,6 +4,7 @@ import worker from "../src/index";
 import { pruneLiveHistory } from "../src/history-retention";
 import { compactOverrides, effectiveView, EMPTY_AUTOMATIC, type Override } from "../src/domain";
 import vectors from "./fixtures/override-vectors.json";
+import goCompletion from "./fixtures/tag-system-go-completion.json";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 const fixtureEnv = () => ({ DB: env.DB, ENRICHMENT_IMAGES: env.ENRICHMENT_IMAGES, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
@@ -154,29 +155,21 @@ it("completes the actual new vocabulary queue and persists independent resources
     body: JSON.stringify(body)
   }), fixtureEnv());
   const { id } = await (await call("links", { url: "https://x.com/synthetic/status/777" })).json() as { id: number };
-  await env.DB.prepare("UPDATE links SET original_text='Reusable portrait Skill for image generation' WHERE id=?").bind(id).run();
+  await env.DB.prepare("UPDATE links SET original_text=? WHERE id=?").bind(goCompletion.input.original_text, id).run();
   expect((await internal(`v2/links/${id}/evidence`, { snapshot: {
-    blocks: [{ id: "primary", role: "primary", text: "Reusable portrait Skill for image generation" }],
+    blocks: [{ id: "primary", role: "primary", text: goCompletion.input.original_text }],
     retrieval: "manual", fetched_at: "2026-09-30T00:00:00Z", truncation: { truncated: false }
   } })).status).toBe(200);
-  expect((await internal("v2/question-specs", { spec_id: "tag-system-test", spec_version: 1, questions: {
-    topic_image_creation: { type: "noul", instructions: "Is this image generation?", criteria: "Substantially discusses creating images." },
-    resource_kind_skill: { type: "noul", instructions: "Is this an installable Skill?", criteria: "Introduces an installable reusable Agent Skill." }
-  } })).status).toBe(200);
-  const spec_hash = await env.DB.prepare("SELECT spec_hash FROM question_specs WHERE spec_id='tag-system-test'").first<string>("spec_hash");
-  const target = { spec_id: "tag-system-test", spec_hash, taxonomy_version: "2026-09-30.1", policy_version: "jev-policy-v3", requested_model: "jev-latest", protocol: "v2" };
+  expect((await internal("v2/question-specs", { ...goCompletion.spec, spec_hash: goCompletion.result.spec_hash })).status).toBe(200);
+  const target = { spec_id: goCompletion.result.spec_id, spec_hash: goCompletion.result.spec_hash,
+    taxonomy_version: "2026-09-30.1", policy_version: "jev-policy-v3", requested_model: "jev-latest", protocol: "v2" };
   expect((await internal("enrichment/classifications/target", target)).status).toBe(200);
   const claim = await internal("enrichment/classifications/claim", { protocol: "v2", spec_ids: [target.spec_id], taxonomy_versions: [target.taxonomy_version],
     policy_versions: [target.policy_version], models: [target.requested_model] });
   expect(claim.status).toBe(200);
   const job = await claim.json() as Record<string, unknown>;
-  const response = await internal(`enrichment/classifications/${id}/complete`, { ...job, operation_key: "new-taxonomy-complete", result: {
-    model: "jev-pinned", requested_model: target.requested_model, policy_version: target.policy_version, spec_id: target.spec_id, spec_hash,
-    answers: { topic_image_creation: { type: "noul", noul: .95 }, resource_kind_skill: { type: "noul", noul: .96 } },
-    classification: { topics: ["image_creation"], form: "tool", use: "", uncertainty: false, taxonomy_version: target.taxonomy_version,
-      why_suggestion: "", entities: [], discarded_tags: [] },
-    automatic: { ...EMPTY_AUTOMATIC, topics: ["image_creation"], resource_kinds: ["skill"], form: "tool" }
-  } });
+  const response = await internal(`enrichment/classifications/${id}/complete`, { ...job,
+    operation_key: "new-taxonomy-complete", result: goCompletion.result });
   expect(response.status, await response.clone().text()).toBe(200);
   const current = await get(id);
   expect(current.selection.topics).toEqual(["image_creation"]);
@@ -186,4 +179,20 @@ it("completes the actual new vocabulary queue and persists independent resources
   expect(await env.DB.prepare("SELECT resource_kinds FROM link_selections_v2 WHERE link_id=?").bind(id).first("resource_kinds")).toBe('["skill"]');
   const page = await (await call("links?include=enrichment&resource_kinds=skill")).json() as any;
   expect(page.items[0].enrichment.classification.resource_kinds).toEqual(["skill"]);
+});
+
+it("returns current system and custom tags after bookmark and curation edits", async () => {
+  const id = await seed();
+  const { tag } = await (await call("custom-tags", { label: "回写验证", operation_key: "write-return-custom" })).json() as any;
+  expect((await act(id, [{ action: "attach", tag_ref: tag.tag_ref }])).status).toBe(200);
+  for (const [path, body] of [
+    [`links/${id}?include=enrichment`, { learned: true }],
+    [`links/${id}?include=enrichment&include_cache_identity=1`, { note: "保留标签" }],
+    [`links/${id}/curation`, { why: "编辑收藏理由" }]
+  ] as const) {
+    const response = await call(path, body, "PATCH");
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await response.json()).toMatchObject({ custom_tags: [{ id: tag.id }],
+      enrichment: { classification: { resource_kinds: ["skill"] } } });
+  }
 });

@@ -41,6 +41,22 @@ it("keeps the single-row overview private, versioned and generation cached", asy
   expect((await call("enrichment/overview")).headers.get("X-Cairn-Cache")).toBe("HIT");
 });
 
+it("accepts the common tag negotiation header without injecting an overview query", async () => {
+  const current = (query = "", aware = true) => worker.fetch(new Request(`https://test.example/api/enrichment/overview${query}`, {
+    headers: { Authorization: "Bearer internal", ...(aware ? { "X-Cairn-Tag-System": "1" } : {}) }
+  }), bindings());
+  const response = await current();
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(response.headers.get("X-Cairn-Tag-System")).toBe("1");
+  const payload = await response.json();
+  const legacy = await current("", false);
+  expect(legacy.status).toBe(200);
+  expect(await legacy.json()).toEqual(payload);
+  expect((await current()).headers.get("X-Cairn-Cache")).toBe("HIT");
+  expect((await current("?tag_system=1")).status).toBe(400);
+  expect((await current("?curation_status=kept")).status).toBe(400);
+});
+
 it("matches every list view and invalidates on a curation/status/url edit", async () => {
   const urls = [
     "https://x.com/a/status/1", "https://twitter.com/b/status/2",

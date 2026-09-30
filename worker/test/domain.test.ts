@@ -579,7 +579,7 @@ it("completes a v2 classification into runs, decision and the unified selection 
       usage: { input_tokens: 42, output_tokens: 7 }, coverage: "complete", evidence_coverage: "complete",
       automatic: { topics: ["llm"], content_functions: ["method"], carriers: [], affordances: [], form: "method", use: "", entities: [],
         assessment: { version: 1, incomplete: [], decisions: [{ dimension: "topics", term_id: "llm", verdict: "accepted", probability: 0.93, reason: "above bound" }] } },
-      classification: { topics: ["llm"], form: "method", use: "try", uncertainty: false,
+      classification: { topics: ["llm"], form: "method", use: "", uncertainty: false,
         taxonomy_version: taxonomy.version, why_suggestion: "", entities: [], discarded_tags: [] }
     }
   };
@@ -787,7 +787,7 @@ it("R2-01: a failed completion guard leaves no success run, decision or operatio
       spec_id: "classify-v1", spec_hash: await storedSpecHash(),
       answers: { topic_llm: { type: "noul", noul: 0.9 } }, coverage: "complete",
       automatic: { topics: ["llm"], content_functions: [], carriers: [], affordances: [], form: "", use: "", entities: [] },
-      classification: { topics: ["llm"], form: "method", use: "try", uncertainty: false,
+      classification: { topics: ["llm"], form: "", use: "", uncertainty: false,
         taxonomy_version: taxonomy.version, why_suggestion: "", entities: [], discarded_tags: [] }
     }
   };
@@ -838,7 +838,7 @@ it("R2-02: the claim binds the evidence identity and the run records it", async 
       spec_id: "classify-v1", spec_hash: await storedSpecHash(),
       answers: { topic_llm: { type: "noul", noul: 0.9 } }, coverage: "complete",
       automatic: { topics: ["llm"], content_functions: [], carriers: [], affordances: [], form: "", use: "", entities: [] },
-      classification: { topics: ["llm"], form: "method", use: "try", uncertainty: false,
+      classification: { topics: ["llm"], form: "", use: "", uncertainty: false,
         taxonomy_version: taxonomy.version, why_suggestion: "", entities: [], discarded_tags: [] }
     }
   };

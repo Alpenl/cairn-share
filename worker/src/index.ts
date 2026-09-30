@@ -357,7 +357,13 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   const url = new URL(request.url);
   const path = trimTrailingSlash(url.pathname);
-  if (request.headers.get("X-Cairn-Tag-System") === "1") url.searchParams.set("tag_system", "1");
+  // This is an internal cache discriminator for the two negotiated bookmark
+  // read shapes. Aggregate routes reject queries and do not need it. A caller
+  // cannot select the negotiated cache by supplying this query parameter.
+  if (path === "/api/links" || /^\/api\/links\/\d+$/.test(path)) {
+    url.searchParams.delete("tag_system");
+    if (request.headers.get("X-Cairn-Tag-System") === "1") url.searchParams.set("tag_system", "1");
+  }
   const newTagFilter = ["resource_kinds", "resource_kind", "custom_tags", "custom_tag", "topics_mode", "topic_mode", "resource_mode", "custom_mode"].some(key => url.searchParams.has(key));
   if (newTagFilter && request.headers.get("X-Cairn-Tag-System") !== "1") return error("capability_mismatch", 409);
 
@@ -846,9 +852,14 @@ async function updateLink(request: Request, env: Env, id: number, timing: Timing
     const current = await timing.measure("db", () => env.DB.prepare(
       `SELECT ${LINK_COLUMNS}, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(true)} FROM links WHERE id=?`
     ).bind(id).first<LinkRow & EnrichmentListRow>());
-    return current ? json(mapAppLink(current, true, true)) : error("not_found", 404);
+    if (!current) return error("not_found", 404);
+    const mapped = mapAppLink(current, true, true);
+    return json(request.headers.get("X-Cairn-Tag-System") === "1"
+      ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped);
   }
-  return json(enriched ? mapAppLink(row, true) : mapLink(row));
+  const mapped = enriched ? mapAppLink(row, true) : mapLink(row);
+  return json(request.headers.get("X-Cairn-Tag-System") === "1"
+    ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped);
 }
 
 async function deleteLink(env: Env, id: number, timing: TimingCollector): Promise<Response> {
@@ -1212,7 +1223,10 @@ async function updateCuration(request: Request, env: Env, id: number, timing: Ti
     const item = await timing.measure("db", () => env.DB.prepare(
       `SELECT ${LINK_COLUMNS}, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)} FROM links WHERE id = ?`
     ).bind(id).first<LinkRow & EnrichmentListRow>());
-    return item === null ? error("not_found", 404) : json(mapAppLink(item, true));
+    if (item === null) return error("not_found", 404);
+    const mapped = mapAppLink(item, true);
+    return json(request.headers.get("X-Cairn-Tag-System") === "1"
+      ? (await attachTagSummaries(env, [mapped as unknown as Record<string, unknown>]))[0] : mapped);
   }
   return getEnrichmentJob(env, id, timing);
 }
