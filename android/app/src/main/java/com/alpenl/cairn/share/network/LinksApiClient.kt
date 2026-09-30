@@ -19,7 +19,19 @@ internal data class SavedLink(
     val learned: Boolean,
     val learnedAt: String?,
     val enrichment: LinkEnrichment? = null,
+    val customTags: List<CustomTag> = emptyList(),
 )
+
+internal data class CustomTag(
+    val id: String,
+    val tagRef: String,
+    val label: String,
+    val revision: Long,
+    val status: String,
+    val ownerId: String,
+) {
+    val active: Boolean get() = status == "active"
+}
 
 internal enum class LinkFilter(val apiValue: String) {
     Unlearned("false"),
@@ -72,7 +84,8 @@ internal class LinksApiClient(
             val status = connection.responseCode
             val body = responseBody(connection)
             when (status) {
-                HttpURLConnection.HTTP_OK -> if (filters.needsEffectiveFilterContract() && JSONObject(body).opt("filter_contract_version") != 1) {
+                HttpURLConnection.HTTP_OK -> if ((filters.needsEffectiveFilterContract() && JSONObject(body).opt("filter_contract_version") != 1) ||
+                    (filters.needsTagFilterContract() && connection.getHeaderField("X-Cairn-Tag-System") != "1")) {
                     LinkPageResult.UnsupportedFilters
                 } else LinkPageResult.Loaded(LinkJson.decodePage(body))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> LinkPageResult.Failed(FailureKind.Unauthorized)
@@ -233,6 +246,7 @@ internal class LinksApiClient(
         connection.readTimeout = readTimeoutMillis
         connection.instanceFollowRedirects = false
         connection.setRequestProperty("Accept", "application/json")
+        connection.setRequestProperty("X-Cairn-Tag-System", "1")
         connection.setRequestProperty("User-Agent", userAgent)
         if (apiToken.isNotBlank()) {
             connection.setRequestProperty("Authorization", "Bearer ${apiToken.trim()}")
@@ -336,5 +350,22 @@ internal object LinkJson {
             learned = json.getBoolean("learned"),
             learnedAt = json.optString("learned_at").takeUnless { it.isBlank() || it == "null" },
             enrichment = json.optJSONObject("enrichment")?.let(::decodeEnrichment),
+            customTags = decodeCustomTags(json.optJSONArray("custom_tags")),
         )
+
+    private fun decodeCustomTags(values: JSONArray?): List<CustomTag> =
+        List(values?.length() ?: 0) { index ->
+            val value = values!!.getJSONObject(index)
+            val id = value.getString("id")
+            val owner = value.getString("owner_id")
+            val ref = value.getString("tag_ref")
+            val label = value.getString("label")
+            val status = value.getString("status")
+            val revision = value.nonnegativeRevision("revision")
+            if (id.isBlank() || owner.isBlank() || label.isBlank() || ref != "custom/$owner/$id" ||
+                status !in setOf("active", "deprecated") || revision == null) {
+                throw JSONException("Invalid custom tag identity")
+            }
+            CustomTag(id, ref, label, revision, status, owner)
+        }
 }

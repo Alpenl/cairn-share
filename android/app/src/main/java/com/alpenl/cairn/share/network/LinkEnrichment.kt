@@ -25,6 +25,7 @@ internal data class BookmarkClassification(
     // True when the payload carried v2 fields at all. It lets the UI degrade to
     // read-only instead of presenting a v1 projection as if it were complete.
     val multiDimensional: Boolean = false,
+    val resourceKinds: List<String> = emptyList(),
 )
 
 // FieldStatus distinguishes a not-run field from a failed one and from a legal
@@ -45,6 +46,8 @@ internal data class FieldOverride(
     val action: String,
     val operationKey: String,
     val expectedRevision: Long? = null,
+    val expectedDecisionId: Long? = null,
+    val expectedContentRevision: Long? = null,
 ) {
     fun encode(): String = JSONObject().apply {
         put("field", field)
@@ -119,6 +122,7 @@ internal data class BookmarkTaxonomy(
     val carriers: List<TaxonomyTerm> = emptyList(),
     val affordances: List<TaxonomyTerm> = emptyList(),
     val multiDimensional: Boolean = false,
+    val resourceKinds: List<TaxonomyTerm> = emptyList(),
 )
 
 internal sealed interface TaxonomyResult {
@@ -166,6 +170,7 @@ internal fun decodeEnrichment(json: JSONObject): LinkEnrichment = LinkEnrichment
             contentFunctions = it.optJSONArray("content_functions").strings(),
             carriers = it.optJSONArray("carriers").strings(),
             affordances = it.optJSONArray("affordances").strings(),
+            resourceKinds = it.optJSONArray("resource_kinds").strings(),
             multiDimensional = it.has("content_functions") || it.has("carriers") || it.has("affordances"),
         )
     },
@@ -216,6 +221,7 @@ internal fun decodeTaxonomy(json: JSONObject): BookmarkTaxonomy {
         terms("topics"), terms("forms"), terms("uses"),
         contentFunctions = terms("content_functions"), carriers = terms("carriers"), affordances = terms("affordances"),
         multiDimensional = json.has("content_functions") || json.has("carriers") || json.has("affordances"),
+        resourceKinds = terms("resource_kinds"),
     )
 }
 

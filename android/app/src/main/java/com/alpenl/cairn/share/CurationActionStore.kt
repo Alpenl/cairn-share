@@ -101,7 +101,7 @@ internal class CurationActionStore(private val context: Context) : CurationQueue
     }
 
     /** Called only after the user explicitly chooses to reapply and reloads. */
-    suspend fun rebase(accountKey: String, linkId: Int, revision: Long) {
+    suspend fun rebase(accountKey: String, linkId: Int, revision: Long, decisionId: Long? = null, contentRevision: Long? = null) {
         context.curationActionDataStore.edit { preferences ->
             val current = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
             val mine = current.filter { it.accountKey == accountKey && it.linkId == linkId }
@@ -111,7 +111,8 @@ internal class CurationActionStore(private val context: Context) : CurationQueue
             val next = current.map { action ->
                 if (action.accountKey != accountKey || action.linkId != linkId) action else {
                     val updated = action.copy(expectedRevision = if (previous == null) revision else null,
-                        predecessorKey = previous, predecessorRevision = null, conflictRevision = null, queueVersion = 1)
+                        predecessorKey = previous, predecessorRevision = null, conflictRevision = null, queueVersion = 1,
+                        expectedDecisionId = decisionId, expectedContentRevision = contentRevision)
                     previous = action.operationKey
                     updated
                 }
