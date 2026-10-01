@@ -429,7 +429,8 @@ internal class CairnLinksViewModel(
         val generation = uiState.accountGeneration
         val draft = v2Repository.applyLocal(uiState.v2Drafts[id] ?: selection, selection.automatic, field, term, action)
         val queued = QueuedCurationAction(id, UUID.randomUUID().toString(), field, term, action, selection.revision, account,
-            expectedDecisionId = selection.decisionId, expectedContentRevision = selection.contentRevision)
+            expectedDecisionId = selection.decisionId, expectedContentRevision = selection.contentRevision,
+            legacyEndpoint = !selection.tagSystem)
         uiState = uiState.copy(v2Drafts = uiState.v2Drafts + (id to draft), v2Busy = uiState.v2Busy + id)
         viewModelScope.launch {
             try {

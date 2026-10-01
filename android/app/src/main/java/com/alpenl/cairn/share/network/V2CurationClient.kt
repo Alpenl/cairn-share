@@ -33,6 +33,7 @@ internal data class MultidimensionalSelection(
     val resourceKinds: List<String> = emptyList(),
     val decisionId: Long? = null,
     val contentRevision: Long? = null,
+    val tagSystem: Boolean = false,
 )
 
 internal sealed interface V2Result<out T> {
@@ -74,7 +75,7 @@ internal class V2CurationClient(
     fun loadSelection(id: Int, apiToken: String, cancellation: ReadCancellation? = null): V2Result<MultidimensionalSelection> {
         when (val tags = loadTagSnapshot(id, apiToken, cancellation)) {
             is V2Result.Loaded -> return if ((tags.value.opt("id") as? Number)?.toLong() == id.toLong())
-                decodeSelection(tags.value) else V2Result.Failed(FailureKind.Server)
+                decodeSelection(tags.value, tagSystem = true) else V2Result.Failed(FailureKind.Server)
             is V2Result.Failed -> return tags
             is V2Result.Conflict -> return tags
             V2Result.Unsupported -> Unit
@@ -108,11 +109,9 @@ internal class V2CurationClient(
     fun applyOverride(id: Int, override: FieldOverride, apiToken: String): V2Result<JSONObject> {
         // Prefer the incremental tag contract so ordinary phone edits retain
         // operation-level history. The existing durable queue/receipt remains
-        // compatible; old servers still use the field-level endpoint below.
-        if (override.field in setOf("topics", "resource_kinds", "content_functions")) {
-            val tagged = applyTagAction(id, override, apiToken)
-            if (tagged !is V2Result.Unsupported) return tagged
-            if (override.field == "resource_kinds") return V2Result.Unsupported
+        // compatible; legacy intents use their original endpoint below.
+        if (!override.legacyEndpoint && override.field in setOf("topics", "resource_kinds", "content_functions")) {
+            return applyTagAction(id, override, apiToken)
         }
         val body = override.encode().toByteArray(StandardCharsets.UTF_8)
         val connection = endpoint("/api/bookmarks/$id/v2-override").openConnection() as HttpURLConnection
@@ -153,6 +152,11 @@ internal class V2CurationClient(
     }
 
     private fun applyTagAction(id: Int, sent: FieldOverride, apiToken: String): V2Result<JSONObject> {
+        // Fresh modern actions must bind the evidence the user read. Legacy
+        // durable actions retain their original endpoint and operation receipt.
+        if (sent.expectedDecisionId == null || sent.expectedContentRevision == null) {
+            return V2Result.Failed(FailureKind.Server)
+        }
         val action = JSONObject().apply {
             if (sent.action == "set_empty" || (sent.action == "reset" && sent.term.isEmpty())) {
                 put("action", if (sent.action == "reset") "reset_group" else "set_empty")
@@ -162,26 +166,11 @@ internal class V2CurationClient(
                 put("tag_ref", "system/${sent.field}/${sent.term}")
             }
         }
-        // Group operations bind the decision the user read. Read it together
-        // with the expected personal revision; changed state fails CAS.
-        var decision = sent.expectedDecisionId
-        var contentRevision = sent.expectedContentRevision
-        if (sent.term.isEmpty() && (decision == null || contentRevision == null)) when (val snapshot = loadTagSnapshot(id, apiToken)) {
-            is V2Result.Loaded -> {
-                if (snapshot.value.nonnegativeRevision("revision") != sent.expectedRevision)
-                    return V2Result.Conflict(snapshot.value.nonnegativeRevision("revision") ?: 0)
-                decision = snapshot.value.nonnegativeRevision("decision_id")
-                    ?: return V2Result.Failed(FailureKind.Server)
-                contentRevision = snapshot.value.nonnegativeRevision("content_revision")
-                    ?: return V2Result.Failed(FailureKind.Server)
-            }
-            else -> return snapshot
-        }
         val payload = JSONObject().apply {
             put("operation_key", sent.operationKey)
             sent.expectedRevision?.let { put("expected_revision", it) }
-            decision?.let { put("expected_decision_id", it) }
-            contentRevision?.let { put("expected_content_revision", it) }
+            put("expected_decision_id", sent.expectedDecisionId)
+            put("expected_content_revision", sent.expectedContentRevision)
             put("actions", JSONArray().put(action))
         }
         val result = tagRequest("/api/bookmarks/$id/tags", "POST", apiToken, payload)
@@ -259,8 +248,10 @@ internal class V2CurationClient(
         }
     }
 
-    internal fun decodeSelection(payload: JSONObject): V2Result<MultidimensionalSelection> {
+    internal fun decodeSelection(payload: JSONObject, tagSystem: Boolean = false): V2Result<MultidimensionalSelection> {
         if (payload.optBoolean("available", true) == false) return V2Result.Unsupported
+        if (tagSystem && (payload.nonnegativeRevision("decision_id") == null || payload.nonnegativeRevision("content_revision") == null))
+            return V2Result.Failed(FailureKind.Server)
         val selection = payload.optJSONObject("selection") ?: return V2Result.Failed(FailureKind.Server)
         val revision = payload.nonnegativeRevision("revision") ?: return V2Result.Failed(FailureKind.Server)
         if (decodeAutomatic(selection) == null) return V2Result.Failed(FailureKind.Server)
@@ -278,6 +269,7 @@ internal class V2CurationClient(
                 resourceKinds = selection.strings("resource_kinds"),
                 decisionId = payload.nonnegativeRevision("decision_id"),
                 contentRevision = payload.nonnegativeRevision("content_revision"),
+                tagSystem = tagSystem,
                 contentFunctions = selection.strings("content_functions"),
                 carriers = selection.strings("carriers"),
                 affordances = selection.strings("affordances"),
@@ -334,6 +326,8 @@ internal data class QueuedCurationAction(
     val queueVersion: Int = 1,
     val expectedDecisionId: Long? = null,
     val expectedContentRevision: Long? = null,
+    // A persisted operation cannot change endpoint after a lost response.
+    val legacyEndpoint: Boolean = expectedDecisionId == null && expectedContentRevision == null,
 ) {
     val ready: Boolean get() = expectedRevision != null && (predecessorKey == null || predecessorRevision != null)
 
@@ -346,6 +340,7 @@ internal data class QueuedCurationAction(
         expectedRevision?.let { put("expected_revision", it) }
         put("account_key", accountKey)
         put("queue_version", queueVersion)
+        put("legacy_endpoint", legacyEndpoint)
         expectedDecisionId?.let { put("expected_decision_id", it) }
         expectedContentRevision?.let { put("expected_content_revision", it) }
         predecessorKey?.let { put("predecessor_key", it) }
@@ -368,6 +363,8 @@ internal data class QueuedCurationAction(
             queueVersion = json.optInt("queue_version", 0),
             expectedDecisionId = json.nonnegativeRevision("expected_decision_id"),
             expectedContentRevision = json.nonnegativeRevision("expected_content_revision"),
+            legacyEndpoint = if (json.has("legacy_endpoint")) json.getBoolean("legacy_endpoint")
+                else json.nonnegativeRevision("expected_decision_id") == null && json.nonnegativeRevision("expected_content_revision") == null,
         )
     }
 }

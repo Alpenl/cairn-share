@@ -121,8 +121,8 @@ class CurationWorkerRecoveryTest {
         waitFor { withContext(Dispatchers.Main) { model.uiState.v2Selections.containsKey(id) } }
         control("offline")
         withContext(Dispatchers.Main) {
-            model.applyV2Action(id, "topics", "llm", "accept")
-            model.applyV2Action(id, "topics", "llm", "reject")
+            model.applyV2Action(id, "topics", "ai_coding", "accept")
+            model.applyV2Action(id, "topics", "ai_coding", "reject")
             model.applyV2Action(id, "carriers", "external_article", "accept")
             model.applyV2Action(id, "affordances", "", "set_empty")
             model.applyV2Action(id, "topics", "", "reset")
@@ -214,8 +214,8 @@ class CurationWorkerRecoveryTest {
         control("offline")
         withContext(Dispatchers.Main) {
             ids.forEach { id ->
-                model.applyV2Action(id, "topics", "llm", "accept")
-                model.applyV2Action(id, "topics", "llm", "reject")
+                model.applyV2Action(id, "topics", "ai_coding", "accept")
+                model.applyV2Action(id, "topics", "ai_coding", "reject")
             }
         }
         waitFor { store.snapshot().size == 4 && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() } }
@@ -292,7 +292,7 @@ class CurationWorkerRecoveryTest {
             val reads = http("/__test/control").getJSONArray("selection_reads")
             (readsBefore until reads.length()).any { index ->
                 val read = reads.getJSONObject(index)
-                read.getString("path") == "/api/bookmarks/$id/v2-selection" && read.getInt("status") == 401
+                read.getString("path") in listOf("/api/bookmarks/$id/v2-selection", "/api/bookmarks/$id/tags") && read.getInt("status") == 401
             }
         }
         assertEquals(before, http("/__test/control").getJSONArray("requests").length())
@@ -470,7 +470,7 @@ class CurationWorkerRecoveryTest {
         waitFor { withContext(Dispatchers.Main) { !model.uiState.libraryLoading && model.uiState.visibleLibraryLinks().map { it.id } == listOf(id) && model.uiState.v2Selections.containsKey(id) } }
         withContext(Dispatchers.Main) {
             assertEquals("", model.uiState.searchQuery)
-            assertFalse("the visible v1 summary cannot explain fourth-topic membership", model.uiState.libraryResults.single().enrichment!!.classification!!.topics.contains("design"))
+            assertTrue("the negotiated summary includes full effective topic membership", model.uiState.libraryResults.single().enrichment!!.classification!!.topics.contains("design"))
         }
         control("writes_offline")
         withContext(Dispatchers.Main) { model.applyV2Action(id, "topics", "design", "reject") }
@@ -519,7 +519,7 @@ class CurationWorkerRecoveryTest {
         control("writes_offline")
         withContext(Dispatchers.Main){model.loadV2Selection(id)}
         waitFor{withContext(Dispatchers.Main){model.uiState.v2Selections.containsKey(id)}}
-        withContext(Dispatchers.Main){model.applyV2Action(id,"topics","llm","accept")}
+        withContext(Dispatchers.Main){model.applyV2Action(id,"topics","ai_coding","accept")}
         waitFor{store.snapshot().size==1 && withContext(Dispatchers.Main){model.uiState.v2Busy.isEmpty()}}
         store.enqueue(QueuedCurationAction(id,"delete-foreign-keep","topics","eng","accept",0,"other-account"))
         control("lose_delete")
