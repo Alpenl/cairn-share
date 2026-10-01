@@ -48,6 +48,7 @@ internal data class FieldOverride(
     val expectedRevision: Long? = null,
     val expectedDecisionId: Long? = null,
     val expectedContentRevision: Long? = null,
+    val legacyEndpoint: Boolean = false,
 ) {
     fun encode(): String = JSONObject().apply {
         put("field", field)

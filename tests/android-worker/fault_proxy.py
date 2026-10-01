@@ -19,7 +19,7 @@ def forward(method, path, body, headers):
     try:
         connection.request(method, path, body, headers)
         response = connection.getresponse()
-        return response.status, response.read()
+        return response.status, response.read(), dict(response.getheaders())
     finally:
         connection.close()
 
@@ -42,10 +42,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.connection.shutdown(socket.SHUT_RDWR)
         self.connection.close()
 
-    def respond(self, status, body):
+    def respond(self, status, body, headers=None):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        # Capability acknowledgements are part of the real Worker contract.
+        for name, value in (headers or {}).items():
+            if name.lower().startswith("x-cairn-") or name.lower() == "cache-control":
+                self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -62,8 +66,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Direct inspection is still authenticated by the real Worker.
         direct = self.path.startswith("/__test/direct/")
         path = self.path.removeprefix("/__test/direct") if direct else self.path
-        headers = {"Authorization": self.headers.get("Authorization", ""), "Content-Type": "application/json"}
-        mutation = not direct and self.command == "POST" and path.endswith("/v2-override")
+        headers = {name: value for name, value in self.headers.items()
+                   if name.lower() in ("authorization", "content-type", "accept", "user-agent")
+                   or name.lower().startswith("x-cairn-")}
+        mutation = not direct and self.command == "POST" and path.endswith(("/v2-override", "/tags"))
         deletion = not direct and self.command == "DELETE" and path.startswith("/api/links/")
         action = json.loads(body) if mutation else {}
         with lock:
@@ -85,11 +91,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if mutation and mode == "conflict" and key == action["operation_key"]:
             # A distinct client commits between Android's read and CAS. This
             # uses the real human-action endpoint, not a fabricated 409.
-            web = dict(action, term="eng", field="topics", action="accept", operation_key="web-" + str(uuid.uuid4()))
-            status, result = forward("POST", path, json.dumps(web).encode(), headers)
+            web = dict(action, operation_key="web-" + str(uuid.uuid4()))
+            if path.endswith("/tags"):
+                web["actions"] = [{"action": "accept", "tag_ref": "system/topics/agent_workflow"}]
+            else:
+                web.update(term="eng", field="topics", action="accept")
+            status, result, _ = forward("POST", path, json.dumps(web).encode(), headers)
             assert status == 200, (status, result)
-        status, result = forward(self.command, path, body or None, headers)
-        if not direct and self.command == "GET" and urllib.parse.urlsplit(path).path.endswith("/v2-selection"):
+        status, result, response_headers = forward(self.command, path, body or None, headers)
+        if not direct and self.command == "GET" and urllib.parse.urlsplit(path).path.endswith(("/v2-selection", "/tags")):
             # Record only route/status, never credentials or response bodies.
             # UI messages can be replaced by concurrent list refresh failures.
             with lock:
@@ -100,7 +110,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if mutation and mode == "lose_first":
             assert status == 200, (status, result)
             return self.drop()
-        self.respond(status, result)
+        self.respond(status, result, response_headers)
 
 
 http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[2])), Handler).serve_forever()

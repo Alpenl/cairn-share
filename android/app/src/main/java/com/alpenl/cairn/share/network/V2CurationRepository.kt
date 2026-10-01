@@ -101,6 +101,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         operationKey: String = UUID.randomUUID().toString(),
         expectedDecisionId: Long? = null,
         expectedContentRevision: Long? = null,
+        legacyEndpoint: Boolean = false,
     ): CurationSubmitResult {
         val override = FieldOverride(
             field = field,
@@ -110,6 +111,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
             expectedRevision = expectedRevision,
             expectedDecisionId = expectedDecisionId,
             expectedContentRevision = expectedContentRevision,
+            legacyEndpoint = legacyEndpoint,
         )
         return when (val result = transport.applyOverride(id, override, apiToken)) {
             is V2Result.Loaded -> confirmed(result.value, id, override)
@@ -155,7 +157,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
                 !action.ready -> CurationSubmitResult.Failed(FailureKind.Server)
                 else -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     submit(action.linkId, action.field, action.term, action.action,
-                        action.expectedRevision!!, apiToken, action.operationKey, action.expectedDecisionId, action.expectedContentRevision)
+                        action.expectedRevision!!, apiToken, action.operationKey, action.expectedDecisionId, action.expectedContentRevision, action.legacyEndpoint)
                 }
             }
             when (result) {

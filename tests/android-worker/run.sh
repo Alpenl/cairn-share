@@ -53,6 +53,10 @@ python3 "$root/tests/android-worker/fault_proxy.py" "http://127.0.0.1:$worker_po
 proxy_pid=$!
 "$adb" -s "$serial" reverse tcp:18978 "tcp:$proxy_port"
 (cd "$root/android" && ./gradlew --no-daemon --dependency-verification strict installDebug installDebugAndroidTest)
+# Each harness invocation has a fresh D1 at the same loopback account URL.
+# Reset only before the first phase so durable bodies from a previous run do
+# not masquerade as this database's list projection. Phases keep all app data.
+"$adb" -s "$serial" shell pm clear com.alpenl.cairn.share > /dev/null
 for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConflictsAndMidChainFailure discardAndAccountSwitchPreserveUnrelatedActions preserveAmbiguousLegacyAndSeparateSameSuffixAccounts explicitlyRecoverLegacyAfterRestart persistResetWithIndependentAutomaticBaseline restoreAutomaticDraftAfterProcessDeath persistTermResetAfterExplicitEmpty restoreTermResetAfterProcessDeath confirmedCurationRefreshesRealFilteredSearch blankKeywordLibraryUsesFullEffectiveFiltersAndConfirmedWrites persistDeletionAfterRealCommitResponseLoss recoverDeletionAfterProcessDeathWithoutReplayingCuration readEntityProvenanceAndHumanOverridesFromRealWorker; do
   "$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
   "$adb" -s "$serial" shell am instrument -w -r \
