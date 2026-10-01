@@ -145,6 +145,9 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("selection_operations",{link_id:id,operation_key:"selection",payload_hash:"h",revision:1,selection:'{"topics":["private"]}',created_at:"t"});
   await insert("manual_request_operations",{link_id:id,operation_key:"manual-request",kind:"process",created_at:"t"});
   await insert("legacy_curation_history",{link_id:id,payload:"{}",revision:1,provenance:"legacy_unknown",created_at:"t"});
+  await insert("classification_reservations",{reservation_key:"reserved-private",link_id:id,payload_hash:"h",identity:"{}",created_at:"t"});
+  await insert("classification_attempt_operations",{operation_key:"failed-private",link_id:id,payload_hash:"h",created_at:"t"});
+  await insert("classification_provider_attempts",{operation_key:"failed-private",reservation_key:"reserved-private",link_id:id,call_json:"{}",created_at:"t"});
   await insert("budget_ledger",{link_id:id,scope:"evidence",operation_key:"budget",created_at:"t"});
   await insert("enrichment_provider_attempts",{operation_key:"a".repeat(64),link_id:id,
     lease_hash:"b".repeat(64),content_revision:1,stage:"fetch",variant:"fetch_thread",
@@ -157,6 +160,7 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("rerank_cache_links",{cache_key:"private-rank",link_id:id});
   await insert("entity_cache",{cache_key:"private-entity",link_id:id,evidence_snapshot_id:snapshotID,content_revision:1,content_hash:"hash",source_links:"[]",owner_token:"owner",status:"completed",request_json:"private entity material",candidates:"[]",spec_hash:"spec",answers:"{}",created_at:1,expires_at:Date.now()+86400000});
   const tables=["entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links","custom_tag_links","tag_operations","tag_change_facts"];
+  tables.push("effective_tag_memberships","classification_reservations","classification_attempt_operations","classification_provider_attempts");
   const schema=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_*'").all<{name:string}>();
   const linked:string[]=[];
   for(const {name} of schema.results) {

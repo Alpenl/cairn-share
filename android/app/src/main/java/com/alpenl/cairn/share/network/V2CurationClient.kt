@@ -64,14 +64,15 @@ internal class V2CurationClient(
         connection.instanceFollowRedirects = false
         connection.setRequestProperty("Accept", "application/json")
         connection.setRequestProperty("X-Cairn-Tag-System", "1")
+        connection.setRequestProperty("X-Cairn-Content-Functions", "1")
         connection.setRequestProperty("User-Agent", userAgent)
         if (apiToken.isNotBlank()) {
             connection.setRequestProperty("Authorization", "Bearer ${apiToken.trim()}")
         }
     }
 
-    fun loadSelection(id: Int, apiToken: String): V2Result<MultidimensionalSelection> {
-        when (val tags = loadTagSnapshot(id, apiToken)) {
+    fun loadSelection(id: Int, apiToken: String, cancellation: ReadCancellation? = null): V2Result<MultidimensionalSelection> {
+        when (val tags = loadTagSnapshot(id, apiToken, cancellation)) {
             is V2Result.Loaded -> return if ((tags.value.opt("id") as? Number)?.toLong() == id.toLong())
                 decodeSelection(tags.value) else V2Result.Failed(FailureKind.Server)
             is V2Result.Failed -> return tags
@@ -81,6 +82,7 @@ internal class V2CurationClient(
         val connection = endpoint("/api/bookmarks/$id/v2-selection?include_automatic=1&include_state=1").openConnection() as HttpURLConnection
         return try {
             configure(connection, "GET", apiToken)
+            cancellation?.attach(connection)
             when (val status = connection.responseCode) {
                 HttpURLConnection.HTTP_OK -> decodeSelection(JSONObject(connection.inputStream.bufferedReader().readText()))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> V2Result.Failed(FailureKind.Unauthorized)
@@ -94,6 +96,7 @@ internal class V2CurationClient(
         } catch (_: JSONException) {
             V2Result.Failed(FailureKind.Server)
         } finally {
+            cancellation?.release(connection)
             connection.disconnect()
         }
     }
@@ -106,7 +109,7 @@ internal class V2CurationClient(
         // Prefer the incremental tag contract so ordinary phone edits retain
         // operation-level history. The existing durable queue/receipt remains
         // compatible; old servers still use the field-level endpoint below.
-        if (override.field in setOf("topics", "resource_kinds")) {
+        if (override.field in setOf("topics", "resource_kinds", "content_functions")) {
             val tagged = applyTagAction(id, override, apiToken)
             if (tagged !is V2Result.Unsupported) return tagged
             if (override.field == "resource_kinds") return V2Result.Unsupported
@@ -195,13 +198,14 @@ internal class V2CurationClient(
         })
     }
 
-    fun loadTagSnapshot(id: Int, apiToken: String): V2Result<JSONObject> =
-        tagRequest("/api/bookmarks/$id/tags", "GET", apiToken)
+    fun loadTagSnapshot(id: Int, apiToken: String, cancellation: ReadCancellation? = null): V2Result<JSONObject> =
+        tagRequest("/api/bookmarks/$id/tags", "GET", apiToken, cancellation = cancellation)
 
-    internal fun tagRequest(path: String, method: String, apiToken: String, payload: JSONObject? = null): V2Result<JSONObject> {
+    internal fun tagRequest(path: String, method: String, apiToken: String, payload: JSONObject? = null, cancellation: ReadCancellation? = null): V2Result<JSONObject> {
         val connection = endpoint(path).openConnection() as HttpURLConnection
         return try {
             configure(connection, method, apiToken)
+            if (method == "GET") cancellation?.attach(connection)
             if (payload != null) {
                 val bytes = payload.toString().toByteArray(StandardCharsets.UTF_8)
                 connection.doOutput = true
@@ -225,13 +229,14 @@ internal class V2CurationClient(
         } catch (_: SocketTimeoutException) { V2Result.Failed(FailureKind.Timeout) }
         catch (_: IOException) { V2Result.Failed(FailureKind.Network) }
         catch (_: JSONException) { V2Result.Failed(FailureKind.Server) }
-        finally { connection.disconnect() }
+        finally { cancellation?.release(connection); connection.disconnect() }
     }
 
-    fun loadTaxonomy(apiToken: String): V2Result<BookmarkTaxonomy> {
+    fun loadTaxonomy(apiToken: String, cancellation: ReadCancellation? = null): V2Result<BookmarkTaxonomy> {
         val connection = endpoint("/api/v2-taxonomy").openConnection() as HttpURLConnection
         return try {
             configure(connection, "GET", apiToken)
+            cancellation?.attach(connection)
             when (connection.responseCode) {
                 HttpURLConnection.HTTP_OK -> {
                     val payload = JSONObject(connection.inputStream.bufferedReader().readText())
@@ -249,6 +254,7 @@ internal class V2CurationClient(
         } catch (_: JSONException) {
             V2Result.Failed(FailureKind.Server)
         } finally {
+            cancellation?.release(connection)
             connection.disconnect()
         }
     }

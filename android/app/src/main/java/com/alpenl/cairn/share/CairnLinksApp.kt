@@ -84,6 +84,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -114,6 +117,7 @@ private object Routes {
     const val Uploads = "uploads"
     const val Console = "console"
     const val About = "about"
+    const val Offline = "offline"
 
     fun detail(id: Int): String = "detail/$id"
     fun edit(id: Int): String = "edit/$id"
@@ -228,6 +232,7 @@ internal fun CairnLinksApp(
                     onLoadMore = viewModel::loadMoreLibraryResults,
                     onRetryFilters = viewModel::retryLibraryFilters,
                     onOpenSearch = { navController.navigate(Routes.Search) },
+                    onOpenOffline = { navController.navigate(Routes.Offline) },
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
             }
@@ -235,6 +240,8 @@ internal fun CairnLinksApp(
                 QueueScreen(
                     state = state,
                     onMarkAll = viewModel::markAllPendingLearned,
+                    onRefresh = viewModel::refreshQueue,
+                    onLoadMore = viewModel::loadMoreQueue,
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
             }
@@ -248,6 +255,9 @@ internal fun CairnLinksApp(
                     onOpenConsole = { navController.navigate(Routes.Console) },
                     onOpenUpdate = { navController.navigate(Routes.Update) },
                     onOpenAbout = { navController.navigate(Routes.About) },
+                    onClearOffline = viewModel::clearOfflineReading,
+                    onFlushPersonal = viewModel::flushPersonalTags,
+                    onOpenOffline = { navController.navigate(Routes.Offline) },
                 )
             }
             composable(Routes.Search) {
@@ -269,6 +279,16 @@ internal fun CairnLinksApp(
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
             }
+            composable(Routes.Offline) {
+                ScreenColumn {
+                    DetailTopBar(title = "离线阅读", onBack = { navController.popBackStack() })
+                    Text("本机保存的最近阅读与固定正文；联网后会确认版本。离线图片不在缓存内。", style = MaterialTheme.typography.bodySmall)
+                    LinkList(items = state.offlineLinks.sortedWith(compareByDescending<SavedLink> { state.offlineReads[it.id]?.pinned == true }.thenByDescending { it.id }),
+                        taxonomy = state.v2Taxonomy ?: state.taxonomy,
+                        loading = false, emptyText = "成功阅读归档正文后会自动缓存，也可以在阅读页固定。",
+                        onOpenLinkDetail = { link -> viewModel.openOfflineLink(link); navController.navigate(Routes.detail(link.id)) })
+                }
+            }
             composable(
                 route = Routes.Detail,
                 arguments = listOf(navArgument("id") { type = NavType.IntType }),
@@ -277,7 +297,7 @@ internal fun CairnLinksApp(
                 DetailScreen(
                     id = id,
                     state = state,
-                    onEnsureLink = viewModel::ensureLink,
+                    onEnsureLink = { viewModel.ensureLink(it) },
                     onBack = { navController.popBackStack() },
                     onEdit = { navController.navigate(Routes.edit(id)) },
                     onOpenExternal = onOpenExternal,
@@ -291,6 +311,8 @@ internal fun CairnLinksApp(
                     onV2Reapply = { viewModel.reapplyV2Draft(id) },
                     onV2Discard = { viewModel.discardV2Draft(id) },
                     onFlushV2 = viewModel::flushV2Queue,
+                    onFlushPersonal = viewModel::flushPersonalTags,
+                    onOfflinePin = { pinned -> viewModel.setOfflinePinned(id, pinned) },
                     onRecoverLegacyV2 = { viewModel.recoverLegacyV2Actions(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken)) },
                     onDelete = { viewModel.deleteLink(id) { navController.popBackStack() } },
                 )
@@ -507,6 +529,7 @@ private fun LibraryScreen(
     onLoadMore: () -> Unit,
     onRetryFilters: () -> Unit,
     onOpenSearch: () -> Unit,
+    onOpenOffline: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
     val stats = remember(state.links, java.time.LocalDate.now()) { state.stats() }
@@ -526,6 +549,9 @@ private fun LibraryScreen(
                 )
             },
         )
+        if (state.offlineReads.isNotEmpty()) TextButton(onClick = onOpenOffline, modifier = Modifier.testTag("open_offline_reading")) {
+            Text("离线已存 ${state.offlineReads.size} 条正文")
+        }
         FilterRow(
             selected = state.filter,
             stats = stats,
@@ -534,11 +560,12 @@ private fun LibraryScreen(
         )
         BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken)
         if (querying) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(state.libraryStatusText, Modifier.weight(1f).testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall)
+            Text((if (state.libraryStale) "上一次条件的结果 · " else "") + state.libraryStatusText, Modifier.weight(1f).testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onRetryFilters, enabled = !state.libraryLoading, modifier = Modifier.testTag("retry_library_filters")) { Text("重新筛选") }
         }
         LinkList(
             items = items,
+            taxonomy = state.v2Taxonomy ?: state.taxonomy,
             loading = loading && items.isEmpty(),
             emptyText = if (querying) state.libraryStatusText.ifBlank { "正在筛选..." } else libraryEmptyText(state),
             onOpenLinkDetail = onOpenLinkDetail,
@@ -569,11 +596,12 @@ private fun SearchScreen(
         )
         BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken)
         if (state.searchQuery.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(state.searchStatusText, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            Text((if (state.searchStale) "上一次搜索的结果 · " else "") + state.searchStatusText, Modifier.weight(1f).testTag("search_status"), style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = { onSearchQueryChange(state.searchQuery) }, enabled = !state.searchLoading) { Text("重新搜索") }
         }
         LinkList(
             items = results,
+            taxonomy = state.v2Taxonomy ?: state.taxonomy,
             loading = state.searchLoading && results.isEmpty(),
             emptyText = when {
                 state.searchQuery.isBlank() -> "搜索标题、正文、摘要、收藏原因或链接。"
@@ -592,27 +620,42 @@ private fun SearchScreen(
 private fun QueueScreen(
     state: CairnLinksUiState,
     onMarkAll: () -> Unit,
+    onRefresh: () -> Unit,
+    onLoadMore: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
-    val queue = remember(state.links) { state.queueLinks() }
+    val queue = state.queueResults
+    var confirmLoaded by rememberSaveable(state.accountGeneration) { mutableStateOf(false) }
+    LaunchedEffect(state.accountGeneration) { onRefresh() }
     ScreenColumn {
         AppHeader(
             title = "待学习",
-            subtitle = if (queue.isEmpty()) "按收藏先后排队，先进先读" else "${queue.size} 条排队中，最早 ${queue.first().createdAt.shortDateTime()}",
+            subtitle = state.queueTotal?.let { "全库 $it 条待读 · 已显示 ${queue.size} 条" } ?: "按收藏先后排队，先进先读",
             actions = {
-                IconButton(onClick = onMarkAll, enabled = !state.loading && queue.isNotEmpty() && state.busyIds.isEmpty(), modifier = Modifier.testTag("mark_all_learned")) {
-                    Icon(Icons.Default.Check, contentDescription = "全部标记为已学习")
-                }
+                TextButton(onClick = { confirmLoaded = true }, enabled = state.queueAvailable == true && !state.queueLoading && queue.isNotEmpty() && state.busyIds.isEmpty(), modifier = Modifier.testTag("mark_all_learned")) { Text("标记已显示") }
             },
         )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(state.queueStatusText, Modifier.weight(1f).testTag("queue_status"), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onRefresh, enabled = !state.queueLoading) { Text("刷新队列") }
+        }
         LinkList(
             items = queue,
-            loading = state.loading,
-            emptyText = "没有待学习链接。分享新链接后会出现在这里。",
+            taxonomy = state.v2Taxonomy ?: state.taxonomy,
+            loading = state.queueLoading && queue.isEmpty(),
+            emptyText = state.queueStatusText.ifBlank { "正在读取待学习队列…" },
             onOpenLinkDetail = onOpenLinkDetail,
             fifo = true,
+            hasMore = state.queueNextCursor != null,
+            loadingMore = state.queueLoading && queue.isNotEmpty(),
+            onLoadMore = onLoadMore,
         )
     }
+    if (confirmLoaded) AlertDialog(onDismissRequest = { confirmLoaded = false },
+        title = { Text("标记已显示的 ${queue.size} 条？") },
+        text = { Text("仅将当前加载的收藏标记为已学习；全库其余未加载收藏会继续排队。") },
+        confirmButton = { TextButton(onClick = { confirmLoaded = false; onMarkAll() }, enabled = !state.queueLoading && state.queueAvailable == true) { Text("标记这 ${queue.size} 条") } },
+        dismissButton = { TextButton(onClick = { confirmLoaded = false }) { Text("取消") } })
 }
 
 @Composable
@@ -625,9 +668,13 @@ private fun SettingsScreen(
     onOpenConsole: () -> Unit,
     onOpenUpdate: () -> Unit,
     onOpenAbout: () -> Unit,
+    onClearOffline: () -> Unit,
+    onFlushPersonal: () -> Unit,
+    onOpenOffline: () -> Unit,
 ) {
     var tokenDialogOpen by rememberSaveable { mutableStateOf(false) }
     var tokenDraft by rememberSaveable { mutableStateOf("") }
+    var confirmClearCache by rememberSaveable { mutableStateOf(false) }
 
     ScreenColumn(scroll = true) {
         AppHeader(title = "设置", subtitle = "云端、分享与应用")
@@ -657,6 +704,24 @@ private fun SettingsScreen(
                 else -> "${state.pendingUploads.size} 条保存在本地 · 点按查看或重试"
             },
             onClick = onOpenUploads,
+        )
+        SettingsRow(
+            icon = Icons.Default.Refresh,
+            title = "个人标签待同步",
+            subtitle = "当前账号 ${state.personalTagPendingCount} 条待确认操作 · 点击重试",
+            onClick = onFlushPersonal,
+        )
+        SettingsRow(
+            icon = Icons.Default.Info,
+            title = "最近阅读与固定正文",
+            subtitle = "${state.offlineReads.size} 条离线已存 · 点击阅读",
+            onClick = onOpenOffline,
+        )
+        SettingsRow(
+            icon = Icons.Default.Info,
+            title = "离线阅读缓存",
+            subtitle = "最近 30 条正文 + 最多 20 条固定 · 当前账号 ${state.offlineReads.size} 条 · 16 MB 总上限",
+            onClick = { confirmClearCache = true },
         )
         SettingsRow(
             icon = Icons.Default.Info,
@@ -694,6 +759,14 @@ private fun SettingsScreen(
         )
         Spacer(Modifier.height(20.dp))
     }
+
+    if (confirmClearCache) AlertDialog(
+        onDismissRequest = { confirmClearCache = false },
+        title = { Text("清除离线阅读缓存？") },
+        text = { Text("仅清除当前账号在本机保存的正文与固定记录，云端收藏和待同步修改会保留。") },
+        confirmButton = { TextButton(onClick = { confirmClearCache = false; onClearOffline() }) { Text("清除本机缓存") } },
+        dismissButton = { TextButton(onClick = { confirmClearCache = false }) { Text("取消") } },
+    )
 
     if (tokenDialogOpen) {
         AlertDialog(
@@ -904,13 +977,18 @@ private fun DetailScreen(
     onV2Reapply: () -> Unit,
     onV2Discard: () -> Unit,
     onFlushV2: () -> Unit,
+    onFlushPersonal: () -> Unit,
+    onOfflinePin: (Boolean) -> Unit,
     onRecoverLegacyV2: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val link = state.links.firstOrNull { it.id == id }
     val loadState = state.detailLoads[id]
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
-    var showOriginal by rememberSaveable(id) { mutableStateOf(false) }
+    var showOriginal by rememberSaveable(id, state.accountGeneration) { mutableStateOf(false) }
+    var curateExpanded by rememberSaveable(id, state.accountGeneration) { mutableStateOf(false) }
+    val editorState = rememberSaveableStateHolder()
+    val personalEditor = rememberSaveable(id, state.accountGeneration, saver = PersonalTagEditorDraft.saver) { PersonalTagEditorDraft() }
     val enrichment = link?.enrichment
     val readingText = if (showOriginal || enrichment?.translatedText.isNullOrBlank()) enrichment?.originalText.orEmpty() else enrichment?.translatedText.orEmpty()
     val paragraphs = remember(readingText) { readingText.split(Regex("\\n+")).map { it.trim() }.filter { it.isNotEmpty() } }
@@ -946,26 +1024,54 @@ private fun DetailScreen(
                         LinkDetailContent(link, id in state.busyIds, onOpenExternal, onCopy, onToggleLearned)
                     }
                 }
-                item(key = "personal_tags") {
-                    PersonalTagsSection(linkId = id, baseUrl = state.apiBaseUrl, apiToken = state.preferences.apiToken,
-                        onChanged = { onLoadV2(id, true); onEnsureLink(id) })
+                item(key = "curation_overview") {
+                    Column(Modifier.fillMaxWidth().testTag("reader_curation"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val effective = state.v2Drafts[id] ?: state.v2Selections[id]
+                        val vocabulary = state.v2Taxonomy ?: state.taxonomy
+                        val offlineLabels = state.offlineReads[id]?.tagLabels.orEmpty()
+                        val tags = if (effective == null && vocabulary == null && offlineLabels.isNotEmpty()) offlineLabels else readerTags(link, effective, vocabulary)
+                        TextButton(onClick = { curateExpanded = !curateExpanded }, modifier = Modifier.testTag("reader_curation_toggle").semantics { stateDescription = if (curateExpanded) "已展开" else "已折叠" }) {
+                            Text(if (curateExpanded) "收起标签与备注" else "标签与备注")
+                        }
+                        if (!curateExpanded) {
+                            if (tags.isNotEmpty()) Text(tags.take(5).joinToString(" · ") { it.label } +
+                                if (tags.size > 5) " +${tags.size - 5}" else "", modifier = Modifier.testTag("reader_tag_overview"),
+                                style = MaterialTheme.typography.bodySmall)
+                            if (enrichment?.why?.isNotBlank() == true) Text(enrichment.why, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                            if ((state.v2Queued[id] ?: 0) > 0 || state.v2Conflicts.containsKey(id) || (state.personalTagQueued[id] ?: 0) > 0) Text("有待同步或冲突的标签修改，展开后处理。", style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            editorState.SaveableStateProvider("$id:${state.accountGeneration}") {
+                            MultidimensionalCurationSection(
+                                linkId = id, taxonomy = state.v2Taxonomy ?: state.taxonomy,
+                                selection = state.v2Selections[id], draft = state.v2Drafts[id],
+                                conflictRevision = state.v2Conflicts[id], busy = id in state.v2Busy,
+                                queuedCount = state.v2Queued[id] ?: 0, available = state.v2Available,
+                                onLoadTaxonomy = onLoadV2Taxonomy, onAction = onV2Action,
+                                onReapply = onV2Reapply, onDiscard = onV2Discard, onFlush = onFlushV2,
+                                onExport = { onCopy(v2ExportMarkdown(link, effective, state.v2Taxonomy ?: state.taxonomy)) },
+                            )
+                            PersonalTagsSection(linkId = id, baseUrl = state.apiBaseUrl, apiToken = state.preferences.apiToken,
+                                onChanged = { onLoadV2(id, true); onEnsureLink(id) }, onFlush = onFlushPersonal, editorDraft = personalEditor)
+                            if (enrichment != null) BookmarkCuration(id, enrichment, state.v2Taxonomy ?: state.taxonomy,
+                                id in state.busyIds, onLoadTaxonomy, onSaveCuration)
+                            val legacyActions = state.v2LegacyActions[id].orEmpty()
+                            if (legacyActions.isNotEmpty()) LegacyCurationRecoveryNotice(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken),
+                                legacyActions, onRecoverLegacyV2)
+                            }
+                        }
+                    }
                 }
-                item(key = "system_tags") {
-                    MultidimensionalCurationSection(
-                        linkId = id, taxonomy = state.v2Taxonomy ?: state.taxonomy,
-                        selection = state.v2Selections[id], draft = state.v2Drafts[id],
-                        conflictRevision = state.v2Conflicts[id], busy = id in state.v2Busy,
-                        queuedCount = state.v2Queued[id] ?: 0, available = state.v2Available,
-                        onLoadTaxonomy = onLoadV2Taxonomy, onAction = onV2Action,
-                        onReapply = onV2Reapply, onDiscard = onV2Discard, onFlush = onFlushV2,
-                        onExport = { onCopy(v2ExportMarkdown(link, state.v2Drafts[id] ?: state.v2Selections[id], state.v2Taxonomy ?: state.taxonomy)) },
-                    )
-                }
-                val legacyActions = state.v2LegacyActions[id].orEmpty()
-                if (legacyActions.isNotEmpty()) item(key = "legacy_curation") {
-                    LegacyCurationRecoveryNotice(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken),
-                        legacyActions, onRecoverLegacyV2)
-                }
+                state.offlineReads[id]?.let { cached -> item(key = "offline_state") {
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        val label = if (cached.verified && loadState != DetailLoadState.Failed) "离线正文已更新" else "本地缓存；云端版本尚未确认"
+                        Text("$label · ${java.time.Instant.ofEpochMilli(cached.savedAt).toString().shortDateTime()}${if (cached.expired()) " · 超过 7 天，请联网刷新" else ""}",
+                            style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("offline_read_status"))
+                        TextButton(onClick = { onOfflinePin(!cached.pinned) }, modifier = Modifier.testTag("offline_read_pin")) {
+                            Text(if (cached.pinned) "取消离线固定" else "固定离线正文")
+                        }
+                    }
+                } }
                 if (loadState == DetailLoadState.Loading) item(key = "loading") { LoadingState("正在加载归档内容...") }
                 if (loadState == DetailLoadState.Failed) item(key = "retry") {
                     TextButton(onClick = { onEnsureLink(id) }) { Text("读取归档内容失败，点击重试") }
@@ -1000,7 +1106,6 @@ private fun DetailScreen(
                         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Text(enrichment.statusLabel(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            BookmarkCuration(id, enrichment, state.v2Taxonomy ?: state.taxonomy, id in state.busyIds, onLoadTaxonomy, onSaveCuration)
                             LinkDetailSecondary(link)
                         }
                     }
@@ -1479,6 +1584,7 @@ private fun ColumnScope.LinkList(
     hasMore: Boolean = false,
     loadingMore: Boolean = false,
     onLoadMore: (() -> Unit)? = null,
+    taxonomy: com.alpenl.cairn.share.network.BookmarkTaxonomy? = null,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -1505,6 +1611,7 @@ private fun ColumnScope.LinkList(
             LinkRow(
                 link = link,
                 fifo = fifo,
+                taxonomy = taxonomy,
                 onClick = { onOpenLinkDetail(link) },
             )
         }
@@ -1535,12 +1642,13 @@ private fun ColumnScope.LinkList(
 private fun LinkRow(
     link: SavedLink,
     fifo: Boolean,
+    taxonomy: com.alpenl.cairn.share.network.BookmarkTaxonomy?,
     onClick: () -> Unit,
 ) {
     val title = remember(link.url, link.enrichment?.aiTitle) { link.displayTitle() }
     val metadata = remember(link.url, link.createdAt, fifo) { "${if (fifo) "入队" else link.hostLabel()} · ${link.createdAt.shortDateTime()}" }
     // 列表行以内容预览为主：优先摘要，其次是个人备注，不展示整理状态等标签。
-    val preview = link.enrichment?.summary?.takeIf { it.isNotBlank() }
+    val preview = link.searchExcerpt.takeIf { it.isNotBlank() } ?: link.enrichment?.summary?.takeIf { it.isNotBlank() }
         ?: link.note.ifBlank { link.enrichment?.why.orEmpty() }
     Surface(
         shape = MaterialTheme.shapes.large,
@@ -1585,6 +1693,10 @@ private fun LinkRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                val tags = readerTags(link, null, taxonomy)
+                if (tags.isNotEmpty()) Text(tags.take(2).joinToString(" · ") { it.label } + if (tags.size > 2) " +${tags.size - 2}" else "",
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("link_tags_${link.id}"))
             }
             StateDot(learned = link.learned)
         }

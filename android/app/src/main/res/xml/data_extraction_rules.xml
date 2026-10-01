@@ -2,8 +2,12 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="root" path="." />
+        <exclude domain="file" path="offline-reading-v1.json" />
+        <exclude domain="file" path="datastore/cairn_personal_tag_outbox.preferences_pb" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="root" path="." />
+        <exclude domain="file" path="offline-reading-v1.json" />
+        <exclude domain="file" path="datastore/cairn_personal_tag_outbox.preferences_pb" />
     </device-transfer>
 </data-extraction-rules>

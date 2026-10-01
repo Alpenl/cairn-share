@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <exclude domain="root" path="." />
+    <exclude domain="file" path="offline-reading-v1.json" />
+    <exclude domain="file" path="datastore/cairn_personal_tag_outbox.preferences_pb" />
 </full-backup-content>

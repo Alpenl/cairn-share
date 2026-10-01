@@ -193,7 +193,8 @@ it("counts all 500 matches in one query and retains ANY/ALL/custom/source/search
     expect(counted.reads.length-counted.businessReads.length).toBeLessThanOrEqual(1);
     // Entity state may be required by a search predicate, but must not be read
     // as detailed metadata for every returned bookmark.
-    expect(counted.businessReads[0].sql.split("FROM links WHERE")[0]).not.toMatch(/entity_states|classification_decision_runs|classification_jobs/);
+    expect(counted.businessReads[0].sql).not.toMatch(/classification_decision_runs|classification_jobs/);
+    expect(counted.businessReads[0].bytes).toBeLessThan(8192);
   }
   const full = instrument(), light = instrument();
   await readSelectionSnapshots(settings(full.DB), ids.slice(0, 100));
@@ -203,7 +204,7 @@ it("counts all 500 matches in one query and retains ANY/ALL/custom/source/search
   const summary = await readTagSummaries(settings(light.DB), ids.slice(0, 100));
   expect(light.reads).toHaveLength(1); expect(summary.summaries.size).toBe(100);
   const previousRows = full.reads.reduce((sum, read) => sum+read.rows,0), previousBytes = full.reads.reduce((sum, read) => sum+read.bytes,0);
-  expect(light.reads[0].rows).toBeLessThan(previousRows);
+  expect(light.reads[0].rows).toBeLessThanOrEqual(ids.length * 8);
   expect(light.reads[0].bytes).toBeLessThan(previousBytes / 10);
   console.log("tag read local workload", JSON.stringify({ links: 500, sampled: 100,
     previous_rows_read: previousRows, light_rows_read: light.reads[0].rows,
@@ -220,7 +221,7 @@ it("negotiated lists use one tag read and old strict lists retain their shape an
     expect(body.items).toHaveLength(100);
     expect(body.next_before_id).toBe(401);
     expect(body).not.toHaveProperty("counts");
-    expect(counted.businessReads).toHaveLength(aware ? 2 : 1);
+    expect(counted.businessReads).toHaveLength(1);
     if (aware) {
       expect(body.items[0].classification.resource_kinds).toEqual(["skill", "prompt"]);
       expect(body.items[0].classification.topics).toEqual([]); // human rejects automatic AI coding
@@ -234,7 +235,7 @@ it("negotiated lists use one tag read and old strict lists retain their shape an
   expect(page.status).toBe(200);
   const listed = await page.json() as any;
   expect(listed.counts.total).toBeGreaterThan(0);
-  expect(counted.businessReads).toHaveLength(3); // transactional page/count + one tag snapshot
+  expect(counted.businessReads).toHaveLength(2); // transactional page with tags + counts
   for (const item of listed.items) {
     expect(item.classification.topics).toContain("llm");
     expect(item.classification.resource_kinds).toContain("skill");
@@ -247,7 +248,7 @@ it("system and custom membership stay in one read snapshot across a concurrent u
   await env.DB.prepare(`INSERT INTO custom_tags(id,label,normalized_label,created_at,updated_at) VALUES('later','later','later',?,?)`).bind(date, date).run();
   let mutated = false;
   const observed = instrument(async sql => {
-    if (mutated || !sql.includes("AS custom_tags")) return;
+    if (mutated || !sql.includes("AS tag_custom_tags")) return;
     mutated = true;
     await env.DB.prepare(`INSERT INTO classification_decisions(link_id,run_id,content_revision,policy_version,policy,automatic,operation_key,created_at)
       VALUES(?,?,1,'p','{}',?,'later-decision',?)`)

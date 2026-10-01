@@ -28,9 +28,11 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.alpenl.cairn.share.network.V2CurationClient
 import com.alpenl.cairn.share.network.V2Result
+import com.alpenl.cairn.share.network.cancellableRead
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
@@ -65,6 +67,23 @@ internal data class PersonalTagHistoryEvent(
     val createdAt: String,
     val reversible: Boolean,
 )
+
+/** Kept by the reader while its editor is folded or a LazyColumn item is offscreen. */
+internal class PersonalTagEditorDraft {
+    val name = mutableStateOf("")
+    val editing = mutableStateOf(false)
+    val showingHistory = mutableStateOf(false)
+    val rename = mutableStateOf("")
+    companion object {
+        val saver = Saver<PersonalTagEditorDraft, String>(
+            save = { JSONObject().put("name", it.name.value).put("editing", it.editing.value).put("history", it.showingHistory.value).put("rename", it.rename.value).toString() },
+            restore = { value -> runCatching { JSONObject(value).let { json -> PersonalTagEditorDraft().apply {
+                name.value = json.optString("name"); editing.value = json.optBoolean("editing")
+                showingHistory.value = json.optBoolean("history"); rename.value = json.optString("rename")
+            } } }.getOrNull() },
+        )
+    }
+}
 
 private fun JSONObject.tagRevision(name: String): Long? {
     val value = opt(name) as? Number ?: return null
@@ -153,23 +172,6 @@ internal fun parsePersonalTagHistory(array: JSONArray?): List<PersonalTagHistory
                 operation.isNotBlank() && (0 until actions.length()).none { actions.optJSONObject(it)?.optString("action") == "undo" })
     }
 
-private data class PersonalTagRequest(
-    val path: String,
-    val method: String,
-    val body: String,
-    val attachCreated: Boolean = false,
-    val clearsName: Boolean = false,
-)
-
-private val PersonalTagRequestSaver = Saver<PersonalTagRequest?, String>(
-    save = { request -> request?.let { JSONObject().put("path", it.path).put("method", it.method).put("body", it.body)
-        .put("attach_created", it.attachCreated).put("clears_name", it.clearsName).toString() } },
-    restore = { stored -> runCatching {
-        val value = JSONObject(stored)
-        PersonalTagRequest(value.getString("path"), value.getString("method"), value.getString("body"), value.optBoolean("attach_created"), value.optBoolean("clears_name"))
-    }.getOrNull() },
-)
-
 /** Optional personal labels and history are independent of source availability. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -178,8 +180,13 @@ internal fun PersonalTagsSection(
     baseUrl: String,
     apiToken: String,
     onChanged: () -> Unit,
+    onFlush: () -> Unit = {},
+    editorDraft: PersonalTagEditorDraft? = null,
 ) {
+    val context = LocalContext.current.applicationContext
+    val outbox = remember(context) { PersonalTagOutbox(context) }
     val account = remember(baseUrl, apiToken) { accountKeyFor(baseUrl, apiToken) }
+    val draft = editorDraft ?: rememberSaveable(linkId, account, saver = PersonalTagEditorDraft.saver) { PersonalTagEditorDraft() }
     val client = remember(baseUrl, account) { V2CurationClient(baseUrl) }
     val parentScope = rememberCoroutineScope()
     val scope = remember(linkId, account) { CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job])) }
@@ -188,20 +195,21 @@ internal fun PersonalTagsSection(
     var catalog by remember(linkId, account) { mutableStateOf<List<PersonalTagDefinition>>(emptyList()) }
     var events by remember(linkId, account) { mutableStateOf<List<PersonalTagHistoryEvent>>(emptyList()) }
     var nextHistory by remember(linkId, account) { mutableStateOf<Long?>(null) }
-    var editing by rememberSaveable(linkId, account) { mutableStateOf(false) }
-    var showingHistory by rememberSaveable(linkId, account) { mutableStateOf(false) }
-    var name by rememberSaveable(linkId, account) { mutableStateOf("") }
+    var editing by draft.editing
+    var showingHistory by draft.showingHistory
+    var name by draft.name
     var busy by remember(linkId, account) { mutableStateOf(false) }
     var error by remember(linkId, account) { mutableStateOf<String?>(null) }
     var unsupported by remember(linkId, account) { mutableStateOf(false) }
-    var pending by rememberSaveable(linkId, account, stateSaver = PersonalTagRequestSaver) { mutableStateOf<PersonalTagRequest?>(null) }
+    var pendingRow by remember(linkId, account) { mutableStateOf<PendingPersonalTag?>(null) }
+    val pending = pendingRow?.request
     var conflicting by rememberSaveable(linkId, account) { mutableStateOf(false) }
     var refreshedAfterConflict by remember(linkId, account) { mutableStateOf(false) }
     var managing by remember(linkId, account) { mutableStateOf<PersonalTagDefinition?>(null) }
-    var rename by rememberSaveable(linkId, account) { mutableStateOf("") }
+    var rename by draft.rename
     var archiveConfirm by remember(linkId, account) { mutableStateOf(false) }
 
-    suspend fun loadSnapshot(): Boolean = when (val result = withContext(Dispatchers.IO) { client.loadTagSnapshot(linkId, apiToken) }) {
+    suspend fun loadSnapshot(): Boolean = when (val result = cancellableRead { client.loadTagSnapshot(linkId, apiToken, it) }) {
         is V2Result.Loaded -> {
             val parsed = parsePersonalTagSnapshot(result.value)
             if (parsed == null) { error = "标签结果暂时无法读取，请重试。"; false }
@@ -211,14 +219,14 @@ internal fun PersonalTagsSection(
         else -> { error = "标签读取失败，已有输入已保留。"; false }
     }
     suspend fun loadCatalog() {
-        when (val result = withContext(Dispatchers.IO) { client.tagRequest("/api/custom-tags", "GET", apiToken) }) {
+        when (val result = cancellableRead { client.tagRequest("/api/custom-tags", "GET", apiToken, cancellation = it) }) {
             is V2Result.Loaded -> catalog = parsePersonalTags(result.value.optJSONArray("tags"))
             else -> error = "自定义标记读取失败，请重试。"
         }
     }
     suspend fun loadHistory(append: Boolean = false) {
         val cursor = if (append) nextHistory?.let { "?before_id=$it" }.orEmpty() else ""
-        when (val result = withContext(Dispatchers.IO) { client.tagRequest("/api/bookmarks/$linkId/tag-history$cursor", "GET", apiToken) }) {
+        when (val result = cancellableRead { client.tagRequest("/api/bookmarks/$linkId/tag-history$cursor", "GET", apiToken, cancellation = it) }) {
             is V2Result.Loaded -> {
                 val incoming = parsePersonalTagHistory(result.value.optJSONArray("events"))
                 events = if (append) events + incoming else incoming
@@ -228,48 +236,28 @@ internal fun PersonalTagsSection(
         }
     }
     suspend fun execute(request: PersonalTagRequest) {
-        pending = request
         busy = true
         error = null
-        conflicting = false
-        refreshedAfterConflict = false
-        val result = withContext(Dispatchers.IO) { client.tagRequest(request.path, request.method, apiToken, JSONObject(request.body)) }
-        when (result) {
-            is V2Result.Loaded -> {
-                if (request.attachCreated) {
-                    val tag = result.value.optJSONObject("tag")
-                    val parsed = parsePersonalTags(JSONArray().put(tag)).singleOrNull()
-                    val current = snapshot
-                    if (parsed == null || current == null) {
-                        error = "标记已创建，但未能确认归属，请刷新后从列表添加。"
-                        pending = null
-                    } else {
-                        val attach = personalTagActionPayload(current, JSONObject().put("action", "attach").put("tag_ref", parsed.tagRef))
-                        execute(PersonalTagRequest("/api/bookmarks/$linkId/tags", "POST", attach.toString(), clearsName = true))
-                    }
-                } else {
-                    pending = null
-                    if (request.clearsName) name = ""
-                    managing = null
-                    archiveConfirm = false
-                    loadSnapshot()
-                    if (editing) loadCatalog()
-                    if (showingHistory) loadHistory()
-                    onChanged()
-                }
-            }
-            is V2Result.Conflict -> {
-                conflicting = true
-                error = "标签已被其他操作更新。输入已保留；请刷新后检查，再重新应用。"
-            }
-            V2Result.Unsupported -> { unsupported = true; error = "服务暂不支持此操作。" }
-            is V2Result.Failed -> error = "操作尚未确认，输入已保留。重试会使用同一次操作，不会重复添加。"
+        try {
+            val next = PendingPersonalTag(account, linkId, request)
+            val previous = pendingRow
+            if (previous != null && previous.request.operationKey != request.operationKey) {
+                check(previous.conflictRevision != null) // Only explicit conflict reapply changes a logical operation.
+                outbox.replace(previous, next)
+            } else outbox.enqueue(next)
+            pendingRow = next
+            conflicting = false
+            refreshedAfterConflict = false
+            onFlush()
+        } catch (_: Exception) {
+            error = "本地操作保存失败，输入已保留；请检查存储后重试。"
         }
         busy = false
     }
     fun submit(path: String, method: String, payload: JSONObject, attachCreated: Boolean = false, clearsName: Boolean = false) {
         if (busy || pending != null) return
-        scope.launch { execute(PersonalTagRequest(path, method, payload.toString(), attachCreated, clearsName)) }
+        scope.launch { execute(PersonalTagRequest(path, method, payload.toString(), attachCreated, clearsName,
+            attachmentSnapshot = if (attachCreated) snapshot else null)) }
     }
     fun apply(action: String, tag: PersonalTagDefinition) {
         val current = snapshot ?: return
@@ -295,6 +283,30 @@ internal fun PersonalTagsSection(
     }
 
     LaunchedEffect(linkId, account) { loadSnapshot(); if (editing) loadCatalog(); if (showingHistory) loadHistory() }
+    LaunchedEffect(linkId, account, outbox) {
+        try {
+            outbox.actions.collect { rows ->
+                val previous = pendingRow
+                val current = rows.firstOrNull { it.account == account && it.linkId == linkId }
+                pendingRow = current
+                conflicting = current?.conflictRevision != null
+                if (current != null) {
+                    val body = JSONObject(current.request.body)
+                    if (name.isBlank() && body.has("label")) name = body.getString("label")
+                    error = when {
+                        conflicting -> "标签已被其他操作更新。修改已保存在本地；请刷新后检查，再重新应用。"
+                        current.failure != null -> "操作尚未确认，已保存在本地；重启和重试会使用同一次操作。"
+                        else -> "修改已保存在本地，正在等待同步。"
+                    }
+                } else if (previous != null) {
+                    if (previous.request.clearsName) name = ""
+                    managing = null; archiveConfirm = false; error = null
+                    loadSnapshot(); if (editing) loadCatalog(); if (showingHistory) loadHistory()
+                    onChanged()
+                }
+            }
+        } catch (_: java.io.IOException) { error = "本地标签队列暂时无法读取；请检查存储后重试。" }
+    }
     Column(Modifier.fillMaxWidth().testTag("personal_tags"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (snapshot?.customTags?.isNotEmpty() == true) {
             Text("自定义标记", style = MaterialTheme.typography.labelLarge)
@@ -322,7 +334,7 @@ internal fun PersonalTagsSection(
         if (unsupported) Text("此服务版本暂不支持自定义标记和历史。", style = MaterialTheme.typography.bodySmall)
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         if (pending != null) FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            if (!conflicting) TextButton(onClick = { val request = pending ?: return@TextButton; scope.launch { execute(request) } }, enabled = !busy) { Text("重试本次操作") }
+            if (!conflicting) TextButton(onClick = onFlush, enabled = !busy) { Text("重试本次操作") }
             TextButton(onClick = {
                 scope.launch {
                     busy = true
@@ -338,7 +350,7 @@ internal fun PersonalTagsSection(
                 val request = rebasedRequest() ?: return@TextButton
                 scope.launch { execute(request) }
             }, enabled = !busy) { Text("重新应用草稿") }
-            TextButton(onClick = { pending = null; conflicting = false; error = null }, enabled = !busy) { Text("放弃本次操作") }
+            TextButton(onClick = { scope.launch { outbox.discard(account, linkId); conflicting = false; error = null } }, enabled = !busy) { Text("放弃重试并读取结果") }
         } else if (snapshot == null && !unsupported) TextButton(onClick = { scope.launch { loadSnapshot() } }, enabled = !busy) { Text("重新读取标签") }
         if (editing && !unsupported) {
             OutlinedTextField(value = name, onValueChange = { name = it.take(80) }, label = { Text("新标记名称") }, singleLine = true,

@@ -20,6 +20,7 @@ internal data class SavedLink(
     val learnedAt: String?,
     val enrichment: LinkEnrichment? = null,
     val customTags: List<CustomTag> = emptyList(),
+    val searchExcerpt: String = "",
 )
 
 internal data class CustomTag(
@@ -50,6 +51,13 @@ internal data class LinkPage(
     val nextBeforeId: Int?,
 )
 
+internal data class QueuePage(val items: List<SavedLink>, val nextCursor: String?, val total: Int)
+internal sealed interface QueuePageResult {
+    data class Loaded(val page: QueuePage) : QueuePageResult
+    data class Failed(val kind: FailureKind) : QueuePageResult
+    data object Unsupported : QueuePageResult
+}
+
 internal sealed interface LinkGetResult {
     data class Loaded(val link: SavedLink) : LinkGetResult
     data object NotFound : LinkGetResult
@@ -74,18 +82,20 @@ internal class LinksApiClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
-    fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null, filters: BookmarkFilters = BookmarkFilters(), filterTime: Instant = Instant.now()): LinkPageResult {
+    fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null, filters: BookmarkFilters = BookmarkFilters(), filterTime: Instant = Instant.now(), cancellation: ReadCancellation? = null): LinkPageResult {
         val endpoint = URL(listUrl(filter, query, beforeId, filters, filterTime))
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
             configure(connection, apiToken)
+            cancellation?.attach(connection)
 
             val status = connection.responseCode
             val body = responseBody(connection)
             when (status) {
                 HttpURLConnection.HTTP_OK -> if ((filters.needsEffectiveFilterContract() && JSONObject(body).opt("filter_contract_version") != 1) ||
-                    (filters.needsTagFilterContract() && connection.getHeaderField("X-Cairn-Tag-System") != "1")) {
+                    (filters.needsTagFilterContract() && connection.getHeaderField("X-Cairn-Tag-System") != "1") ||
+                    (filters.functionsMode == "all" && filters.contentFunctions.isNotEmpty() && connection.getHeaderField("X-Cairn-Content-Functions") != "1")) {
                     LinkPageResult.UnsupportedFilters
                 } else LinkPageResult.Loaded(LinkJson.decodePage(body))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> LinkPageResult.Failed(FailureKind.Unauthorized)
@@ -98,16 +108,18 @@ internal class LinksApiClient(
         } catch (_: JSONException) {
             LinkPageResult.Failed(FailureKind.Server)
         } finally {
+            cancellation?.release(connection)
             connection.disconnect()
         }
     }
 
-    fun get(id: Int, apiToken: String): LinkGetResult {
+    fun get(id: Int, apiToken: String, cancellation: ReadCancellation? = null): LinkGetResult {
         val endpoint = URL("${baseUrl.trimEnd('/')}/api/links/$id?include=enrichment&include_cache_identity=1")
         val connection = endpoint.openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "GET"
             configure(connection, apiToken)
+            cancellation?.attach(connection)
 
             val status = connection.responseCode
             val body = responseBody(connection)
@@ -124,8 +136,38 @@ internal class LinksApiClient(
         } catch (_: JSONException) {
             LinkGetResult.Failed(FailureKind.Server)
         } finally {
+            cancellation?.release(connection)
             connection.disconnect()
         }
+    }
+
+    fun queuePage(apiToken: String, cursor: String? = null, cancellation: ReadCancellation? = null): QueuePageResult {
+        val suffix = cursor?.let { "&cursor=${URLEncoder.encode(it, "UTF-8")}" }.orEmpty()
+        val connection = URL("${baseUrl.trimEnd('/')}/api/links/queue?limit=50&include=enrichment&include_cache_identity=1$suffix").openConnection() as HttpURLConnection
+        return try {
+            configure(connection, apiToken)
+            connection.setRequestProperty("X-Cairn-Queue", "1")
+            cancellation?.attach(connection)
+            when (connection.responseCode) {
+                HttpURLConnection.HTTP_OK -> if (connection.getHeaderField("X-Cairn-Queue") != "1") QueuePageResult.Unsupported else {
+                    val value = JSONObject(responseBody(connection))
+                    val rows = value.getJSONArray("links")
+                    val items = List(rows.length()) { LinkJson.decodeLink(rows.getJSONObject(it)) }
+                    val total = value.opt("total") as? Number ?: throw JSONException("Missing queue total")
+                    val next = value.opt("next_cursor").takeUnless { it == null || it == JSONObject.NULL }?.let { it as? String ?: throw JSONException("Invalid cursor") }
+                    val sorted = items.sortedWith(compareBy<SavedLink> { it.createdAt }.thenBy { it.id })
+                    if (total.toLong() < 0 || total.toDouble() != total.toInt().toDouble() || items.any { it.id <= 0 || it.learned } ||
+                        items.map { it.id }.distinct().size != items.size || items != sorted || (next != null && (next.isBlank() || next == cursor || items.isEmpty()))) throw JSONException("Invalid queue page")
+                    QueuePageResult.Loaded(QueuePage(items, next, total.toInt()))
+                }
+                HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD -> QueuePageResult.Unsupported
+                HttpURLConnection.HTTP_UNAUTHORIZED -> QueuePageResult.Failed(FailureKind.Unauthorized)
+                else -> QueuePageResult.Failed(FailureKind.Server)
+            }
+        } catch (_: SocketTimeoutException) { QueuePageResult.Failed(FailureKind.Timeout) }
+        catch (_: IOException) { QueuePageResult.Failed(FailureKind.Network) }
+        catch (_: JSONException) { QueuePageResult.Failed(FailureKind.Server) }
+        finally { cancellation?.release(connection); connection.disconnect() }
     }
 
     fun create(url: String, note: String, apiToken: String, clientId: String? = null): LinkCreateResult {
@@ -247,6 +289,8 @@ internal class LinksApiClient(
         connection.instanceFollowRedirects = false
         connection.setRequestProperty("Accept", "application/json")
         connection.setRequestProperty("X-Cairn-Tag-System", "1")
+        connection.setRequestProperty("X-Cairn-Content-Functions", "1")
+        connection.setRequestProperty("X-Cairn-Search-Summary", "1")
         connection.setRequestProperty("User-Agent", userAgent)
         if (apiToken.isNotBlank()) {
             connection.setRequestProperty("Authorization", "Bearer ${apiToken.trim()}")
@@ -260,10 +304,11 @@ internal class LinksApiClient(
         return stream?.use { it.reader(Charsets.UTF_8).readText() }.orEmpty()
     }
 
-    fun taxonomy(apiToken: String): TaxonomyResult {
+    fun taxonomy(apiToken: String, cancellation: ReadCancellation? = null): TaxonomyResult {
         val connection = URL("${baseUrl.trimEnd('/')}/api/taxonomy").openConnection() as HttpURLConnection
         return try {
             configure(connection, apiToken)
+            cancellation?.attach(connection)
             when (connection.responseCode) {
                 HttpURLConnection.HTTP_OK -> TaxonomyResult.Loaded(decodeTaxonomy(JSONObject(responseBody(connection))))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> TaxonomyResult.Failed(FailureKind.Unauthorized)
@@ -276,6 +321,7 @@ internal class LinksApiClient(
         } catch (_: JSONException) {
             TaxonomyResult.Failed(FailureKind.Server)
         } finally {
+            cancellation?.release(connection)
             connection.disconnect()
         }
     }
@@ -351,6 +397,7 @@ internal object LinkJson {
             learnedAt = json.optString("learned_at").takeUnless { it.isBlank() || it == "null" },
             enrichment = json.optJSONObject("enrichment")?.let(::decodeEnrichment),
             customTags = decodeCustomTags(json.optJSONArray("custom_tags")),
+            searchExcerpt = json.optString("search_excerpt").take(240),
         )
 
     private fun decodeCustomTags(values: JSONArray?): List<CustomTag> =

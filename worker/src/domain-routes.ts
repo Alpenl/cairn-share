@@ -1,14 +1,17 @@
+import { readJSONObject } from "./json-body";
 import { entityCacheRoute } from "./entity-cache";
 import {validEntityObservations,type EntityBlock} from "./entity-judgments";
 import { classificationBudgetRoute } from "./classification-budget";
+import { classificationAttemptsRoute } from "./classification-attempts";
 import { readSelectionSnapshot, readSelectionSnapshots } from "./selection-state";
 import type { RequestD1Stats } from "./observability";
 import { extensionBudgetRoute } from "./extension-budget";
 import { rerankCacheRoute } from "./rerank-cache";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
+import { hydrateRunPayload, type ArchivedPayloadRow } from "./run-archive";
 import type { Env } from "./index";
-import { taxonomyV2, type V2Selection } from "./taxonomy-v2";
+import { taxonomyV2, classificationTaxonomy, type V2Selection } from "./taxonomy-v2";
 import { storedClassification, taxonomy, type Classification } from "./curation";
 import {
   canonicalJSON, contentHash, effectiveView, EMPTY_AUTOMATIC, normalizeField, objectivePayload,
@@ -22,12 +25,7 @@ const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body)
 const fail = (code: string, status = 400, extra: Record<string, unknown> = {}) => reply({ error: code, ...extra }, status);
 
 async function bodyOf(request: Request): Promise<Record<string, unknown> | null> {
-  const contentType = request.headers.get("Content-Type") ?? "";
-  if (!contentType.toLowerCase().startsWith("application/json")) return null;
-  try {
-    const value: unknown = JSON.parse(await request.text());
-    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-  } catch { return null; }
+  return readJSONObject(request, new URL(request.url).pathname.endsWith("/evidence") ? 8 << 20 : 1 << 20);
 }
 
 const text = (value: unknown, max: number): value is string =>
@@ -53,6 +51,8 @@ export async function domainRoute(request: Request, env: Env, path: string, obse
   if (entityCached) return entityCached;
   const classificationBudget = await classificationBudgetRoute(request, env, path);
   if (classificationBudget) return classificationBudget;
+  const attempts = await classificationAttemptsRoute(request, env, path);
+  if (attempts) return attempts;
   const cache = await rerankCacheRoute(request, env, path);
   if (cache) return cache;
   const reservation = await extensionBudgetRoute(request, env, path);
@@ -82,10 +82,13 @@ export async function domainRoute(request: Request, env: Env, path: string, obse
   // --- Runs and decisions -------------------------------------------------
   match = path.match(/^\/api\/v2\/links\/(\d+)\/runs$/);
   if (match) {
-    if (request.method === "GET") return listRuns(env, Number(match[1]));
+    if (request.method === "GET") return listRuns(request, env, Number(match[1]));
     if (request.method !== "POST") return fail("method_not_allowed", 405);
     return submitRun(request, env, Number(match[1]));
   }
+
+  match = path.match(/^\/api\/v2\/links\/(\d+)\/runs\/(\d+)$/);
+  if (match) return request.method === "GET" ? runDetail(request, env, Number(match[1]), Number(match[2])) : fail("method_not_allowed", 405);
 
   match = path.match(/^\/api\/v2\/links\/(\d+)\/decisions$/);
   if (match) {
@@ -93,6 +96,9 @@ export async function domainRoute(request: Request, env: Env, path: string, obse
     if (request.method !== "POST") return fail("method_not_allowed", 405);
     return submitDecision(request, env, Number(match[1]));
   }
+
+  match = path.match(/^\/api\/v2\/links\/(\d+)\/policy-replays$/);
+  if (match) return request.method === "POST" ? submitDecision(request, env, Number(match[1]), true) : fail("method_not_allowed", 405);
 
   // --- Human overrides and curation operations ----------------------------
   match = path.match(/^\/api\/v2\/links\/(\d+)\/overrides$/);
@@ -467,7 +473,7 @@ async function putSpec(request: Request, env: Env): Promise<Response> {
 
 // --- Runs -------------------------------------------------------------------
 
-type RunRow = {
+type RunRow = ArchivedPayloadRow & {
   id: number; content_revision: number; spec_id: string; spec_hash: string; target_generation: number;
   requested_model: string; resolved_model: string; policy_version: string; policy: string;
   answers: string; usage: string; attempt: number; operation_key: string; coverage: string;
@@ -498,19 +504,51 @@ function runView(row: RunRow): Record<string, unknown> {
   };
 }
 
-async function listRuns(env: Env, id: number): Promise<Response> {
+const runColumns = `id, content_revision, spec_id, spec_hash, target_generation, requested_model, resolved_model,
+  policy_version, attempt, operation_key, coverage, evidence_coverage, alias_drift, status, created_at, evidence_snapshot_id, source_hash`;
+function runSummary(row: RunRow) {
+  const value = runView(row);
+  for (const key of ["policy", "answers", "usage", "raw_judgments", "operation_key"]) delete value[key];
+  return { ...value, archived: !!row.archive_key };
+}
+async function runDetail(request: Request, env: Env, id: number, runId: number): Promise<Response> {
+  if (request.headers.get("X-Cairn-Run-History") !== "1") return fail("capability_mismatch", 409);
+  if (new URL(request.url).searchParams.size) return fail("invalid_query");
+  const row = await env.DB.prepare(`SELECT ${runColumns},policy,answers,usage,raw_judgments,archive_key,archive_hash,archive_bytes
+    FROM classification_runs WHERE link_id=? AND id=?`).bind(id, runId).first<RunRow>();
+  if (!row) return fail("not_found", 404);
+  try {
+    const response = reply({ ...runView(await hydrateRunPayload(env, row)), archived: !!row.archive_key });
+    response.headers.set("X-Cairn-Run-History", "1"); return response;
+  } catch { return fail("run_archive_unavailable", 503); }
+}
+async function listRuns(request: Request, env: Env, id: number): Promise<Response> {
+  const params = new URL(request.url).searchParams, modern = request.headers.get("X-Cairn-Run-History") === "1";
+  if (params.size && !modern) return fail("capability_mismatch", 409);
+  if (modern && ([...params.keys()].some(k => !["view", "limit", "after_id"].includes(k) || params.getAll(k).length !== 1) ||
+    params.get("view") !== "summary")) return fail("invalid_query");
+  const limit = params.has("limit") ? Number(params.get("limit")) : 50;
+  const after = params.has("after_id") ? Number(params.get("after_id")) : null;
+  if (modern && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || after !== null && (!Number.isSafeInteger(after) || after < 1))) return fail("invalid_query");
+  const payload = modern ? "'{}' AS policy,'{}' AS answers,'{}' AS usage,NULL AS raw_judgments" : "policy,answers,usage,raw_judgments";
   const rows = await env.DB.prepare(
-    `SELECT id, content_revision, spec_id, spec_hash, target_generation, requested_model, resolved_model,
-            policy_version, policy, answers, usage, attempt, operation_key, coverage, evidence_coverage,
-            alias_drift, status, created_at, raw_judgments, evidence_snapshot_id, source_hash
+    `SELECT * FROM (SELECT ${runColumns},${payload},archive_key,archive_hash,archive_bytes
      FROM classification_runs WHERE link_id = ?
      UNION ALL
      SELECT run_id AS id, content_revision, spec_id, spec_hash, target_generation, requested_model, resolved_model,
-            policy_version, '{}' AS policy, '{}' AS answers, '{}' AS usage, attempt, operation_key, coverage,
-            evidence_coverage, alias_drift, 'expired' AS status, created_at, NULL AS raw_judgments,
-            NULL AS evidence_snapshot_id, source_hash
-     FROM classification_run_tombstones WHERE link_id = ? ORDER BY id`).bind(id, id).all<RunRow>();
-  return reply({ runs: rows.results.map(runView) });
+            policy_version,attempt,operation_key,coverage,evidence_coverage,alias_drift,'expired' AS status,created_at,
+            NULL AS evidence_snapshot_id,source_hash,'{}' AS policy,'{}' AS answers,'{}' AS usage,NULL AS raw_judgments,
+            NULL AS archive_key,NULL AS archive_hash,NULL AS archive_bytes
+     FROM classification_run_tombstones WHERE link_id = ?) ${modern && after !== null ? "WHERE id<?" : ""}
+     ORDER BY id ${modern ? "DESC" : "ASC"} LIMIT ?`).bind(id, id, ...(modern && after !== null ? [after] : []), modern ? limit + 1 : 1001).all<RunRow>();
+  if (modern) {
+    const page = rows.results.slice(0, limit), response = reply({ runs: page.map(runSummary),
+      next_after_id: rows.results.length > limit ? page[page.length - 1].id : null });
+    response.headers.set("X-Cairn-Run-History", "1"); return response;
+  }
+  if (rows.results.length > 1000) return fail("history_requires_pagination", 413);
+  try { return reply({ runs: await Promise.all(rows.results.map(async row => runView(await hydrateRunPayload(env, row)))) }); }
+  catch { return fail("run_archive_unavailable", 503); }
 }
 
 async function submitRun(request: Request, env: Env, id: number): Promise<Response> {
@@ -622,20 +660,21 @@ export function decisionInsertStatement(env: Env, decision: {
   linkId: number; runOperationKey: string; contentRevision: number; policyVersion: string; policy: unknown;
   automatic: AutomaticView; operationKey: string; createdAt: string; payloadHash: string;
   runIDs?: number[]; personalRevision?: number;
+  policyHash?: string; replayTargetGeneration?: number;
 }, guard: WriteGuard, ignoreConflict = true): D1PreparedStatement {
   // The run is appended in the same batch, so its id is resolved by the
   // operation key rather than by a pre-read that a concurrent writer could
   // invalidate; the same guard proves the run actually landed.
   return env.DB.prepare(
     `INSERT INTO classification_decisions(link_id, run_id, content_revision, policy_version, policy, automatic, operation_key, created_at, payload_hash,
-       run_ids, run_references_complete, expected_personal_revision, payload_version)
-     SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, json_array(r.id)), 1, ?, 1
+       run_ids, run_references_complete, expected_personal_revision, payload_version,policy_hash,replay_target_generation)
+     SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, json_array(r.id)), 1, ?, 1,?,?
      FROM classification_runs r WHERE r.operation_key = ? AND ${guard.sql}
      ${ignoreConflict ? "ON CONFLICT(operation_key) DO NOTHING" : ""} RETURNING id`
   ).bind(decision.linkId, decision.contentRevision, decision.policyVersion,
     canonicalJSON(decision.policy), canonicalJSON(decision.automatic), decision.operationKey,
     decision.createdAt, decision.payloadHash, decision.runIDs ? JSON.stringify(decision.runIDs) : null,
-    decision.personalRevision ?? null, decision.runOperationKey, ...guard.bindings);
+    decision.personalRevision ?? null, decision.policyHash ?? null, decision.replayTargetGeneration ?? null, decision.runOperationKey, ...guard.bindings);
 }
 
 // --- Decisions --------------------------------------------------------------
@@ -664,9 +703,27 @@ interface DecisionRun {
   id: number; content_revision: number; spec_id: string; spec_hash: string; requested_model: string;
   resolved_model: string; coverage: string; status: string; operation_key: string; target_generation: number;
   evidence_snapshot_id: number | null; source_hash: string | null; raw_judgments: string | null;
+  wire_evidence_hash: string | null;
 }
 
-async function submitDecision(request: Request, env: Env, id: number): Promise<Response> {
+function validReplayPolicy(value: Record<string, unknown>): boolean {
+  const allowed = ["version", "calibrated", "topic_accept", "topic_reject", "choice_accept", "choice_margin", "max_display_topics",
+    "max_effective_topics", "allow_alias_drift", "block_personal_use", "min_primary_tags", "max_primary_tags", "function_support_accept"];
+  if (Object.keys(value).some(k => !allowed.includes(k)) || typeof value.calibrated !== "boolean" || typeof value.allow_alias_drift !== "boolean" ||
+    value.block_personal_use !== true || !["topic_accept", "topic_reject", "choice_accept", "choice_margin"].every(k =>
+      typeof value[k] === "number" && Number(value[k]) >= 0 && Number(value[k]) <= 1) ||
+    Number(value.topic_reject) > Number(value.topic_accept) ||
+    !["max_display_topics", "max_effective_topics"].every(k => Number.isSafeInteger(value[k]) && Number(value[k]) >= 1 && Number(value[k]) <= 64) ||
+    Number(value.max_display_topics) > Number(value.max_effective_topics)) return false;
+  const density = ["min_primary_tags", "max_primary_tags", "function_support_accept"].some(k => value[k] !== undefined && value[k] !== 0);
+  if (["jev-policy-v2", "jev-policy-v3"].includes(String(value.version)) && density) return false;
+  return !(value.version === "jev-policy-v4" || density) ||
+    Number.isSafeInteger(value.min_primary_tags) && Number.isSafeInteger(value.max_primary_tags) && Number(value.min_primary_tags) >= 1 &&
+    Number(value.max_primary_tags) >= 2 && Number(value.min_primary_tags) <= Number(value.max_primary_tags) && Number(value.max_primary_tags) <= 64 &&
+    typeof value.function_support_accept === "number" && value.function_support_accept > Number(value.topic_reject) && value.function_support_accept <= Number(value.topic_accept);
+}
+
+async function submitDecision(request: Request, env: Env, id: number, policyReplay = false): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
   if (!Array.isArray(body.run_ids) || body.run_ids.length === 0 || body.run_ids.length > 64 ||
@@ -684,6 +741,12 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
   const runIDs = [...body.run_ids].sort((a, b) => a - b) as number[];
   const automatic = normalizeAutomatic(body.automatic as Record<string, unknown>);
   if (!automatic) return fail("invalid_automatic");
+  if (policyReplay && (!text(body.operation_key, 200) || !Number.isSafeInteger(body.expected_revision) ||
+    !Number.isSafeInteger(body.content_revision) || !Number.isSafeInteger(body.expected_target_generation) || Number(body.expected_target_generation) < 0 ||
+    !text(body.spec_id, 64) || !text(body.spec_hash, 128) || !text(body.requested_model, 200) || !text(body.resolved_model, 200) ||
+    !body.policy || typeof body.policy !== "object" || Array.isArray(body.policy) ||
+    (body.policy as Record<string, unknown>).version !== body.policy_version || !validReplayPolicy(body.policy as Record<string, unknown>) ||
+    body.policy_hash !== await sha256Hex(canonicalJSON(body.policy)))) return fail("invalid_policy_replay");
   const operationKey = text(body.operation_key, 200) ? body.operation_key : `decision-${id}-${runIDs.join("-")}-${body.policy_version}`;
   const legacyPayload = {
     link_id: id, run_ids: runIDs, policy_version: body.policy_version, policy: body.policy ?? {},
@@ -691,15 +754,18 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
   };
   const payloadHash = await sha256Hex(canonicalJSON({ ...legacyPayload,
     spec_hash: body.spec_hash ?? null, resolved_model: body.resolved_model ?? null,
-    content_revision: body.content_revision ?? null, expected_revision: body.expected_revision ?? null
+    content_revision: body.content_revision ?? null,
+    ...(policyReplay ? { policy_hash: body.policy_hash, expected_target_generation: body.expected_target_generation }
+      : { expected_revision: body.expected_revision ?? null })
   }));
   // Confirm a successful logical operation BEFORE testing mutable current state.
   // The acknowledgement describes its stored decision; effective is today's view.
   const existingResponse = async (): Promise<Response | null> => {
     const row = await env.DB.prepare(`SELECT id,link_id,payload_hash,payload_version,run_id,run_ids,
-      run_references_complete,expected_personal_revision,policy_version FROM classification_decisions WHERE operation_key=?`)
+      run_references_complete,expected_personal_revision,policy_version,policy_hash,replay_target_generation FROM classification_decisions WHERE operation_key=?`)
       .bind(operationKey).first<{ id: number; link_id: number; payload_hash: string; payload_version: number;
-        run_id: number; run_ids: string | null; run_references_complete: number; expected_personal_revision: number | null; policy_version: string }>();
+        run_id: number; run_ids: string | null; run_references_complete: number; expected_personal_revision: number | null; policy_version: string;
+        policy_hash: string | null; replay_target_generation: number | null }>();
     if (!row) return null;
     const hash = row.payload_version === 0 ? await sha256Hex(canonicalJSON(legacyPayload)) : payloadHash;
     if (row.link_id !== id || row.payload_hash !== hash) return fail("operation_conflict", 409);
@@ -710,7 +776,8 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
     const view = await computeEffective(env, id);
     return reply({ id, run_ids: parseJSON(row.run_ids ?? JSON.stringify([row.run_id]), []),
       run_references_complete: row.run_references_complete === 1, revision: row.expected_personal_revision,
-      policy_version: row.policy_version, decision_id: row.id, effective: view.view, replayed: true });
+      policy_version: row.policy_version, decision_id: row.id, effective: view.view, replayed: true,
+      ...(policyReplay ? { policy_hash: row.policy_hash, target_generation: row.replay_target_generation } : {}) });
   };
   const existing = await existingResponse();
   if (existing) return existing;
@@ -722,7 +789,7 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
   }
   if (body.content_revision !== undefined && body.content_revision !== link.content_revision) return fail("run_stale", 409);
   const runs = await env.DB.prepare(`SELECT id,content_revision,spec_id,spec_hash,requested_model,resolved_model,
-    coverage,status,operation_key,target_generation,evidence_snapshot_id,source_hash,raw_judgments
+    coverage,status,operation_key,target_generation,evidence_snapshot_id,source_hash,raw_judgments,wire_evidence_hash
     FROM classification_runs WHERE link_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY id`)
     .bind(id, JSON.stringify(runIDs)).all<DecisionRun>();
   if (runs.results.length !== runIDs.length) return fail("unknown_run", 409, { found: runs.results.map((run) => run.id) });
@@ -737,13 +804,24 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
         (body.requested_model !== undefined && body.requested_model !== run.requested_model)) return fail("run_model_mismatch", 409, { run_id: run.id });
   }
   const primary = runs.results[0];
+  const target = policyReplay ? await env.DB.prepare(`SELECT t.* FROM classification_target_state s
+    JOIN classification_targets t ON t.generation=s.generation WHERE s.id=1`).first<{
+      generation: number; spec_id: string; spec_hash: string; requested_model: string; taxonomy_version: string; policy_version: string;
+    }>() : null;
+  if (policyReplay && (!target || body.expected_target_generation !== target.generation)) return fail("target_changed", 409);
+  if (policyReplay && target && (primary.spec_id !== target.spec_id || primary.spec_hash !== target.spec_hash ||
+    primary.requested_model !== target.requested_model)) return fail("run_identity_mismatch", 409);
+  if (policyReplay && target && !validReplayAutomatic(automatic, target.taxonomy_version)) return fail("invalid_automatic");
+  if (policyReplay && await env.DB.prepare(`SELECT 1 FROM classification_jobs WHERE link_id=? AND status='processing' AND lease_until>?`)
+    .bind(id, new Date().toISOString()).first()) return fail("classification_in_progress", 409);
   const wireHash = (run: DecisionRun): string | null => {
     const raw = parseJSON(run.raw_judgments ?? "null", null) as Record<string, unknown> | null;
-    return raw?.metadata_version === 1 && text(raw.evidence_hash, 64) ? raw.evidence_hash : null;
+    return raw?.metadata_version === 1 && text(raw.evidence_hash, 64) ? raw.evidence_hash : run.wire_evidence_hash;
   };
   const identity = (run: DecisionRun) => canonicalJSON([run.spec_id, run.spec_hash, run.resolved_model,
     run.content_revision, run.target_generation, run.source_hash, wireHash(run)]);
   if (runs.results.some((run) => identity(run) !== identity(primary))) return fail("run_identity_mismatch", 409);
+  if (policyReplay && (!primary.source_hash || !wireHash(primary) || runs.results.some(run => !run.evidence_snapshot_id))) return fail("run_identity_unknown", 409);
   // Old single-run policy replays remain possible with honest unknown provenance.
   // Combining unknown input identities cannot prove that the material was the same.
   if (runIDs.length > 1 && (!primary.source_hash || !wireHash(primary) || runs.results.some((run) => !run.evidence_snapshot_id))) {
@@ -768,13 +846,18 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
           AND cr.spec_id=json_extract(p.value,'$.spec_id') AND cr.spec_hash=json_extract(p.value,'$.spec_hash')
           AND cr.requested_model=json_extract(p.value,'$.requested_model') AND cr.resolved_model=json_extract(p.value,'$.resolved_model')
           AND cr.target_generation=json_extract(p.value,'$.target_generation')
-          AND cr.target_generation=(SELECT generation FROM classification_target_state WHERE id=1)
+          ${policyReplay ? `AND (SELECT generation FROM classification_target_state WHERE id=1)=${Number(target!.generation)}
+            AND EXISTS (SELECT 1 FROM classification_targets active WHERE active.generation=${Number(target!.generation)}
+              AND active.spec_id=cr.spec_id AND active.spec_hash=cr.spec_hash AND active.requested_model=cr.requested_model)
+            AND NOT EXISTS (SELECT 1 FROM classification_jobs busy WHERE busy.link_id=cr.link_id
+              AND busy.status='processing' AND busy.lease_until>strftime('%Y-%m-%dT%H:%M:%fZ','now'))`
+            : "AND cr.target_generation=(SELECT generation FROM classification_target_state WHERE id=1)"}
           AND EXISTS (SELECT 1 FROM classification_targets ct WHERE ct.generation=cr.target_generation
             AND (ct.protocol='legacy' OR (ct.spec_id=cr.spec_id AND ct.spec_hash=cr.spec_hash)))
           AND cr.source_hash IS json_extract(p.value,'$.source_hash')
           AND cr.evidence_snapshot_id IS json_extract(p.value,'$.evidence_snapshot_id')
-          AND (CASE WHEN json_extract(cr.raw_judgments,'$.metadata_version')=1
-            THEN json_extract(cr.raw_judgments,'$.evidence_hash') END) IS json_extract(p.value,'$.wire_hash')
+          AND COALESCE(CASE WHEN json_extract(cr.raw_judgments,'$.metadata_version')=1
+            THEN json_extract(cr.raw_judgments,'$.evidence_hash') END,cr.wire_evidence_hash) IS json_extract(p.value,'$.wire_hash')
           AND ((cr.evidence_snapshot_id IS NULL AND cr.source_hash IS NULL) OR EXISTS (
             SELECT 1 FROM evidence_snapshots es WHERE es.id=cr.evidence_snapshot_id AND es.link_id=cr.link_id
               AND es.content_revision=cr.content_revision AND es.content_hash=cr.source_hash)))=?
@@ -782,13 +865,31 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
     bindings: [id, link.content_revision, link.personal_revision, JSON.stringify(pinned), id, link.content_revision,
       runIDs.length, ...inputGuard.bindings]
   };
-  const result = await env.DB.batch([decisionInsertStatement(env, {
+  const statements = [decisionInsertStatement(env, {
     linkId: id, runOperationKey: primary.operation_key, contentRevision: link.content_revision,
     policyVersion: body.policy_version, policy: body.policy ?? {}, automatic, runIDs, personalRevision: link.personal_revision,
-    operationKey, createdAt: new Date().toISOString(), payloadHash
+    operationKey, createdAt: new Date().toISOString(), payloadHash,
+    ...(policyReplay ? { policyHash: String(body.policy_hash), replayTargetGeneration: target!.generation } : {})
   }, guard), ...projectionWrites(env, id, link.personal_revision, futureView, futureAutomatic, true,
     link.content_revision, false, 0, snapshot.projectionInput.classification,
-    decisionProjectionGuard(id, snapshot, operationKey, payloadHash))]);
+    decisionProjectionGuard(id, snapshot, operationKey, payloadHash))];
+  // A policy experiment is a real decision but does not claim that a different
+  // deployed target has been completed. Only an exact target-policy replay can
+  // satisfy its queue item; the original provider run remains immutable.
+  if (policyReplay && target && body.policy_version === target.policy_version) statements.push(env.DB.prepare(`INSERT INTO classification_jobs(link_id,status,target_generation,spec_id,
+      taxonomy_version,policy_version,requested_model,content_revision,evidence_snapshot_id,evidence_hash,updated_at)
+    SELECT ?,'completed',?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM links WHERE id=? AND content_revision=? AND personal_revision=?)
+      AND (SELECT generation FROM classification_target_state WHERE id=1)=?
+      AND EXISTS(SELECT 1 FROM classification_decisions WHERE link_id=? AND operation_key=? AND payload_hash=?)
+      AND NOT EXISTS(SELECT 1 FROM classification_jobs WHERE link_id=? AND status='processing' AND lease_until>?)
+    ON CONFLICT(link_id) DO UPDATE SET status='completed',target_generation=excluded.target_generation,spec_id=excluded.spec_id,
+      taxonomy_version=excluded.taxonomy_version,policy_version=excluded.policy_version,requested_model=excluded.requested_model,
+      content_revision=excluded.content_revision,evidence_snapshot_id=excluded.evidence_snapshot_id,evidence_hash=excluded.evidence_hash,
+      revision=classification_jobs.revision+1,attempts=0,lease_token=NULL,lease_until=NULL,next_retry_at=NULL,error=NULL,updated_at=excluded.updated_at`)
+    .bind(id, target.generation, target.spec_id, target.taxonomy_version, String(body.policy_version), target.requested_model,
+      link.content_revision, primary.evidence_snapshot_id, primary.source_hash, new Date().toISOString(),
+      id, link.content_revision, link.personal_revision, target.generation, id, operationKey, payloadHash, id, new Date().toISOString()));
+  const result = await env.DB.batch(statements);
   if (!result[0].results.length) {
     const concurrent = await existingResponse();
     if (concurrent) return concurrent;
@@ -799,7 +900,21 @@ async function submitDecision(request: Request, env: Env, id: number): Promise<R
   const decisionID = Number((result[0].results[0] as { id: number }).id);
   const view = await computeEffective(env, id);
   return reply({ id, run_ids: runIDs, run_references_complete: true, revision: link.personal_revision,
-    policy_version: body.policy_version, decision_id: decisionID, effective: view.view, replayed: false });
+    policy_version: body.policy_version, decision_id: decisionID, effective: view.view, replayed: false,
+    ...(policyReplay ? { policy_hash: body.policy_hash, target_generation: target!.generation } : {}) });
+}
+
+function validReplayAutomatic(automatic: AutomaticView, version: string): boolean {
+  const catalog = classificationTaxonomy(version);
+  if (!catalog) return false;
+  for (const field of ["topics", "resource_kinds", "content_functions", "carriers", "affordances"] as const) {
+    const terms = catalog[field] ?? [], values = automatic[field] ?? [];
+    if (new Set(values).size !== values.length || values.some(value => !terms.some(term => term.id === value && term.active && !term.deprecated))) return false;
+  }
+  return ["form", "use"].every(field => {
+    const value = automatic[field as "form" | "use"];
+    return value === "" || (catalog[field === "form" ? "forms" : "uses"] ?? []).some(term => term.id === value && term.active && !term.deprecated);
+  });
 }
 
 function normalizeAutomatic(value: Record<string, unknown>): AutomaticView | null {

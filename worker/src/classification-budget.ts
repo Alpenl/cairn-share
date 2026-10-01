@@ -95,7 +95,13 @@ export async function classificationBudgetRoute(request: Request, env: Env, path
     SELECT 'classification_item',?,?,?,? WHERE EXISTS(SELECT 1 FROM budget_ledger WHERE operation_key=? AND json_extract(units,'$.payload_hash')=?)
     AND EXISTS(SELECT 1 FROM links WHERE id=?) ON CONFLICT(operation_key) DO NOTHING`)
     .bind(body.link_id,units,operationKey+":item",now,operationKey,payloadHash,body.link_id);
-  const result=await env.DB.batch([global,item]);
+  const reservation=env.DB.prepare(`INSERT INTO classification_reservations(reservation_key,link_id,payload_hash,identity,created_at)
+    SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM budget_ledger WHERE operation_key=? AND json_extract(units,'$.payload_hash')=?)
+      AND EXISTS(SELECT 1 FROM budget_ledger WHERE operation_key=? AND link_id=? AND json_extract(units,'$.payload_hash')=?)
+      AND EXISTS(SELECT 1 FROM links WHERE id=?) ON CONFLICT(reservation_key) DO NOTHING`)
+    .bind(body.operation_key,body.link_id,payloadHash,canonicalJSON(body),now,operationKey,payloadHash,
+      operationKey+":item",body.link_id,payloadHash,body.link_id);
+  const result=await env.DB.batch([global,item,reservation]);
   const stored=await env.DB.prepare("SELECT units FROM budget_ledger WHERE operation_key=?").bind(operationKey).first<{units:string}>();
   if(stored && JSON.parse(stored.units).payload_hash!==payloadHash)return fail("operation_conflict",409);
   if(Number(result[0].meta.changes)===1)return reply({granted:true,reason:"reserved"});

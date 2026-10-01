@@ -20,50 +20,33 @@ type Row = { id: number; personal_revision: number; content_revision: number; cl
   legacy: string | null; entity: string | null; queue: string | null; evidence: string | null };
 
 export type SummaryCustomTag = { id: string; owner_id: string; label: string; revision: number; status: string };
-type TagSummaryRow = { id: number; automatic: string; overrides: string; legacy: string | null; custom_tags: string };
+export type TagSummary = { topics: string[]; resource_kinds: string[]; content_functions: string[]; custom_tags: SummaryCustomTag[] };
+export type TagSummaryRow = { tag_topics: string; tag_resources: string; tag_functions: string; tag_custom_tags: string };
 
-// Lists need effective membership, not the detailed assessment, evidence,
-// entity observations or run coverage. Fold the same authoritative inputs in
-// one bounded read, keeping custom membership in that read snapshot as well.
-// The JSON id parameter also avoids D1's per-statement bind limit on big pages.
+// Membership is maintained transactionally from canonical facts by 0049.
+// Ordering is the automatic order followed by surviving manual action order.
+export function tagSummaryColumns(alias = "links", ownerSQL = "'default'"): string {
+  const terms = (field: string, name: string) => `(SELECT json_group_array(term) FROM
+    (SELECT term FROM effective_tag_memberships WHERE link_id=${alias}.id AND field='${field}' ORDER BY position,term)) AS ${name}`;
+  return `${terms("topics", "tag_topics")},${terms("resource_kinds", "tag_resources")},${terms("content_functions", "tag_functions")},
+    (SELECT json_group_array(json_object('id',t.id,'owner_id',t.owner_id,'label',t.label,'revision',t.revision,'status',t.status))
+      FROM (SELECT t.id,t.owner_id,t.label,t.revision,t.status FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id
+        WHERE a.link_id=${alias}.id AND t.owner_id=${ownerSQL} ORDER BY t.label,t.id) t) AS tag_custom_tags`;
+}
+export function tagSummaryFromRow(row: TagSummaryRow): TagSummary {
+  return { topics: strings(parse(row.tag_topics, [])), resource_kinds: strings(parse(row.tag_resources, [])),
+    content_functions: strings(parse(row.tag_functions, [])), custom_tags: parse<SummaryCustomTag[]>(row.tag_custom_tags, []) };
+}
 export async function readTagSummaries(env: Env,
   selection: number[] | { clauses: string[]; bindings: Array<string | number> }, owner = "default") {
   const ids = Array.isArray(selection) ? selection : null;
-  if (ids && !ids.length) return { summaries: new Map<number, { topics: string[]; resource_kinds: string[]; content_functions: string[]; custom_tags: SummaryCustomTag[] }>() };
+  if (ids && !ids.length) return { summaries: new Map<number, TagSummary>() };
   const filters = Array.isArray(selection) ? null : selection;
   const where = ids ? "links.id IN (SELECT value FROM json_each(?))" : filters!.clauses.join(" AND ") || "1";
   const bindings = ids ? [JSON.stringify(ids)] : filters!.bindings;
-  const rows = await env.DB.prepare(`SELECT links.id,
-    COALESCE((SELECT json_object('topics',json_extract(CASE WHEN json_valid(d.automatic) THEN d.automatic ELSE '{}' END,'$.topics'),
-      'resource_kinds',json_extract(CASE WHEN json_valid(d.automatic) THEN d.automatic ELSE '{}' END,'$.resource_kinds'),
-      'content_functions',json_extract(CASE WHEN json_valid(d.automatic) THEN d.automatic ELSE '{}' END,'$.content_functions')) FROM classification_decisions d
-      WHERE d.link_id=links.id ORDER BY d.id DESC LIMIT 1),
-      json_object('topics',json_extract(CASE WHEN json_valid(links.classification) THEN links.classification ELSE '{}' END,'$.topics'))) AS automatic,
-    (SELECT json_group_array(json_object('field',o.field,'term',o.term,'action',o.action,
-      'source',o.source,'confirmed',o.confirmed,'revision',o.revision)) FROM
-      (SELECT field,term,action,source,confirmed,revision FROM curation_overrides
-        WHERE link_id=links.id AND field IN ('topics','topic','resource_kinds','resource_kind','content_functions','content_function') ORDER BY revision,id) o) AS overrides,
-    (SELECT json_object('id',h.id,'payload',h.payload,'revision',h.revision,'provenance',h.provenance)
-      FROM legacy_curation_history h WHERE h.link_id=links.id ORDER BY h.id DESC LIMIT 1) AS legacy,
-    (SELECT json_group_array(json_object('id',t.id,'owner_id',t.owner_id,'label',t.label,'revision',t.revision,'status',t.status))
-      FROM (SELECT t.id,t.owner_id,t.label,t.revision,t.status FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id
-        WHERE a.link_id=links.id AND t.owner_id=? ORDER BY t.label,t.id) t) AS custom_tags
-    FROM links WHERE ${where} ORDER BY links.id DESC`).bind(owner, ...bindings).all<TagSummaryRow>();
-  const summaries = new Map(rows.results.map(row => {
-    const generated = parse<Record<string, unknown>>(row.automatic, {});
-    const automatic = { ...EMPTY_AUTOMATIC, topics: strings(generated.topics), resource_kinds: strings(generated.resource_kinds),
-      content_functions: strings(generated.content_functions) };
-    const overrides = parse<Array<Omit<Override, "confirmed"> & { confirmed: number }>>(row.overrides, [])
-      .flatMap((entry): Override[] => {
-        const field = normalizeField(entry.field);
-        return field ? [{ ...entry, field, confirmed: entry.confirmed === 1 }] : [];
-      });
-    const legacy = legacyOverrides(parse<Legacy | null>(row.legacy, null)).filter(entry => entry.field === "topics");
-    const view = effectiveView(automatic, [...legacy, ...overrides]);
-    return [row.id, { topics: view.topics, resource_kinds: view.resource_kinds ?? [], content_functions: view.content_functions,
-      custom_tags: parse<SummaryCustomTag[]>(row.custom_tags, []) }] as const;
-  }));
-  return { summaries, meta: rows.meta };
+  const rows = await env.DB.prepare(`SELECT links.id,${tagSummaryColumns("links", "?")}
+    FROM links WHERE ${where} ORDER BY links.id DESC`).bind(owner, ...bindings).all<TagSummaryRow & { id: number }>();
+  return { summaries: new Map(rows.results.map(row => [row.id, tagSummaryFromRow(row)])), meta: rows.meta };
 }
 
 // The reading endpoint extends the same statement that folds the effective
@@ -96,7 +79,7 @@ function legacyOverrides(source: Legacy | null): Override[] {
 // One SQLite statement gives every value and its identity the same read
 // snapshot. Separate awaited SELECTs can attach revision N+1 to values from N,
 // even when every individual query is correct. Never read mutable projections.
-function selectionSQL(where: string, includeReading: boolean): string {
+function selectionSQL(where: string, includeReading: boolean, extraColumns = ""): string {
   return `SELECT l.id,l.personal_revision,l.content_revision,l.classification,l.why,l.curation_status,
     (SELECT json_object('id',d.id,'content_revision',d.content_revision,'automatic',d.automatic,'policy_version',d.policy_version,
       'run_references_complete',d.run_references_complete,'runs',
@@ -116,7 +99,7 @@ function selectionSQL(where: string, includeReading: boolean): string {
     (SELECT json_object('status',j.status,'content_revision',j.content_revision) FROM classification_jobs j WHERE j.link_id=l.id) AS queue,
     (SELECT json_object('id',s.id,'content_hash',s.content_hash,'truncated',s.truncated,'completeness',s.completeness)
       FROM evidence_snapshots s WHERE s.link_id=l.id AND s.content_revision=l.content_revision) AS evidence
-    ${includeReading ? readingColumns : ""}
+    ${includeReading ? readingColumns : ""}${extraColumns}
     FROM links l WHERE ${where}`;
 }
 
@@ -134,6 +117,28 @@ export async function readSelectionSnapshots(env: Env, ids: number[],
     .bind(...ids).all<Row>();
   const result = timer ? await timer.measure("db", query) : await query();
   return { snapshots: new Map(result.results.map((row) => [row.id, selectionFromRow(row)])), meta: result.meta };
+}
+
+// One statement captures selection, origin state, URL/note, custom definitions,
+// total and the collection version. A delete/edit cannot split an exported row
+// across read snapshots. Pagination validates this version in the route.
+export async function readSelectionExport(env: Env, filters: { clauses: string[]; bindings: Array<string | number> },
+  limit: number, beforeId?: number) {
+  const matched = filters.clauses.join(" AND ") || "1";
+  const rowsSQL = selectionSQL(`l.id IN (SELECT id FROM matched)${beforeId ? " AND l.id<?" : ""}`, false,
+    `,l.url,l.note,${tagSummaryColumns("l")}`) + " ORDER BY l.id DESC LIMIT ?";
+  const fields = ["id", "personal_revision", "content_revision", "classification", "why", "curation_status", "decision",
+    "overrides", "legacy", "entity", "queue", "evidence", "url", "note", "tag_topics", "tag_resources", "tag_functions", "tag_custom_tags"];
+  const rowJSON = fields.map(field => `'${field}',e.${field}`).join(",");
+  const envelope = await env.DB.prepare(`WITH matched AS MATERIALIZED (SELECT id FROM links WHERE ${matched})
+    SELECT COALESCE((SELECT value FROM cache_metadata WHERE key='links_generation'),0) AS version,
+      (SELECT COUNT(*) FROM matched) AS total,
+      (SELECT json_group_array(json_object(${rowJSON})) FROM (${rowsSQL}) e) AS rows`)
+    .bind(...filters.bindings, ...(beforeId ? [beforeId] : []), limit)
+    .first<{ version: number; total: number; rows: string }>();
+  const rows = parse<Array<Row & TagSummaryRow & { url: string; note: string }>>(envelope?.rows ?? null, []);
+  return { version: envelope?.version ?? 0, total: envelope?.total ?? 0,
+    rows: rows.map(row => ({ row, snapshot: selectionFromRow(row), custom_tags: tagSummaryFromRow(row).custom_tags })) };
 }
 
 function selectionFromRow(link: Row) {

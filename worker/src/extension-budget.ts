@@ -1,3 +1,4 @@
+import { readBoundedJSON, JSONBodyError } from "./json-body";
 import type { Env } from "./index";
 import { canonicalJSON } from "./domain";
 
@@ -25,10 +26,9 @@ export async function extensionBudgetRoute(request: Request, env: Env, path: str
   if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) return fail("invalid_content_type");
   let body: Record<string, unknown>;
   try {
-    const raw = await request.text();
-    if (new TextEncoder().encode(raw).length > 8192) return fail("request_too_large", 413);
-    body = JSON.parse(raw);
-  } catch { return fail("invalid_json"); }
+    body = await readBoundedJSON(request, 8192) as Record<string, unknown>;
+  } catch (cause) { return cause instanceof JSONBodyError && cause.code === "request_too_large"
+    ? fail("request_too_large", 413) : fail("invalid_json"); }
   if (!body || typeof body !== "object" || Array.isArray(body) ||
     Object.keys(body).some(k => !["operation_key", "kind", "item_ids", "tokens", "limits"].includes(k))) return fail("invalid_reservation");
   const limits = body.limits as typeof EXTENSION_LIMITS;

@@ -93,6 +93,12 @@ async function checkUpgrade(cases: Awaited<ReturnType<typeof seed>>[]) {
   // 0030 adds an explicitly empty provenance column to legacy entity rows.
   // Every previously stored field must still remain byte-for-byte unchanged.
   before.entity_states=(before.entity_states as Record<string,unknown>[]).map(row=>({...row,observations:"[]"}));
+  // 0050 adds derived archive/audit identity columns without changing any
+  // existing authoritative payload or human source record.
+  before.classification_runs=(before.classification_runs as Record<string,unknown>[]).map(row=>({...row,
+    archive_key:null,archive_hash:null,archive_bytes:null,archived_at:null,wire_evidence_hash:null}));
+  before.classification_decisions=(before.classification_decisions as Record<string,unknown>[]).map(row=>({...row,
+    policy_hash:null,replay_target_generation:null}));
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   expect(await immutable()).toEqual(before);
   for (const { id, expected, noDecision } of cases) {

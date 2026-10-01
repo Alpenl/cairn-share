@@ -302,7 +302,8 @@ class ShareActivityInstrumentedTest {
             compose.waitUntil(5_000) {
                 runCatching { compose.onNodeWithTag("library_filter_status").assertTextContains("服务暂不支持完整筛选", substring = true); true }.getOrDefault(false)
             }
-            compose.onAllNodesWithTag("link_99").assertCountEquals(0)
+            compose.onAllNodesWithTag("link_99").assertCountEquals(1)
+            compose.onNodeWithTag("library_filter_status").assertTextContains("上一次条件的结果", substring = true)
             compose.onNodeWithText("清除筛选").performClick()
             compose.onAllNodesWithTag("library_filter_status").assertCountEquals(0)
         }

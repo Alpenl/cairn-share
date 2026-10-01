@@ -1,3 +1,4 @@
+import { readJSONObject } from "./json-body";
 import { readSelectionSnapshot } from "./selection-state";
 import type { Env } from "./index";
 import { computeEffective, persistSelectionOverrides, rebuildProjection, selectionOperationReceipt } from "./domain-routes";
@@ -13,11 +14,7 @@ const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body)
 const fail = (code: string, status = 400, extra: Record<string, unknown> = {}) => reply({ error: code, ...extra }, status);
 
 async function bodyOf(request: Request): Promise<Record<string, unknown> | null> {
-  if (!(request.headers.get("Content-Type") ?? "").toLowerCase().startsWith("application/json")) return null;
-  try {
-    const value: unknown = JSON.parse(await request.text());
-    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-  } catch { return null; }
+  return readJSONObject(request, 64 << 10);
 }
 
 const text = (value: unknown, max: number): value is string =>
