@@ -177,9 +177,11 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 - “链接详情”“编辑链接”“检查更新”“API 调试台”“关于”是独立下钻页面，应用栏返回和
   系统返回逐级退出。
 - “链接库”提供总览、搜索、筛选、周进度、链接详情入口和手动添加 FAB。
-- “整理筛选”提供主题、形态、用途、来源、整理状态、待确认和近 7/30 天条件。
-- 详情展示 AI 标题、摘要、原文/译文切换、归档图片和相关链接；支持填写收藏原因、确认分类和恢复自动分类。
-- “待学习”只展示未学习链接，按收藏时间先进先读，并支持批量标记已学习。
+- “整理筛选”优先展示主题、资源类型、内容特征与可选自定义标记，支持同组任一／全部匹配；保留来源、整理状态、待确认和时间条件。切换条件保留上次结果并显示更新状态，过期请求会取消。
+- 详情以正文为主，标签编辑默认折叠；支持原帖入口、收藏原因、逐标签确认／排除／恢复自动，收起编辑器会保留尚未提交的草稿。
+- 最近阅读正文与固定收藏保存为有容量上限、按访问凭据隔离的本地副本；断网时显示保存时间与离线状态。最近记录最多 30 条、固定最多 20 条，总预算 16 MiB；并非全库或图片离线镜像。
+- 自定义标记的创建、挂载及修改使用持久操作队列；重试保留原操作身份，版本冲突保留输入，避免响应丢失后重复创建。
+- “待学习”使用服务端按收藏时间排序的未学习队列、分页与全库计数，并支持批量标记已学习。
 - “待上传队列”展示尚未同步的本地链接，支持逐条重试、全部重试和移除。
 - “设置”展示只读服务器地址、访问 Token、分享偏好、更新入口、API 调试台入口和关于入口。
 - 系统 `ACTION_SEND` 不进入应用壳，而是打开透明 Activity 上的 Material bottom sheet。
@@ -269,12 +271,16 @@ Cloudflare 配置位于 `worker/wrangler.jsonc`：
 - Custom domain：`share.alpenl.com`
 - Worker secrets：`CAIRN_API_TOKEN`、`CAIRN_ENRICHER_TOKEN`；付费尝试人工核对另需独立的 `CAIRN_OPERATOR_TOKEN`
 
-发布包含 Worker 协议或 migration 的 Android 版本前，需要先手动运行 `deploy-worker.yml`；
-它会先测试，再迁移 D1 并部署。也可以在本地手动部署：
+发布包含 Worker 协议或 migration 的 Android 版本前，先验证对应 Enricher 提交的
+`deploy/stack-contract.json` 固定了本仓库完整提交，且其真实 Worker/D1 集成 CI 通过。
+`deploy-worker.yml` 要求填写该 Enricher 提交并确认 NAS 已停止领取任务，随后执行测试、
+记录恢复点与预算、迁移 D1、部署、只读合同检查，再保存发布记录。
 
-本次 App 同步需要全部迁移，截至 `0008_invalidate_enriched_link_cache.sql`。
-0007 提供分类和人工整理字段，0008 在富化或整理更新的同一事务内递增缓存版本。
-先迁移并部署 Worker，再升级 Enricher 和 Android；现有记录、人工分类和上传队列会保留。
+当前代码需要截至 `0050_classification_audit_archive.sql` 的全部迁移。0049 在事实写入事务内
+维护有效标签索引；0050 为分类历史冷归档及失败调用凭据增加结构。迁移不会重新分类收藏。
+先备份并停止 NAS 领取任务，迁移并部署 Worker，再升级 Enricher 和 Android。
+完整备份、版本固定与失败恢复步骤见伴随仓库的 `docs/deployment.md`。
+以下命令仅是部署动作，不能替代这些发布检查；已有 secrets 不需要重复设置。
 
 ```bash
 cd worker
@@ -290,6 +296,15 @@ repository/environment secrets：
 
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_API_TOKEN`
+- `CAIRN_ENRICHER_TOKEN`（发布后的只读合同验收）
+
+只有 Cloudflare 本地登录、尚未配置 GitHub 部署凭据时，应在本地执行相同的发布门禁：
+`scripts/release-record.mjs before <私有目录>`、迁移／`npm run deploy -- --tag "$RELEASE_COMMIT"`、
+`scripts/release-smoke.mjs <私有结果文件>`、`scripts/release-record.mjs after <私有目录>`。
+记录脚本在 `worker/` 目录运行；显式设置 `RELEASE_COMMIT` 为已验证的完整 Share SHA、
+`ENRICHER_REVISION` 为配套完整 SHA。发布后记录会验证 100% 活跃版本的 tag 与源码相符；
+失败记录也会先保存恢复材料再报错。只读验收通过环境变量 `CAIRN_RELEASE_TOKEN` 读取内部凭据。
+不要将短期 Wrangler OAuth 凭据复制成长期 CI secret。
 
 Cloudflare API token 应使用最小权限，只授予部署该 Worker 和迁移该 D1 所需能力。
 `CAIRN_API_TOKEN` 是应用访问 API 用的 Bearer token；`CAIRN_ENRICHER_TOKEN` 只供
@@ -326,7 +341,7 @@ GitHub secret 值。
 - 它不进入 Android 安装包。App 通过 `include=enrichment` 读取增强内容，通过公共 curation
   接口整理收藏；默认 `/api/links` 六字段响应及原有鉴权仍兼容旧客户端。
 - 本仓库维护 D1 migration、两组独立鉴权的 API、R2 绑定和 Android 阅读/整理界面。
-- App 修改链接的 URL 或备注时，已有增强结果会失效并重新入队。
+- App 修改 URL 时，来源失效并重新入队；只修改备注会保留已有正文、译文和图片。
 
 部署顺序、环境变量和 NAS compose 清单以该仓库的 `README.md`、`docs/deployment.md` 和
 `deploy/nas/compose.yaml` 为准，本仓库不重复维护。
@@ -374,8 +389,8 @@ GitHub Release 只上传 APK 和 `SHA256SUMS`。本项目不自动上传 Google 
 - `ci.yml`：Worker typecheck/test/dry-run，Android unit/lint/build/instrumentation 编译，
   上传 debug APK。
 - `device.yml`：KVM emulator 上运行 API 26 和 API 35 的 `connectedDebugAndroidTest`。
-- `deploy-worker.yml`：手动触发，受 `production` Environment 保护，先测试和 dry-run，
-  再执行远程 D1 migration 和 Worker deploy。
+- `deploy-worker.yml`：手动触发，受 `production` Environment 保护；固定跨仓版本、确认任务已停止领取，
+  运行测试、备份元数据、远程迁移／部署及不调用模型的只读验收。
 - `release-android.yml`：稳定 `vX.Y.Z` tag 触发，签名、校验并发布 APK。
 - `dependabot.yml`：维护 npm、Gradle 和 Actions 依赖更新。
 

@@ -101,12 +101,12 @@ internal fun MultidimensionalCurationSection(
         val newTags = taxonomy.resourceKinds.isNotEmpty()
         DimensionRow("主题", "topics", taxonomy.topics.filter { it.active || it.id in effective.topics }.map { it.id to it.label }, effective.topics, busy, onAction, known = "topics" !in effective.unknownResetFields, state = effective.state?.fields?.get("topics"), pending = "topics" in effective.pendingFields, separateRemoval = newTags)
         if (newTags) DimensionRow("资源类型", "resource_kinds", taxonomy.resourceKinds.filter { it.active || it.id in effective.resourceKinds }.map { it.id to it.label }, effective.resourceKinds, busy, onAction, known = "resource_kinds" !in effective.unknownResetFields, state = effective.state?.fields?.get("resource_kinds"), pending = "resource_kinds" in effective.pendingFields, separateRemoval = true)
+        DimensionRow("内容功能", "content_functions", taxonomy.contentFunctions.map { it.id to it.label }, effective.contentFunctions, busy, onAction, known = "content_functions" !in effective.unknownResetFields, state = effective.state?.fields?.get("content_functions"), pending = "content_functions" in effective.pendingFields, separateRemoval = newTags)
         var showSecondary by remember(linkId) { mutableStateOf(false) }
         if (newTags) TextButton(onClick = { showSecondary = !showSecondary }) {
             Text(if (showSecondary) "收起其他属性" else "其他属性")
         }
         if (!newTags || showSecondary) {
-        DimensionRow("内容功能", "content_functions", taxonomy.contentFunctions.map { it.id to it.label }, effective.contentFunctions, busy, onAction, known = "content_functions" !in effective.unknownResetFields, state = effective.state?.fields?.get("content_functions"), pending = "content_functions" in effective.pendingFields)
         DimensionRow("载体", "carriers", taxonomy.carriers.map { it.id to it.label }, effective.carriers, busy, onAction, singleValue = true, known = "carriers" !in effective.unknownResetFields, state = effective.state?.fields?.get("carriers"), pending = "carriers" in effective.pendingFields)
         DimensionRow("潜在用途", "affordances", taxonomy.affordances.map { it.id to it.label }, effective.affordances, busy, onAction, known = "affordances" !in effective.unknownResetFields, state = effective.state?.fields?.get("affordances"), pending = "affordances" in effective.pendingFields)
         Text("潜在用途描述内容可以用来做什么，不代表你的收藏意图。", style = MaterialTheme.typography.bodySmall)

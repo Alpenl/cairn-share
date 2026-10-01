@@ -1,6 +1,7 @@
 package com.alpenl.cairn.share
 
 import android.content.Intent
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.test.core.app.ActivityScenario
@@ -79,6 +80,8 @@ class V2CurationInstrumentedTest {
             runCatching { compose.onNodeWithTag("link_4").assertExists(); true }.getOrDefault(false)
         }
         compose.onNodeWithTag("link_4").performClick()
+        compose.waitUntil(20_000) { runCatching { compose.onNodeWithTag("reader_curation_toggle").assertExists(); true }.getOrDefault(false) }
+        compose.onNodeWithTag("reader_curation_toggle").performClick()
         compose.waitUntil(20_000) {
             runCatching {
                 compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_section"))
@@ -105,7 +108,7 @@ class V2CurationInstrumentedTest {
                         override.set(JSONObject(request.body.readUtf8()))
                         response(JSONObject("""{"id":4,"field":"topics","term":"llm","action":"reject","revision":4,"replayed":false}"""))
                     }
-                    else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+                    else -> MockResponse().setResponseCode(404)
                 }
             }
         }
@@ -146,7 +149,7 @@ class V2CurationInstrumentedTest {
                             "media" to "媒体", "law" to "法律", "edu" to "教育", "history" to "历史", "science" to "科学",
                             "city" to "城市", "life" to "生活", "eval" to "评估")) put(JSONObject().put("id", id).put("label", label).put("active", true))
                     }))
-                    else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+                    else -> MockResponse().setResponseCode(404)
                 }
             }
         }
@@ -196,7 +199,7 @@ class V2CurationInstrumentedTest {
                     "/api/bookmarks/4" -> response(link(4))
                     "/api/bookmarks/4/v2-selection" -> response(fixture)
                     "/api/v2-taxonomy" -> response(taxonomy())
-                    else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+                    else -> MockResponse().setResponseCode(404)
                 }
             }
         }
@@ -254,7 +257,7 @@ class V2CurationInstrumentedTest {
                             response(JSONObject("""{"id":4,"field":"topics","term":"llm","action":"reject","revision":10,"replayed":false}"""))
                         }
                     }
-                    else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+                    else -> MockResponse().setResponseCode(404)
                 }
             }
         }
@@ -285,9 +288,13 @@ class V2CurationInstrumentedTest {
 
     @Test fun legacyActionsNeedTheVisibleOwnershipConfirmation() {
         val received = AtomicReference<JSONObject>()
+        val lastLibraryToken = AtomicReference<String>()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
-                "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                "/api/links" -> {
+                    lastLibraryToken.set(request.getHeader("Authorization"))
+                    response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                }
                 "/api/bookmarks/4" -> response(link(4))
                 "/api/bookmarks/4/v2-selection" -> response(selection(3))
                 "/api/v2-taxonomy" -> response(taxonomy())
@@ -298,7 +305,7 @@ class V2CurationInstrumentedTest {
                     assertEquals(3L, body.getLong("expected_revision"))
                     response(JSONObject("""{"id":4,"field":"topics","term":"llm","action":"reject","operation_key":"legacy-reviewed","revision":4,"replayed":false}"""))
                 }
-                else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+                else -> MockResponse().setResponseCode(404)
             }
         }
         val intent = start()
@@ -309,30 +316,39 @@ class V2CurationInstrumentedTest {
         ActivityScenario.launch<LauncherActivity>(intent).use {
             openDetailAndLoadTaxonomy()
             compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_legacy_review"))
-            compose.onNodeWithTag("v2_legacy_review").performClick()
+            compose.onNodeWithTag("v2_legacy_review").performSemanticsAction(SemanticsActions.OnClick) { it() }
             compose.onNodeWithText("主题：移除 llm").assertExists()
             assertNull(received.get())
             compose.onNodeWithText("暂不恢复").performClick()
             assertEquals(1, runBlocking { CurationActionStore(context).snapshot().size })
-            compose.onNodeWithTag("v2_legacy_review").performClick()
+            compose.onNodeWithTag("v2_legacy_review").performSemanticsAction(SemanticsActions.OnClick) { it() }
             // An open confirmation belongs to the account shown when opened.
             // Even an old suffix collision must dismiss it on account change.
             runBlocking { SharePreferencesStore(context).setApiToken("different-$token") }
+            compose.waitUntil(20_000) { lastLibraryToken.get() == "Bearer different-$token" }
             compose.waitUntil(20_000) {
                 runCatching { compose.onNodeWithTag("v2_legacy_confirm").assertDoesNotExist(); true }.getOrDefault(false)
             }
             assertNull(received.get())
             runBlocking { SharePreferencesStore(context).setApiToken(token) }
+            compose.waitUntil(20_000) { lastLibraryToken.get() == "Bearer $token" }
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("reader_curation_toggle"))
+                compose.onNodeWithTag("reader_curation_toggle").assertTextContains("标签与备注")
+                true
+            }.getOrDefault(false) }
+            // Changing the active account resets the reader's editor to folded.
+            compose.onNodeWithTag("reader_curation_toggle").performSemanticsAction(SemanticsActions.OnClick) { it() }
             compose.waitUntil(20_000) {
                 // Switching accounts temporarily removes this LazyColumn item.
                 // Its restored position can be outside the composed viewport.
                 runCatching {
                     compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_legacy_review"))
-                    compose.onNodeWithTag("v2_legacy_review").assertIsDisplayed()
+                    compose.onNodeWithTag("v2_legacy_review").assertExists()
                     true
                 }.getOrDefault(false)
             }
-            compose.onNodeWithTag("v2_legacy_review").performClick()
+            compose.onNodeWithTag("v2_legacy_review").performSemanticsAction(SemanticsActions.OnClick) { it() }
             compose.onNodeWithTag("v2_legacy_confirm").performClick()
             compose.waitUntil(20_000) { received.get() != null }
             compose.waitUntil(20_000) { runBlocking { CurationActionStore(context).snapshot().isEmpty() } }
@@ -351,7 +367,7 @@ class V2CurationInstrumentedTest {
                     received.set(JSONObject(request.body.readUtf8()))
                     MockResponse().setResponseCode(503)
                 }
-                else -> response(JSONObject("""{"items":[],"counts":{}}"""))
+                else -> MockResponse().setResponseCode(404)
             }
         }
         ActivityScenario.launch<LauncherActivity>(start()).use {

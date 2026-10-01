@@ -204,7 +204,8 @@ class AccountCacheInstrumentedTest {
         }
         awaitState(model) { !it.libraryLoading && it.libraryStatusText.contains("分页响应无效") }
         withContext(Dispatchers.Main) {
-            assertTrue(model.uiState.libraryResults.isEmpty())
+            assertEquals("invalid new paging retains the explicitly stale previous result", listOf(200), model.uiState.libraryResults.map { it.id })
+            assertTrue(model.uiState.libraryStale)
             assertNull(model.uiState.libraryNextBeforeId)
             model.loadMoreLibraryResults()
             model.setBookmarkFilters(BookmarkFilters())
@@ -588,7 +589,9 @@ class AccountCacheInstrumentedTest {
         awaitState(model) { it.links.size == 4 && !it.loading }
         withContext(Dispatchers.Main) { model.setSearchQuery("match") }
         awaitState(model) { it.searchResults.size == 4 && !it.searchLoading }
-        withContext(Dispatchers.Main) { model.setSearchQuery("match") }
+        // Explicit refresh invalidates the short exact-query cache and starts
+        // the delayed network read this race regression needs.
+        withContext(Dispatchers.Main) { model.refreshLinks() }
         assertTrue(entered.await(10, TimeUnit.SECONDS))
         withContext(Dispatchers.Main) {
             model.beginEdit(model.uiState.links.first { it.id == 1 })
@@ -629,7 +632,7 @@ class AccountCacheInstrumentedTest {
         awaitState(model) { it.links.size == 4 && !it.loading }
         withContext(Dispatchers.Main) { model.setSearchQuery("match") }
         awaitState(model) { it.searchResults.map { row -> row.id } == listOf(8) && !it.searchLoading }
-        withContext(Dispatchers.Main) { model.setSearchQuery("match") }
+        withContext(Dispatchers.Main) { model.refreshLinks() }
         assertTrue(entered.await(10, TimeUnit.SECONDS))
         val removed = AtomicInteger()
         withContext(Dispatchers.Main) { model.deleteLink(8) { removed.incrementAndGet() } }

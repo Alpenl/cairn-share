@@ -23,7 +23,8 @@ private val Context.curationActionDataStore by preferencesDataStore("cairn_curat
  * stable operation key is idempotent and safe to retry. The queue survives a
  * process death so a user edit made offline is not lost.
  */
-internal class CurationActionStore(private val context: Context) : CurationQueue {
+internal class CurationActionStore(context: Context) : CurationQueue {
+    internal val context = context.applicationContext
     // Shared by recreated ViewModels; enqueue remains independent of network IO.
     val syncMutex get() = SYNC_MUTEX
 

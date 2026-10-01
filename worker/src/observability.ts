@@ -88,7 +88,7 @@ async function limitedJSON(request: Request): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY_BYTES) throw new Error("body too large");
+      if (size > MAX_BODY_BYTES) { await reader.cancel(); throw new Error("body too large"); }
       chunks.push(value);
     }
   } finally {

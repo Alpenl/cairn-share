@@ -1,7 +1,10 @@
+import { encodeCursor, decodeCursor } from "./cursor";
+import { readJSONObject } from "./json-body";
+import { tagQuality } from "./tag-quality";
 import { bookmarkFilters, type Env } from "./index";
 import { canonicalJSON, compactOverrides, effectiveView, normalizeField, type Override, type OverrideField, type OverrideAction } from "./domain";
 import { projectionInputGuard, projectionWrites, rebuildProjection } from "./domain-routes";
-import { readSelectionSnapshot, readSelectionSnapshots, readTagSummaries } from "./selection-state";
+import { readSelectionSnapshot, readSelectionExport, readTagSummaries, tagSummaryFromRow, type TagSummaryRow, type TagSummary } from "./selection-state";
 import { selectionPayload } from "./taxonomy-routes";
 import { findTerm, taxonomyV2, normalizeTerm } from "./taxonomy-v2";
 
@@ -16,9 +19,8 @@ type Custom = { id: string; owner_id: string; label: string; revision: number; s
 const ref = (tag: Custom) => `custom/${tag.owner_id}/${tag.id}`;
 const tagged = (tag: Custom) => ({ id: tag.id, owner_id: tag.owner_id, label: tag.label, revision: tag.revision,
   status: tag.status, tag_ref: ref(tag), ...(tag.link_count === undefined ? {} : { link_count: tag.link_count }) });
-async function bodyOf(request: Request) {
-  if (!(request.headers.get("Content-Type") ?? "").toLowerCase().startsWith("application/json")) return null;
-  try { const body: unknown = await request.json(); return object(body) ? body : null; } catch { return null; }
+async function bodyOf(request: Request): Promise<Record<string, unknown> | null> {
+  return readJSONObject(request, 64 << 10);
 }
 async function hash(value: unknown) {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalJSON(value)));
@@ -49,8 +51,17 @@ export async function attachTagSummaries(env: Env, items: Array<Record<string, u
   if (!items.length) return items;
   const ids = items.map(item => Number(item.id));
   const { summaries } = await readTagSummaries(env, ids, owner);
+  return projectTagSummaries(items, item => summaries.get(Number(item.id)), internal, includeContentFunctions);
+}
+export function projectTagSummaryRows(items: Array<Record<string, unknown>>, rows: Array<TagSummaryRow & { id: number }>,
+  internal = false, includeContentFunctions = false) {
+  const summaries = new Map(rows.map(row => [row.id, tagSummaryFromRow(row)]));
+  return projectTagSummaries(items, item => summaries.get(Number(item.id)), internal, includeContentFunctions);
+}
+function projectTagSummaries(items: Array<Record<string, unknown>>, summaryOf: (item: Record<string, unknown>) => TagSummary | undefined,
+  internal: boolean, includeContentFunctions: boolean) {
   return items.map(item => {
-    const summary = summaries.get(Number(item.id));
+    const summary = summaryOf(item);
     if (!summary) return item;
     const enrichment = object(item.enrichment) ? { ...item.enrichment } : null;
     const classification = (value: unknown) => {
@@ -363,55 +374,55 @@ async function queryTags(request: Request, env: Env, mode: "counts" | "export") 
   }
   const where = filters.clauses.length ? `WHERE ${filters.clauses.join(" AND ")}` : "";
   if (mode === "counts") {
-    // Count the complete matched collection from one lightweight, authoritative
-    // read snapshot. Detailed source/assessment state belongs to export and
-    // individual tag reads; no page limit or mutable projection enters counts.
-    const { summaries } = await readTagSummaries(env, filters, owner);
-    const counts = { topics: new Map<string, number>(), resource_kinds: new Map<string, number>(),
-      content_functions: new Map<string, number>(), custom_tags: new Map<string, number>() };
-    for (const summary of summaries.values()) {
-      for (const field of visibleFields) for (const id of summary[field]) {
-        counts[field].set(id, (counts[field].get(id) ?? 0) + 1);
-      }
-      for (const tag of summary.custom_tags) counts.custom_tags.set(tag.id, (counts.custom_tags.get(tag.id) ?? 0) + 1);
-    }
-    return reply({ total: summaries.size, ...Object.fromEntries(Object.entries(counts)
-      .filter(([field]) => includeContentFunctions || field !== "content_functions").map(([field, terms]) =>
-      [field, Array.from(terms, ([id, count]) => ({ id, count }))])) });
+    // Return exact aggregates, not every matched link's membership or history.
+    // MATERIALIZED pins the complete matched set once for all facet branches.
+    const result = await env.DB.prepare(`WITH matched AS MATERIALIZED (SELECT id FROM links ${where}),
+      membership_counts AS (SELECT m.field,m.term,COUNT(*) AS n,MAX(m.link_id) AS first_link FROM matched
+        JOIN effective_tag_memberships m ON m.link_id=matched.id
+        WHERE m.field IN (${visibleFields.map(field => `'${field}'`).join(",")}) GROUP BY m.field,m.term)
+      SELECT '' AS field,'' AS term,COUNT(*) AS n,0 AS first_link,0 AS first_position FROM matched
+      UNION ALL SELECT c.field,c.term,c.n,c.first_link,m.position FROM membership_counts c
+        JOIN effective_tag_memberships m ON m.link_id=c.first_link AND m.field=c.field AND m.term=c.term
+      UNION ALL SELECT 'custom_tags',a.tag_id,COUNT(*),MAX(a.link_id),t.label FROM matched
+        JOIN custom_tag_links a ON a.link_id=matched.id JOIN custom_tags t ON t.id=a.tag_id
+        WHERE t.owner_id=? GROUP BY a.tag_id ORDER BY field,first_link DESC,first_position,term`)
+      .bind(...filters.bindings, owner).all<{ field: string; term: string; n: number }>();
+    const counts = Object.fromEntries([...visibleFields, "custom_tags"].map(field => [field,
+      result.results.filter(row => row.field === field).map(row => ({ id: row.term, count: row.n }))]));
+    return reply({ total: result.results.find(row => row.field === "")?.n ?? 0, ...counts });
   }
-  const rows = await env.DB.prepare(`SELECT id,url,note FROM links ${where} ORDER BY id DESC`).bind(...filters.bindings).all<{ id: number; url: string; note: string }>();
-  // Export includes origin metadata, so retain full canonical state in bounded
-  // reads. Its matched set is never limited by the UI cursor or page size.
-  const all = new Map<number, NonNullable<Awaited<ReturnType<typeof readSelectionSnapshot>>>>();
-  for (let start = 0; start < rows.results.length; start += 100) {
-    const batch = await readSelectionSnapshots(env, rows.results.slice(start, start + 100).map(r => r.id));
-    for (const [id, snapshot] of batch.snapshots) all.set(id, snapshot);
-  }
-  const customs = (await env.DB.prepare(`SELECT a.link_id,t.id,t.owner_id,t.label,t.revision,t.status
-    FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id WHERE t.owner_id=? AND a.link_id IN (SELECT value FROM json_each(?))`)
-    .bind(owner, JSON.stringify(rows.results.map(row => row.id))).all<Custom & { link_id: number }>()).results;
-  const customByLink = new Map<number, Custom[]>();
-  for (const tag of customs) {
-    const group = customByLink.get(tag.link_id) ?? [];
-    group.push(tag); customByLink.set(tag.link_id, group);
-  }
-  const links = rows.results.map(row => {
-    const snapshot = all.get(row.id)!;
-    const fields = snapshot.state.fields;
-    return { ...row, topics: snapshot.view.topics, resource_kinds: snapshot.view.resource_kinds ?? [],
-      ...(includeContentFunctions ? { content_functions: snapshot.view.content_functions } : {}),
-      custom_tags: (customByLink.get(row.id) ?? []).map(tagged),
-      tags: visibleFields.flatMap(dimension => (snapshot.view[dimension] ?? []).map(id => ({
-        tag_ref: `system/${dimension}/${id}`, dimension, id, label: findTerm(dimension, id)?.label ?? id,
-        ...fields[dimension].values.find(v => v.term === id) }))) };
-  });
-  return reply({ taxonomy_version: taxonomyV2().version, links, total: links.length });
+  const paged = request.headers.get("X-Cairn-Tag-Export") === "1";
+  if (!paged && (url.searchParams.has("limit") || url.searchParams.has("cursor"))) return fail("capability_mismatch", 409);
+  const rawLimit = url.searchParams.get("limit"), limit = paged ? rawLimit === null ? 100 : Number(rawLimit) : 1000;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > (paged ? 200 : 1000)) return fail("invalid_limit");
+  const filterParams = new URLSearchParams(url.searchParams);
+  filterParams.delete("limit"); filterParams.delete("cursor"); filterParams.sort();
+  const filterHash = await hash({ filters: filterParams.toString(), content_functions: includeContentFunctions });
+  const rawCursor = url.searchParams.get("cursor"), cursor = decodeCursor(rawCursor);
+  if (rawCursor !== null && (!cursor || !Number.isSafeInteger(cursor.version) || !Number.isSafeInteger(cursor.before_id) ||
+    Number(cursor.before_id) < 1 || cursor.filter_hash !== filterHash)) return fail("invalid_cursor");
+  const snapshot = await readSelectionExport(env, filters, limit + 1, cursor ? Number(cursor.before_id) : undefined);
+  if (cursor && cursor.version !== snapshot.version) return fail("snapshot_changed", 409, { snapshot_version: snapshot.version });
+  if (!paged && snapshot.total > limit) return fail("export_requires_pagination", 413);
+  const selected = snapshot.rows.slice(0, limit);
+  const links = selected.map(({ row, snapshot, custom_tags }) => ({ id: row.id, url: row.url, note: row.note,
+    topics: snapshot.view.topics, resource_kinds: snapshot.view.resource_kinds ?? [],
+    ...(includeContentFunctions ? { content_functions: snapshot.view.content_functions } : {}),
+    custom_tags: custom_tags.map(tagged), tags: visibleFields.flatMap(dimension => (snapshot.view[dimension] ?? []).map(id => ({
+      tag_ref: `system/${dimension}/${id}`, dimension, id, label: findTerm(dimension, id)?.label ?? id,
+      ...snapshot.state.fields[dimension].values.find(value => value.term === id) }))) }));
+  const response = reply({ taxonomy_version: taxonomyV2().version, links, total: snapshot.total,
+    ...(paged ? { snapshot_version: snapshot.version, next_cursor: snapshot.rows.length > limit
+      ? encodeCursor({ version: snapshot.version, before_id: selected[selected.length - 1].row.id, filter_hash: filterHash }) : null } : {}) });
+  if (paged) response.headers.set("X-Cairn-Tag-Export", "1");
+  return response;
 }
 
 export async function tagSystemRoute(request: Request, env: Env, path: string): Promise<Response | null> {
-  const matched = /^\/api\/v2\/(custom-tags(?:\/[^/]+)?|tags\/(counts|export)|links\/\d+\/(tags|tag-history))$/.test(path);
+  const matched = /^\/api\/v2\/(custom-tags(?:\/[^/]+)?|tags\/(counts|export|quality)|links\/\d+\/(tags|tag-history))$/.test(path);
   if (!matched) return null;
   if (request.headers.get("X-Cairn-Tag-System") !== "1") return fail("capability_mismatch", 409);
+  if (path === "/api/v2/tags/quality") return request.method === "GET" ? tagQuality(request, env) : fail("method_not_allowed", 405);
   const custom = path.match(/^\/api\/v2\/custom-tags(?:\/([a-zA-Z0-9-]+))?$/);
   if (custom) return customRoute(request, env, custom[1]);
   const query = path.match(/^\/api\/v2\/tags\/(counts|export)$/);

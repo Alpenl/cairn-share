@@ -1,13 +1,15 @@
+import { readBoundedJSON, readJSONObject } from "./json-body";
+import { encodeCursor, decodeCursor } from "./cursor";
 import { cleanupDeletedImages, maintainPrivacy } from "./privacy";
 import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
-import { tagSystemRoute, attachTagSummaries, contentFunctionsAware } from "./tag-system";
+import { tagSystemRoute, attachTagSummaries, projectTagSummaryRows, contentFunctionsAware } from "./tag-system";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
 import { applyV1Write } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
 import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
-import { readSelectionSnapshot } from "./selection-state";
+import { readSelectionSnapshot, tagSummaryColumns, type TagSummaryRow } from "./selection-state";
 import { emitProviderRecovery, emitRequest, emitWorkerBusiness, logExporterStatus, policyReadAvailable, publishPolicy, requestPolicy,
   type ProviderRecoveryEvent, type RequestD1Stats, type WorkerBusinessEvent } from "./observability";
 import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
@@ -60,6 +62,7 @@ type EnrichmentStatus = "pending" | "processing" | "completed" | "failed" | "exh
 type EnrichmentFilter = EnrichmentStatus | "unsupported";
 
 interface EnrichmentListRow {
+  search_excerpt?: string;
   content_revision?: number;
   personal_revision?: number;
   app_body_revision?: number;
@@ -141,6 +144,7 @@ type ErrorCode =
   | "invalid_classification"
   | "invalid_source"
   | "invalid_operation_key"
+  | "invalid_cursor"
   | "capability_mismatch"
   | "target_changed"
   | "input_changed"
@@ -152,8 +156,8 @@ type ErrorCode =
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions",
-  "Access-Control-Expose-Headers": "X-Cairn-Tag-System, X-Cairn-Content-Functions",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts",
+  "Access-Control-Expose-Headers": "X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -206,6 +210,17 @@ function contentColumns(summary: boolean): string {
   return summary
     ? "NULL AS original_text, NULL AS translated_text, NULL AS related_links"
     : "original_text, translated_text, related_links";
+}
+
+function searchExcerptColumns(enabled: boolean, query: string | undefined): { sql: string; bindings: string[] } {
+  if (!enabled || !query) return { sql: "", bindings: [] };
+  return { sql: `,COALESCE((SELECT substr(s.value,MAX(1,instr(lower(s.value),lower(t.value))-60),240)
+    FROM json_each(json_array(COALESCE(translated_text,''),COALESCE(original_text,''),COALESCE(summary,''),
+      COALESCE(note,''),COALESCE(why,''),COALESCE(ai_title,''),url)) s
+    JOIN json_each(?) t ON instr(lower(s.value),lower(t.value))>0
+    ORDER BY CAST(s.key AS INTEGER),instr(lower(s.value),lower(t.value)) LIMIT 1),
+    substr(COALESCE(NULLIF(summary,''),NULLIF(note,''),NULLIF(why,''),NULLIF(ai_title,''),url),1,240)) AS search_excerpt`,
+    bindings: [JSON.stringify(query.split(/\s+/))] };
 }
 
 function includeEnrichment(url: URL): boolean {
@@ -301,6 +316,7 @@ export default {
     try {
       response = withServerTiming(await handleRequest(request, env, timing), timing);
       if (contentFunctionsAware(request)) response.headers.set("X-Cairn-Content-Functions", "1");
+      if (request.headers.get("X-Cairn-Search-Summary") === "1") response.headers.set("X-Cairn-Search-Summary", "1");
       if (request.headers.get("X-Cairn-Tag-System") === "1") response.headers.set("X-Cairn-Tag-System", "1");
       else if (![204, 304].includes(response.status) && response.headers.get("Content-Type")?.includes("application/json")) {
         // Strict old clients must never see new optional dimensions.
@@ -360,17 +376,21 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   const path = trimTrailingSlash(url.pathname);
   const functionsFlag = request.headers.get("X-Cairn-Content-Functions");
   if (functionsFlag !== null && (functionsFlag !== "1" || !contentFunctionsAware(request))) return error("capability_mismatch", 409);
+  if (request.headers.has("X-Cairn-Search-Summary") && request.headers.get("X-Cairn-Search-Summary") !== "1") return error("capability_mismatch", 409);
   // This is an internal cache discriminator for the two negotiated bookmark
   // read shapes. Aggregate routes reject queries and do not need it. A caller
   // cannot select the negotiated cache by supplying this query parameter.
   if (path === "/api/links" || /^\/api\/links\/\d+$/.test(path)) {
     url.searchParams.delete("tag_system");
     url.searchParams.delete("content_functions_view");
+    url.searchParams.delete("search_summary_view");
     if (request.headers.get("X-Cairn-Tag-System") === "1") url.searchParams.set("tag_system", "1");
     if (contentFunctionsAware(request)) url.searchParams.set("content_functions_view", "1");
+    if (request.headers.get("X-Cairn-Search-Summary") === "1") url.searchParams.set("search_summary_view", "1");
   }
   const newTagFilter = ["resource_kinds", "resource_kind", "custom_tags", "custom_tag", "topics_mode", "topic_mode", "resource_mode", "custom_mode"].some(key => url.searchParams.has(key));
   if (newTagFilter && request.headers.get("X-Cairn-Tag-System") !== "1") return error("capability_mismatch", 409);
+  if (url.searchParams.has("functions_mode") && !contentFunctionsAware(request)) return error("capability_mismatch", 409);
 
   if (path === "/api/internal/observability") {
     const authError = requireEnricherToken(request, env);
@@ -396,6 +416,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
       if (request.method === "POST") return createLink(request, env, timing);
       return listLinks(request, url, env, timing);
     });
+  }
+
+  if (path === "/api/links/queue") {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => learningQueue(request, url, env, timing));
   }
 
   if (path === "/api/taxonomy") {
@@ -479,7 +505,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
       return routeMethod(request, ["GET"], () => taxonomyV2Route(request, env, `/api/v2/links/${id}/selection`));
     }
     return routeMethod(request, ["POST"], async () => {
-      const body = await request.clone().json().catch(() => null) as Record<string, unknown> | null;
+      const body = await readJSONObject(request.clone(), 64 << 10);
       if (!body || !Number.isSafeInteger(body.expected_revision) || Number(body.expected_revision) < 0) {
         return error("invalid_expected_revision", 400);
       }
@@ -544,7 +570,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => listEnrichmentJobs(url, env, timing,
-      request.headers.get("X-Cairn-Tag-System") === "1", contentFunctionsAware(request)));
+      request.headers.get("X-Cairn-Tag-System") === "1", contentFunctionsAware(request), request.headers.get("X-Cairn-Search-Summary") === "1"));
   }
 
   if (path === "/api/enrichment/overview") {
@@ -695,12 +721,15 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
   if (query === null) return error("invalid_query");
 
   const enriched = includeEnrichment(url);
+  const excerpt = searchExcerptColumns(request.headers.get("X-Cairn-Search-Summary") === "1", query);
   const filters = bookmarkFilters(url, enriched ? query : undefined);
   if (filters instanceof Response) return filters;
 
   return cachedJson(request, env, timing, (generation) => listCacheUrl(url, { limit, beforeId, learned, query }, generation), async () => {
     const pageSize = limit + 1;
-    const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""} FROM links`;
+    const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""}${excerpt.sql}`;
+    const tagAware = request.headers.get("X-Cairn-Tag-System") === "1";
+    const tagColumns = tagAware ? "," + tagSummaryColumns() : "";
     const order = "ORDER BY id DESC LIMIT ?";
     const clauses = [...filters.clauses];
     const bindings = [...filters.bindings];
@@ -720,35 +749,65 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
     }
 
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
-    const statement = env.DB.prepare(`${select}${where} ${order}`).bind(...bindings, pageSize);
+    const statement = env.DB.prepare(`${select}${tagColumns} FROM links${where} ${order}`).bind(...excerpt.bindings, ...bindings, pageSize);
 
     const result = await timing.measure("db", () => statement.all<LinkRow & EnrichmentListRow>());
     const rows = result.results ?? [];
     const items = rows.slice(0, limit);
     const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
-    const mapped = items.map((row) => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row));
-    return { items: request.headers.get("X-Cairn-Tag-System") === "1" ? await attachTagSummaries(env,
-      mapped as unknown as Record<string, unknown>[], false, contentFunctionsAware(request)) : mapped, next_before_id: next,
+    const mapped = items.map((row) => ({ ...(enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row)),
+      ...(excerpt.sql ? { search_excerpt: row.search_excerpt ?? "" } : {}) }));
+    return { items: tagAware ? projectTagSummaryRows(mapped as unknown as Record<string, unknown>[],
+      items as unknown as Array<TagSummaryRow & { id: number }>, false, contentFunctionsAware(request)) : mapped, next_before_id: next,
       ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {}) };
   });
 }
 
+async function learningQueue(request: Request, url: URL, env: Env, timing: TimingCollector): Promise<Response> {
+  if (request.headers.get("X-Cairn-Queue") !== "1") return error("capability_mismatch", 409);
+  for (const key of url.searchParams.keys()) {
+    if (!["limit", "cursor", "include", "include_cache_identity"].includes(key) || url.searchParams.getAll(key).length !== 1) return error("invalid_query");
+  }
+  if (url.searchParams.has("include") && !includeEnrichment(url)) return error("invalid_query");
+  const limit = parseBoundedInt(url.searchParams.get("limit"), DEFAULT_LIMIT, MAX_LIMIT);
+  if (limit === null) return error("invalid_limit");
+  const rawCursor = url.searchParams.get("cursor"), cursor = decodeCursor(rawCursor);
+  if (rawCursor !== null && (!cursor || Object.keys(cursor).length !== 2 || typeof cursor.created_at !== "string" ||
+    cursor.created_at.length > 40 || !Number.isFinite(Date.parse(cursor.created_at)) || !Number.isSafeInteger(cursor.id) || Number(cursor.id) < 1)) return error("invalid_cursor");
+  const enriched = includeEnrichment(url), tagAware = request.headers.get("X-Cairn-Tag-System") === "1";
+  const base = "learned=0 AND curation_status<>'drop'";
+  const page = `${base}${cursor ? " AND (created_at>? OR (created_at=? AND id>?))" : ""}`;
+  const rowsStatement = env.DB.prepare(`SELECT ${LINK_COLUMNS}${enriched ? `,${ENRICHMENT_COLUMNS},${contentColumns(true)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""}
+    ${tagAware ? "," + tagSummaryColumns() : ""} FROM links WHERE ${page} ORDER BY created_at ASC,id ASC LIMIT ?`)
+    .bind(...(cursor ? [cursor.created_at, cursor.created_at, cursor.id] : []), limit + 1);
+  const [rowsResult, totalResult] = await timing.measure("db", () => env.DB.batch([rowsStatement,
+    env.DB.prepare(`SELECT COUNT(*) AS total FROM links WHERE ${base}`)]));
+  const rows = rowsResult.results as unknown as Array<LinkRow & EnrichmentListRow & TagSummaryRow>;
+  const selected = rows.slice(0, limit), last = selected[selected.length - 1];
+  const mapped = selected.map(row => enriched ? mapAppLink(row, false, includeCacheIdentity(url)) : mapLink(row));
+  return json({ links: tagAware ? projectTagSummaryRows(mapped as unknown as Record<string, unknown>[], selected, false, contentFunctionsAware(request)) : mapped,
+    next_cursor: rows.length > limit ? encodeCursor({ created_at: last.created_at, id: last.id }) : null,
+    total: Number((totalResult.results[0] as { total: number } | undefined)?.total ?? 0) }, 200,
+    { "X-Cairn-Queue": "1", "Cache-Control": "private, no-store" });
+}
+
 async function getLink(request: Request, url: URL, id: number, env: Env, timing: TimingCollector): Promise<Response> {
+  const tagAware = request.headers.get("X-Cairn-Tag-System") === "1";
   return cachedJson(request, env, timing, (generation) => detailCacheUrl(id, url, generation), async () => {
     const row = await timing.measure("db", () =>
       env.DB.prepare(
-        `SELECT ${LINK_COLUMNS}${includeEnrichment(url) ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""} FROM links WHERE id = ?`
+        `SELECT ${LINK_COLUMNS}${includeEnrichment(url) ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(false)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""}
+          ${tagAware ? "," + tagSummaryColumns() : ""} FROM links WHERE id = ?`
       )
         .bind(id)
-        .first<LinkRow & EnrichmentListRow>()
+        .first<LinkRow & EnrichmentListRow & TagSummaryRow>()
     );
 
     if (row === null) {
       return null;
     }
     const mapped = includeEnrichment(url) ? mapAppLink(row, true, includeCacheIdentity(url)) : mapLink(row);
-    return request.headers.get("X-Cairn-Tag-System") === "1" ? (await attachTagSummaries(env,
-      [mapped as unknown as Record<string, unknown>], false, contentFunctionsAware(request)))[0] : mapped;
+    return tagAware ? projectTagSummaryRows([mapped as unknown as Record<string, unknown>], [row], false, contentFunctionsAware(request))[0] : mapped;
   });
 }
 
@@ -938,7 +997,7 @@ export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; 
   return { clauses, bindings };
 }
 
-async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, tagAware = false, includeContentFunctions = false): Promise<Response> {
+async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, tagAware = false, includeContentFunctions = false, searchSummary = false): Promise<Response> {
   const countsOption = url.searchParams.getAll("counts");
   if (countsOption.length > 1 || (countsOption.length === 1 && !["0", "1"].includes(countsOption[0]))) {
     return error("invalid_query");
@@ -970,18 +1029,20 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, t
     clauses.push("enrichment_status = ?");
     bindings.push(status);
   }
-  const summary = url.searchParams.get("view") === "summary";
+  const excerpt = searchExcerptColumns(searchSummary, query);
+  const summary = url.searchParams.get("view") === "summary" || Boolean(excerpt.sql);
   const withIdentity = url.searchParams.get("include_cache_identity") === "1";
 
   const pageSize = limit + 1;
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const listStatement = env.DB.prepare(
-    `SELECT id, url, note, created_at, ${ENRICHMENT_COLUMNS}, ${contentColumns(summary)} ${cacheIdentityColumns(withIdentity)}
+    `SELECT id, url, note, created_at, ${ENRICHMENT_COLUMNS}, ${contentColumns(summary)} ${cacheIdentityColumns(withIdentity)}${excerpt.sql}
+       ${tagAware ? "," + tagSummaryColumns() : ""}
        FROM links
       ${where}
       ORDER BY id DESC
       LIMIT ?`
-  ).bind(...bindings, pageSize);
+  ).bind(...excerpt.bindings, ...bindings, pageSize);
   let rows: EnrichmentListRow[];
   let countRow: EnrichmentCountRow | null = null;
   if (includeCounts) {
@@ -1006,9 +1067,10 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, t
   }
   const items = rows.slice(0, limit);
   const next = rows.length > limit ? items[items.length - 1]?.id ?? null : null;
-  const mapped = items.map((row) => ({ ...mapEnrichmentListItem(row, withIdentity), ...(summary ? { content_loaded: false } : {}) }));
+  const mapped = items.map((row) => ({ ...mapEnrichmentListItem(row, withIdentity), ...(summary ? { content_loaded: false } : {}),
+    ...(excerpt.sql ? { search_excerpt: row.search_excerpt ?? "" } : {}) }));
   return json({
-    items: tagAware ? await attachTagSummaries(env, mapped, true, includeContentFunctions) : mapped,
+    items: tagAware ? projectTagSummaryRows(mapped, items as unknown as Array<TagSummaryRow & { id: number }>, true, includeContentFunctions) : mapped,
     next_before_id: next,
     ...(includeCounts ? { counts: mapEnrichmentCounts(countRow) } : {}),
     ...(url.searchParams.get("filter_contract_version") === "1" ? { filter_contract_version: 1 } : {})
@@ -1079,15 +1141,16 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, w
               translated_text, summary, related_links, images, enrichment_model,
               enrichment_error, enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
               CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable${cacheIdentityColumns(withIdentity)}
+              ${tagAware ? "," + tagSummaryColumns() : ""}
          FROM links
         WHERE id = ?`
     )
       .bind(id)
-      .first<EnrichmentDetailRow>()
+      .first<EnrichmentDetailRow & TagSummaryRow>()
   );
   if (row === null) return error("not_found", 404);
   const mapped = mapEnrichmentListItem(row, withIdentity);
-  return json(tagAware ? (await attachTagSummaries(env, [mapped], true, includeContentFunctions))[0] : mapped);
+  return json(tagAware ? projectTagSummaryRows([mapped], [row], true, includeContentFunctions)[0] : mapped);
 }
 
 async function getEnrichmentJobIdentity(env: Env, id: number, timing: TimingCollector): Promise<Response> {
@@ -2298,7 +2361,7 @@ function listCacheUrl(
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
   if (parsed.query !== undefined) url.searchParams.set("q", parsed.query);
-  for (const key of ["include", "include_cache_identity", "tag_system", "content_functions_view", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
+  for (const key of ["include", "include_cache_identity", "tag_system", "content_functions_view", "search_summary_view", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
     const value = requestUrl.searchParams.get(key);
     if (value) url.searchParams.set(key, value);
   }
@@ -2379,7 +2442,7 @@ function validateLinkBodyForCreate(
 
 async function readJson(request: Request): Promise<unknown | null> {
   try {
-    return await request.json();
+    return await readBoundedJSON(request, 1 << 20, false);
   } catch {
     return null;
   }

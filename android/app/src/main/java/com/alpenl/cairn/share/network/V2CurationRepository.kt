@@ -10,12 +10,16 @@ internal interface V2Transport {
     fun loadSelection(id: Int, apiToken: String): V2Result<MultidimensionalSelection>
     fun applyOverride(id: Int, override: FieldOverride, apiToken: String): V2Result<org.json.JSONObject>
     fun loadTaxonomy(apiToken: String): V2Result<BookmarkTaxonomy>
+    fun loadSelection(id: Int, apiToken: String, cancellation: ReadCancellation): V2Result<MultidimensionalSelection> = loadSelection(id, apiToken)
+    fun loadTaxonomy(apiToken: String, cancellation: ReadCancellation): V2Result<BookmarkTaxonomy> = loadTaxonomy(apiToken)
 }
 
 internal class V2ClientTransport(private val client: V2CurationClient) : V2Transport {
     override fun loadSelection(id: Int, apiToken: String) = client.loadSelection(id, apiToken)
     override fun applyOverride(id: Int, override: FieldOverride, apiToken: String) = client.applyOverride(id, override, apiToken)
     override fun loadTaxonomy(apiToken: String) = client.loadTaxonomy(apiToken)
+    override fun loadSelection(id: Int, apiToken: String, cancellation: ReadCancellation) = client.loadSelection(id, apiToken, cancellation)
+    override fun loadTaxonomy(apiToken: String, cancellation: ReadCancellation) = client.loadTaxonomy(apiToken, cancellation)
 }
 
 /**
@@ -42,9 +46,11 @@ internal sealed interface CurationSubmitResult {
 internal class V2CurationRepository(private val transport: V2Transport) {
 
     fun load(id: Int, apiToken: String): V2Result<MultidimensionalSelection> = transport.loadSelection(id, apiToken)
+    suspend fun loadCancellable(id: Int, apiToken: String): V2Result<MultidimensionalSelection> = cancellableRead { transport.loadSelection(id, apiToken, it) }
 
     /** Loads the multidimensional vocabulary the section renders. */
     fun loadTaxonomy(apiToken: String): V2Result<BookmarkTaxonomy> = transport.loadTaxonomy(apiToken)
+    suspend fun loadTaxonomyCancellable(apiToken: String): V2Result<BookmarkTaxonomy> = cancellableRead { transport.loadTaxonomy(apiToken, it) }
 
     /**
      * Applies one action to the local draft with the shared semantics:
@@ -68,7 +74,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         val result = when (field) {
             "topics" -> selection.copy(topics = resolveMulti(selection.topics, baseline.topics, term, if (action == "confirm") "accept" else action))
             "resource_kinds" -> selection.copy(resourceKinds = resolveMulti(selection.resourceKinds, baseline.resourceKinds, term, if (action == "confirm") "accept" else action))
-            "content_functions" -> selection.copy(contentFunctions = resolveMulti(selection.contentFunctions, baseline.contentFunctions, term, action))
+            "content_functions" -> selection.copy(contentFunctions = resolveMulti(selection.contentFunctions, baseline.contentFunctions, term, if (action == "confirm") "accept" else action))
             "affordances" -> selection.copy(affordances = resolveMulti(selection.affordances, baseline.affordances, term, action))
             "carriers" -> selection.copy(carriers = resolveSingle(selection.carriers, baseline.carriers, term, action))
             "form" -> selection.copy(form = resolveSingleValue(selection.form, baseline.form, term, action))

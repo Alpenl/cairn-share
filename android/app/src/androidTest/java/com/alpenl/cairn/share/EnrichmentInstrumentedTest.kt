@@ -114,6 +114,8 @@ class EnrichmentInstrumentedTest {
             compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("bookmark_image"))
             compose.waitUntil(20_000) { compose.onAllNodesWithContentDescription("收藏图片").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithContentDescription("收藏图片").assertExists()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("reader_curation_toggle"))
+            compose.onNodeWithTag("reader_curation_toggle").performClick()
             compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("edit_curation"))
             compose.onNodeWithTag("edit_curation").performClick()
             compose.onNodeWithTag("curation_why").performTextReplacement("用于项目评审")

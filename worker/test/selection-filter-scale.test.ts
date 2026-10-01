@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { selectionFilters } from "../src/selection-filter";
 import worker from "../src/index";
 
-it('queries the full collection through indexed histories instead of a bounded candidate prefix',async()=>{
+it('queries the full collection through indexed effective memberships instead of a bounded candidate prefix',async()=>{
   await reset();await applyD1Migrations(env.DB,env.TEST_MIGRATIONS);
   // 1,200 saved items / 9,600 actions. Only the OLDEST item matches all four
   // dimensions. This is a deterministic local scale sample, not a production
@@ -22,9 +22,8 @@ it('queries the full collection through indexed histories instead of a bounded c
   const query=`SELECT id FROM links WHERE ${filter.clauses.join(' AND ')} ORDER BY id DESC LIMIT 2`;
   const plan=await env.DB.prepare('EXPLAIN QUERY PLAN '+query).bind(...filter.bindings).all<{detail:string}>();
   const details=plan.results.map(row=>row.detail);
-  expect(details.some(text=>text.includes('SEARCH curation_overrides USING INDEX'))).toBe(true);
-  expect(details.some(text=>text.includes('SEARCH legacy_curation_history USING'))).toBe(true);
-  expect(details.some(text=>text.includes('SEARCH classification_decisions USING INDEX'))).toBe(true);
+  expect(details.some(text=>text.includes('effective_tag_memberships_term_idx'))).toBe(true);
+  expect(details.some(text=>/curation_overrides|legacy_curation_history|classification_decisions/.test(text))).toBe(false);
   const result=await env.DB.prepare(query).bind(...filter.bindings).all<{id:number}>();
   expect(result.results.map(row=>row.id)).toEqual([1]);
   console.log('B05 local scale',JSON.stringify({links:1200,actions:9600,meta:result.meta,plan:details}));

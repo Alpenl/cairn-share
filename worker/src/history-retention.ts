@@ -1,3 +1,4 @@
+import { archiveOldRunPayloads } from "./run-archive";
 // B03-T13: bound age-based cleanup for live links. Operation receipts and
 // source-of-truth rows stay intact until their replay/expiry protocol exists.
 // A cursor advances over at most one page per table and wraps at EOF. Each
@@ -7,7 +8,7 @@ const PAGE_SIZE = 100;
 const DEFAULT_RETENTION_DAYS = 90;
 const DAY_MS = 86_400_000;
 
-export interface HistoryRetentionEnv { DB: D1Database; HISTORY_RETENTION_DAYS?: string }
+export interface HistoryRetentionEnv { DB: D1Database; HISTORY_RETENTION_DAYS?: string; ENRICHMENT_IMAGES?: R2Bucket }
 type Candidate = { id: number; created_at: string };
 type Cursor = { created_at: string; id: number };
 
@@ -97,7 +98,7 @@ async function pruneOldRuns(env: HistoryRetentionEnv, cutoff: string, now: strin
   const next = rows.results.length < PAGE_SIZE ? "" : JSON.stringify(last);
   const ids = JSON.stringify(rows.results.map((row) => row.id));
   const eligible = `id IN (SELECT value FROM json_each(?)) AND created_at<?
-    AND status IN ('succeeded','partial') AND length(payload_hash)=64
+    AND archive_key IS NULL AND status IN ('succeeded','partial') AND length(payload_hash)=64
     AND NOT EXISTS (SELECT 1 FROM classification_decisions WHERE run_id=classification_runs.id)
     AND NOT EXISTS (SELECT 1 FROM classification_decision_runs WHERE run_id=classification_runs.id)
     AND NOT EXISTS (SELECT 1 FROM classification_run_reuse_sources WHERE source_run_id=classification_runs.id)
@@ -126,6 +127,7 @@ export async function pruneLiveHistory(env: HistoryRetentionEnv, now = Date.now(
   const cutoff = new Date(now - retentionDays(env.HISTORY_RETENTION_DAYS) * DAY_MS).toISOString();
   const events = await prunePage(env, "live_events", "curation_events", cutoff, "");
   const reuseBackfilled = await backfillRunReuse(env);
+  if (reuseBackfilled) await archiveOldRunPayloads(env, cutoff, new Date(now).toISOString());
   const runs = reuseBackfilled ? await pruneOldRuns(env, cutoff, new Date(now).toISOString()) : 0;
   const snapshots = await prunePage(env, "live_snapshots", "evidence_snapshots", cutoff, `
     AND content_revision<>(SELECT content_revision FROM links WHERE id=evidence_snapshots.link_id)

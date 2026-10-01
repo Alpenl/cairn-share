@@ -41,7 +41,9 @@ jobs:
         run: npm run typecheck
 
       - name: Test
-        run: npm test
+        run: |
+          npm test
+          node --test ../scripts/release-smoke.test.mjs ../scripts/release-record.test.mjs
 
       - name: Build deploy bundle
         run: npm run deploy:dry-run

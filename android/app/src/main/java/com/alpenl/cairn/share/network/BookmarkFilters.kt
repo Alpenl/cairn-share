@@ -23,9 +23,10 @@ internal data class BookmarkFilters(
     val topicsMode: String = "any",
     val resourceMode: String = "any",
     val customMode: String = "any",
+    val functionsMode: String = "any",
 ) {
     init {
-        require(listOf(topicsMode, resourceMode, customMode).all { it in setOf("any", "all") })
+        require(listOf(topicsMode, resourceMode, customMode, functionsMode).all { it in setOf("any", "all") })
     }
 
     fun needsEffectiveFilterContract(): Boolean = topic.isNotEmpty() || topics.isNotEmpty() ||
@@ -34,7 +35,7 @@ internal data class BookmarkFilters(
         resourceKinds.isNotEmpty() || customTags.isNotEmpty()
 
     fun needsTagFilterContract(): Boolean = resourceKinds.isNotEmpty() || customTags.isNotEmpty() ||
-        (topicsMode == "all" && (topics.isNotEmpty() || topic.isNotBlank()))
+        (topicsMode == "all" && (topics.isNotEmpty() || topic.isNotBlank())) || (functionsMode == "all" && contentFunctions.isNotEmpty())
 
     fun parameters(now: Instant = Instant.now()): Map<String, String> = buildMap {
         put("curation_status", curationStatus)
@@ -49,6 +50,7 @@ internal data class BookmarkFilters(
         put("use", use)
         put("source", source)
         if (contentFunctions.isNotEmpty()) put("content_functions", contentFunctions.joinToString(","))
+        if (functionsMode == "all" && contentFunctions.isNotEmpty()) put("functions_mode", "all")
         if (carriers.isNotEmpty()) put("carriers", carriers.joinToString(","))
         if (affordances.isNotEmpty()) put("affordances", affordances.joinToString(","))
         if (entityState.isNotEmpty()) put("entity_state", entityState)
@@ -65,7 +67,7 @@ internal data class BookmarkFilters(
             (source.isBlank() || data?.source == source) &&
             matchesValues(resourceKinds, labels?.resourceKinds.orEmpty(), resourceMode) &&
             matchesValues(customTags, link.customTags.map { it.id }, customMode) &&
-            (contentFunctions.isEmpty() || contentFunctions.any { it in labels?.contentFunctions.orEmpty() }) &&
+            matchesValues(contentFunctions, labels?.contentFunctions.orEmpty(), functionsMode) &&
             (carriers.isEmpty() || carriers.any { it in labels?.carriers.orEmpty() }) &&
             (affordances.isEmpty() || affordances.any { it in labels?.affordances.orEmpty() }) &&
             (entityState.isBlank() || data?.entityState in entityState.split(',')) &&

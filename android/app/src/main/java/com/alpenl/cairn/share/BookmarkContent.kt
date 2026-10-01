@@ -49,6 +49,7 @@ import com.alpenl.cairn.share.network.LinksApiClient
 import com.alpenl.cairn.share.network.TaxonomyTerm
 import com.alpenl.cairn.share.network.V2CurationClient
 import com.alpenl.cairn.share.network.V2Result
+import com.alpenl.cairn.share.network.cancellableRead
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -289,7 +290,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
     var advanced by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(expanded, account, taxonomy?.resourceKinds?.isNotEmpty()) {
         if (expanded && baseUrl.isNotBlank() && apiToken.isNotBlank() && taxonomy?.resourceKinds?.isNotEmpty() == true) {
-            val result = withContext(Dispatchers.IO) { V2CurationClient(baseUrl).tagRequest("/api/custom-tags", "GET", apiToken) }
+            val result = cancellableRead { V2CurationClient(baseUrl).tagRequest("/api/custom-tags", "GET", apiToken, cancellation = it) }
             if (result is V2Result.Loaded) { customCatalog = parsePersonalTags(result.value.optJSONArray("tags")); catalogError = false }
             else catalogError = true
         }
@@ -331,9 +332,12 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                     if (catalogError) Text("自定义标记暂时无法读取；已选条件保留。", style = MaterialTheme.typography.bodySmall)
                     TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "收起其他条件" else "其他条件") }
                 }
-                if (taxonomy.resourceKinds.isEmpty() || advanced) {
                 if (taxonomy.multiDimensional) {
                     FilterDimension("内容功能", "content_functions", filters.contentFunctions, taxonomy.contentFunctions) { onChange(filters.copy(contentFunctions = it)) }
+                    if (taxonomy.resourceKinds.isNotEmpty()) TagFilterMode(filters.functionsMode) { onChange(filters.copy(functionsMode = it)) }
+                }
+                if (taxonomy.resourceKinds.isEmpty() || advanced) {
+                if (taxonomy.multiDimensional) {
                     FilterDimension("载体（任一）", "carriers", filters.carriers, taxonomy.carriers) { onChange(filters.copy(carriers = it)) }
                     FilterDimension("潜在用途", "affordances", filters.affordances, taxonomy.affordances) { onChange(filters.copy(affordances = it)) }
                 } else Text("多维词表暂不可用；已选条件仍保留。", style = MaterialTheme.typography.bodySmall)

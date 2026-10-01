@@ -1,3 +1,4 @@
+import { readBoundedJSON } from "./json-body";
 import type { Env } from "./index";
 import { canonicalJSON, contentHash, objectivePayload, snapshotCompleteness, validSnapshot, type EvidenceSnapshot } from "./domain";
 
@@ -73,7 +74,7 @@ export async function evidenceExecutionRoute(request: Request, env: Env, path: s
   if (!match) return null;
   if (request.method !== "POST") return fail("method_not_allowed", 405);
   let body: Record<string, unknown>;
-  try { body = await request.json(); } catch { return fail("invalid_json", 400); }
+  try { body = await readBoundedJSON(request, 1 << 20) as Record<string, unknown>; } catch { return fail("invalid_json", 400); }
   if (!body || typeof body !== "object" || Array.isArray(body)) return fail("invalid_json", 400);
   const row = await read(env, match[1]);
   if (!row) return fail("not_found", 404);

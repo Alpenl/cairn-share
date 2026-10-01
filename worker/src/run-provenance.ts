@@ -1,6 +1,7 @@
 import type { Env } from "./index";
 import { record } from "./curation";
 import { canonicalJSON } from "./domain";
+import { hydrateRunPayload, type ArchivedPayloadRow } from "./run-archive";
 
 const hashShape = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 async function hash(value: string): Promise<string> {
@@ -86,10 +87,12 @@ export async function validRunProvenance(env: Env, linkId: number, raw: unknown,
     const sourceID = Number(sources[id]);
     let old = priorRuns.get(sourceID);
     if (!old) {
-      const stored = await env.DB.prepare("SELECT resolved_model,coverage,raw_judgments FROM classification_runs WHERE id=? AND link_id=? AND status='succeeded'")
-        .bind(sourceID,linkId).first<{ resolved_model: string; coverage: string; raw_judgments: string | null }>();
+      const stored = await env.DB.prepare("SELECT id,resolved_model,coverage,raw_judgments,policy,answers,usage,archive_key,archive_hash,archive_bytes FROM classification_runs WHERE id=? AND link_id=? AND status='succeeded'")
+        .bind(sourceID,linkId).first<{ resolved_model: string; coverage: string } & ArchivedPayloadRow>();
       if (!stored) return false;
-      priorRuns.set(sourceID, stored); old = stored;
+      let hydrated;
+      try { hydrated = await hydrateRunPayload(env, stored); } catch { return false; }
+      priorRuns.set(sourceID, hydrated); old = hydrated;
     }
     if (!old.raw_judgments || old.resolved_model !== expected.resolvedModel || old.coverage !== "complete") return false;
     const prior: unknown = JSON.parse(old.raw_judgments);

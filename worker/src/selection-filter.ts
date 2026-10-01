@@ -76,14 +76,14 @@ automatic AS (
 SELECT field,term FROM effective`;
 
 const dimensions = ["topics", "content_functions", "carriers", "affordances", "resource_kinds"] as const;
-export const SELECTION_FILTER_KEYS = ["filter_contract_version", "topic", "form", "use", ...dimensions, "entity_state", "custom_tags", "topics_mode", "resource_mode", "custom_mode", "resource_kind", "custom_tag", "topic_mode"];
+export const SELECTION_FILTER_KEYS = ["filter_contract_version", "topic", "form", "use", ...dimensions, "entity_state", "custom_tags", "topics_mode", "resource_mode", "custom_mode", "functions_mode", "resource_kind", "custom_tag", "topic_mode"];
 
 export function selectionFilters(params: URLSearchParams): { clauses: string[]; bindings: string[] } | null {
   params = new URLSearchParams(params);
   for (const [alias, canonical] of [["resource_kind", "resource_kinds"], ["custom_tag", "custom_tags"], ["topic_mode", "topics_mode"]]) {
     if (params.has(alias)) { if (params.has(canonical)) return null; params.set(canonical, params.get(alias)!); }
   }
-  for (const mode of ["topics_mode", "resource_mode", "custom_mode"]) {
+  for (const mode of ["topics_mode", "resource_mode", "custom_mode", "functions_mode"]) {
     if (params.has(mode) && (params.getAll(mode).length !== 1 || !["any", "all"].includes(params.get(mode)!))) return null;
   }
   if (params.has("filter_contract_version") &&
@@ -102,16 +102,21 @@ export function selectionFilters(params: URLSearchParams): { clauses: string[]; 
     if ((legacy && terms.length !== 1) || terms.length > 64 || terms.some(term => !findTerm(dimension, term))) return null;
     const existing = groups.find(group => group.field === field);
     if (existing) existing.terms = [...new Set([...existing.terms, ...terms])];
-    else groups.push({ field, terms: [...new Set(terms)], mode: params.get(field === "topics" ? "topics_mode" : field === "resource_kinds" ? "resource_mode" : "") ?? "any" });
+    else groups.push({ field, terms: [...new Set(terms)], mode: params.get(field === "topics" ? "topics_mode" : field === "resource_kinds" ? "resource_mode" : field === "content_functions" ? "functions_mode" : "") ?? "any" });
   }
   const clauses: string[] = [], bindings: string[] = [];
   if (groups.length) {
     // One bound JSON value keeps the D1 bind count bounded even for combined
     // dimensions. Every group must match, with OR inside its terms array.
-    clauses.push(`(SELECT COUNT(*) FROM (SELECT effective.field FROM (${SELECTION_TERMS_SQL}) effective
-      JOIN json_each(?) requested ON effective.field=json_extract(requested.value,'$.field')
-        AND effective.term IN (SELECT value FROM json_each(requested.value,'$.terms')) GROUP BY effective.field
-      HAVING json_extract(requested.value,'$.mode')='any' OR COUNT(DISTINCT effective.term)=json_array_length(requested.value,'$.terms'))) = ${groups.length}`);
+    clauses.push(`links.id IN (SELECT link_id FROM (
+      SELECT effective.link_id,effective.field FROM json_each(?) requested
+      JOIN effective_tag_memberships effective INDEXED BY effective_tag_memberships_term_idx
+        ON effective.field=json_extract(requested.value,'$.field')
+        AND effective.term IN (SELECT value FROM json_each(requested.value,'$.terms'))
+      GROUP BY effective.link_id,effective.field
+      HAVING json_extract(requested.value,'$.mode')='any'
+        OR COUNT(DISTINCT effective.term)=json_array_length(requested.value,'$.terms'))
+      GROUP BY link_id HAVING COUNT(*)=${groups.length})`);
     bindings.push(JSON.stringify(groups));
   }
   if (params.has("custom_tags")) {
