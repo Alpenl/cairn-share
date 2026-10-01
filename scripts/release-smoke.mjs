@@ -45,6 +45,20 @@ export async function verifyRelease({ token, fetcher = fetch, base = "https://sh
       if (!same(item.classification?.[field] ?? [], tags.selection[field])) throw new Error("effective_projection_mismatch");
     }
     if (!Array.isArray(tags.custom_tags) || !same(item.custom_tags.map(t => t.id), tags.custom_tags.map(t => t.id))) throw new Error("custom_projection_mismatch");
+    if (!Number.isSafeInteger(identity.body_revision) || identity.body_revision < 0) throw new Error("invalid_body_identity");
+    const { body: reading } = await get(`/api/enrichment/jobs/${id}/reading?body_revision=${identity.body_revision}`);
+    const detail = reading.detail, readingIdentity = detail?.cache_identity;
+    if (reading.version !== 1 || reading.body_unchanged !== true || detail?.id !== id || detail.original_text || detail.translated_text ||
+      !readingIdentity || ["personal_revision", "content_revision", "latest_decision_id", "body_revision"].some(key => readingIdentity[key] !== identity[key]))
+      throw new Error("invalid_reading_snapshot");
+    for (const field of ["topics", "resource_kinds", "content_functions"]) {
+      if (detail.classification !== null && !Array.isArray(detail.classification?.[field]) ||
+        !Array.isArray(reading.selection?.selection?.[field]) ||
+        !same(detail.classification?.[field] ?? [], tags.selection[field]) ||
+        !same(reading.selection.selection[field], tags.selection[field])) throw new Error("reading_projection_mismatch");
+    }
+    if (!Array.isArray(detail.custom_tags) || !same(detail.custom_tags.map(tag => tag.id), tags.custom_tags.map(tag => tag.id)))
+      throw new Error("reading_custom_projection_mismatch");
   }
   const { body: legacy } = await get("/api/enrichment/jobs?view=summary&limit=2", false);
   if (!Array.isArray(legacy.items)) throw new Error("invalid_legacy_contract");

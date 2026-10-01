@@ -52,7 +52,7 @@ export async function readTagSummaries(env: Env,
 // The reading endpoint extends the same statement that folds the effective
 // selection. Keep these columns explicit: links also holds private source and
 // lease material which a detail read must not fetch or expose.
-const readingColumns = `,l.url,l.note,l.created_at,l.enrichment_status,l.enrichment_attempts,
+const readingColumns = `,l.url,l.note,l.created_at,l.curation,l.enrichment_status,l.enrichment_attempts,
   l.enrichment_next_retry_at,l.enrichment_paid_uncertain,l.enrichment_paid_stage,
   l.ai_title,l.original_language,
   CASE WHEN l.app_body_revision=? THEN NULL ELSE l.original_text END AS original_text,
@@ -103,8 +103,9 @@ function selectionSQL(where: string, includeReading: boolean, extraColumns = "")
     FROM links l WHERE ${where}`;
 }
 
-export async function readSelectionSnapshot(env: Env, id: number, includeReading = false, knownBodyRevision = -1) {
-  const link = await env.DB.prepare(selectionSQL("l.id=?", includeReading))
+export async function readSelectionSnapshot(env: Env, id: number, includeReading = false, knownBodyRevision = -1, includeTags = false) {
+  const link = await env.DB.prepare(selectionSQL("l.id=?", includeReading,
+    includeTags ? `,${tagSummaryColumns("l")}` : ""))
     .bind(...(includeReading ? [knownBodyRevision, knownBodyRevision, id] : [id])).first<Row>();
   return link ? selectionFromRow(link) : null;
 }

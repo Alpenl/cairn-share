@@ -652,7 +652,8 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () =>
-      getEnrichmentReading(env, Number(enrichmentReadingMatch[1]), timing, url.searchParams));
+      getEnrichmentReading(env, Number(enrichmentReadingMatch[1]), timing, url.searchParams,
+        request.headers.get("X-Cairn-Tag-System") === "1", contentFunctionsAware(request)));
   }
 
   const linkIdMatch = path.match(/^\/api\/links\/(\d+)$/);
@@ -1173,22 +1174,28 @@ async function getEnrichmentJobIdentity(env: Env, id: number, timing: TimingColl
 // One SQLite statement supplies article text, the effective selection and
 // entity state. A sequence of detail/selection/entity reads can combine
 // different revisions when another client writes between requests.
-async function getEnrichmentReading(env: Env, id: number, timing: TimingCollector, params: URLSearchParams): Promise<Response> {
+async function getEnrichmentReading(env: Env, id: number, timing: TimingCollector, params: URLSearchParams,
+  tagAware = false, includeContentFunctions = false): Promise<Response> {
   if (params.getAll("body_revision").length > 1) return error("invalid_query");
   const rawRevision = params.get("body_revision");
   if (rawRevision !== null && (!/^(0|[1-9][0-9]*)$/.test(rawRevision) ||
       !Number.isSafeInteger(Number(rawRevision)))) return error("invalid_query");
   const knownBodyRevision = rawRevision === null ? -1 : Number(rawRevision);
-  const snapshot = await timing.measure("db", () => readSelectionSnapshot(env, id, true, knownBodyRevision));
+  const snapshot = await timing.measure("db", () => readSelectionSnapshot(env, id, true, knownBodyRevision, tagAware));
   if (!snapshot) return error("not_found", 404);
   const row = snapshot.link as unknown as EnrichmentDetailRow;
   const bodyUnchanged = knownBodyRevision >= 0 && row.app_body_revision === knownBodyRevision;
   const processable = /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\//i.test(row.url) ? 1 : 0;
-  const detail = mapEnrichmentListItem({ ...row, processable,
+  const mapped = mapEnrichmentListItem({ ...row, processable,
     cache_decision_id: snapshot.decisionId,
     cache_entity_revision: snapshot.entity?.revision ?? 0 }, true);
-  const selection = selectionPayload(snapshot, id,
-    new URLSearchParams({ include_automatic: "1", include_state: "1" }));
+  // The same SQL statement supplies body, effective tags, custom definitions
+  // and their revisions. Never add an awaited tag read to this snapshot.
+  const detail = tagAware ? projectTagSummaryRows([mapped],
+    [snapshot.link as unknown as TagSummaryRow & { id: number }], true, includeContentFunctions)[0] : mapped;
+  const selectionParams = new URLSearchParams({ include_automatic: "1", include_state: "1" });
+  if (tagAware) selectionParams.set("tag_system", "1");
+  const selection = selectionPayload(snapshot, id, selectionParams);
   const accepted = new Set<string>();
   for (const entry of snapshot.overrides) {
     if (entry.field !== "entities") continue;
