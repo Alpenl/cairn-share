@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { verifyRelease } from "./release-smoke.mjs";
 
-function fixture({ acknowledge = true, functions = true, bodyLeak = false, mismatch = false, legacyLeak = false, stale = false } = {}) {
+function fixture({ acknowledge = true, functions = true, bodyLeak = false, mismatch = false, legacyLeak = false, stale = false,
+  readingNarrow = false, readingMismatch = false } = {}) {
   const requests = [];
   return { requests, fetcher: async (url, options) => {
     requests.push({ url, options });
@@ -10,11 +11,15 @@ function fixture({ acknowledge = true, functions = true, bodyLeak = false, misma
     let body = {};
     if (url.includes("/jobs")) body = { items: [{ id: 1, content_loaded: false,
       classification: { topics: modern && mismatch ? ["ai_coding"] : [], ...(modern ? { resource_kinds: [], content_functions: [] } : {}) },
-      ...(modern ? { custom_tags: [], cache_identity: { personal_revision: 3, content_revision: 1, latest_decision_id: 2 } } : {}),
+      ...(modern ? { custom_tags: [], cache_identity: { personal_revision: 3, content_revision: 1, latest_decision_id: 2, body_revision: 0 } } : {}),
       ...(bodyLeak ? { original_text: "synthetic private body" } : {}), ...(legacyLeak && !modern ? { custom_tags: [] } : {}) }] };
     if (url.endsWith("/quality")) body = { version: 1, terms: [] };
     if (url.endsWith("/1/tags")) body = { revision: stale ? 4 : 3, content_revision: 1, decision_id: 2,
       selection: { topics: [], resource_kinds: [], content_functions: [] }, custom_tags: [] };
+    if (url.includes("/1/reading?")) body = { version: 1, body_unchanged: true,
+      detail: { id: 1, classification: { topics: [], ...(readingNarrow ? {} : { resource_kinds: readingMismatch ? ["skill"] : [], content_functions: [] }) },
+        custom_tags: [], cache_identity: { personal_revision: 3, content_revision: 1, latest_decision_id: 2, body_revision: 0 } },
+      selection: { selection: { topics: [], resource_kinds: [], content_functions: [] } } };
     return new Response(JSON.stringify(body), { headers: acknowledge && modern ? { "X-Cairn-Tag-System": "1", "X-Cairn-Search-Summary": "1",
       ...(functions ? { "X-Cairn-Content-Functions": "1" } : {}) } : {} });
   } };
@@ -23,7 +28,7 @@ function fixture({ acknowledge = true, functions = true, bodyLeak = false, misma
 test("release checks only GET and never retain credential or bookmark body", async () => {
   const { fetcher, requests } = fixture();
   const result = await verifyRelease({ token: "test-secret-only", fetcher });
-  assert.equal(requests.length, 6);
+  assert.equal(requests.length, 7);
   assert.ok(requests.every(({ options }) => options.method === "GET" && options.redirect === "error"));
   assert.equal(JSON.stringify(result).includes("test-secret-only"), false);
   assert.equal(JSON.stringify(result).includes("synthetic private body"), false);
@@ -40,4 +45,8 @@ test("effective projection mismatch and changed read identities fail closed", as
 });
 test("unnegotiated legacy shapes reject new strict-client fields", async () => {
   await assert.rejects(verifyRelease({ token: "x", ...fixture({ legacyLeak: true }) }), /legacy_unknown_fields/);
+});
+test("reading snapshots cannot erase negotiated tags or diverge from effective selections", async () => {
+  await assert.rejects(verifyRelease({ token: "x", ...fixture({ readingNarrow: true }) }), /reading_projection_mismatch/);
+  await assert.rejects(verifyRelease({ token: "x", ...fixture({ readingMismatch: true }) }), /reading_projection_mismatch/);
 });

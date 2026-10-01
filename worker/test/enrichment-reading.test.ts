@@ -2,12 +2,13 @@ import { applyD1Migrations, env, reset } from "cloudflare:test";
 import { beforeEach, expect, it } from "vitest";
 import worker, { type Env } from "../src/index";
 import { readSelectionSnapshot } from "../src/selection-state";
+import { EMPTY_AUTOMATIC } from "../src/domain";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 const bindings = () => ({ ...env, CAIRN_API_TOKEN: "app", CAIRN_ENRICHER_TOKEN: "internal" });
-function call(path: string, token = "internal", method = "GET", body?: unknown) {
+function call(path: string, token = "internal", method = "GET", body?: unknown, headers: Record<string, string> = {}) {
   return worker.fetch(new Request(`https://test/api/${path}`, {
-    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...headers },
     body: body === undefined ? undefined : JSON.stringify(body)
   }), bindings());
 }
@@ -45,6 +46,49 @@ it("exports effective views in one bounded SQL snapshot with per-link semantics"
     expect((await call("v2/links/effective-batch", "internal", "POST", bad)).status).toBe(400);
   }
   expect((await call("v2/links/effective-batch", "internal", "GET")).status).toBe(405);
+});
+
+it("preserves all negotiated tags and custom identities in full and body-unchanged reading snapshots", async () => {
+  const { id } = await (await call("links", "app", "POST", { url: "https://x.com/u/status/103" })).json() as { id: number };
+  await env.DB.prepare("UPDATE links SET original_text='article',enrichment_status='completed',classification=? WHERE id=?")
+    .bind(JSON.stringify({ topics: ["ai_coding"], form: "tool", use: "try" }), id).run();
+  const run = await env.DB.prepare(`INSERT INTO classification_runs(link_id,content_revision,spec_id,spec_hash,target_generation,
+    requested_model,policy_version,answers,operation_key,created_at) VALUES(?,1,'s','h',1,'m','p','{}','reading-tags-run','now')`).bind(id).run();
+  await env.DB.prepare(`INSERT INTO classification_decisions(link_id,run_id,content_revision,policy_version,policy,automatic,operation_key,created_at)
+    VALUES(?,?,1,'p','{}',?,'reading-tags-decision','now')`).bind(id, run.meta.last_row_id,
+      JSON.stringify({ ...EMPTY_AUTOMATIC, topics: ["ai_coding"], resource_kinds: ["software"], content_functions: ["tool"] })).run();
+  await env.DB.prepare(`INSERT INTO custom_tags(id,label,normalized_label,created_at,updated_at)
+    VALUES('reading-mark','My mark','my mark','now','now')`).run();
+  await env.DB.prepare("INSERT INTO custom_tag_links(link_id,tag_id,created_at) VALUES(?,'reading-mark','now')").bind(id).run();
+  const headers = { "X-Cairn-Tag-System": "1", "X-Cairn-Content-Functions": "1" };
+  const path = `enrichment/jobs/${id}/reading`;
+  const response = await call(path, "internal", "GET", undefined, headers);
+  expect(response.headers.get("X-Cairn-Tag-System")).toBe("1");
+  expect(response.headers.get("X-Cairn-Content-Functions")).toBe("1");
+  const reading = await response.json() as any;
+  const detail = await (await call(`enrichment/jobs/${id}`, "internal", "GET", undefined, headers)).json() as any;
+  expect(reading.detail.classification).toEqual(detail.classification);
+  expect(reading.detail.classification).toMatchObject({ topics: ["ai_coding"], resource_kinds: ["software"], content_functions: ["tool"] });
+  expect(reading.detail.classification_reviewed).toBe(false);
+  expect(reading.detail.custom_tags).toEqual(detail.custom_tags);
+  expect(reading.detail.custom_tags).toMatchObject([{ id: "reading-mark", tag_ref: "custom/default/reading-mark", revision: 1 }]);
+  expect(reading.selection.selection.resource_kinds).toEqual(["software"]);
+  expect(reading.selection.automatic.resource_kinds).toEqual(["software"]);
+  expect(reading.selection.revision).toBe(reading.detail.cache_identity.personal_revision);
+  const unchanged = await (await call(`${path}?body_revision=${reading.detail.cache_identity.body_revision}`,
+    "internal", "GET", undefined, headers)).json() as any;
+  expect(unchanged.body_unchanged).toBe(true);
+  expect(unchanged.detail.original_text).toBeNull();
+  expect(unchanged.detail.classification).toEqual(reading.detail.classification);
+  expect(unchanged.detail.custom_tags).toEqual(reading.detail.custom_tags);
+  const legacy = await (await call(path)).json() as any;
+  expect(legacy.detail.classification ?? {}).not.toHaveProperty("resource_kinds");
+  expect(legacy.detail.classification ?? {}).not.toHaveProperty("content_functions");
+  expect(legacy.detail).not.toHaveProperty("custom_tags");
+  expect(legacy.selection.selection).not.toHaveProperty("resource_kinds");
+  const tagsOnly = await (await call(path, "internal", "GET", undefined, { "X-Cairn-Tag-System": "1" })).json() as any;
+  expect(tagsOnly.detail.classification.resource_kinds).toEqual(["software"]);
+  expect(tagsOnly.detail.classification).not.toHaveProperty("content_functions");
 });
 
 it("returns article, effective selection and entity state from one reading contract", async () => {
@@ -118,6 +162,9 @@ it("pins text and revision to one SQLite read snapshot", async () => {
   const created = await call("links", "app", "POST", { url: "https://x.com/u/status/102" });
   const { id } = await created.json() as { id: number };
   await env.DB.prepare("UPDATE links SET original_text='old' WHERE id=?").bind(id).run();
+  await env.DB.prepare(`INSERT INTO custom_tags(id,label,normalized_label,created_at,updated_at)
+    VALUES('snapshot-mark','Old label','old label','now','now')`).run();
+  await env.DB.prepare("INSERT INTO custom_tag_links(link_id,tag_id,created_at) VALUES(?,'snapshot-mark','now')").bind(id).run();
   const originalRevision = await env.DB.prepare("SELECT content_revision FROM links WHERE id=?").bind(id).first<number>("content_revision");
   let reads = 0;
   const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, { get(target, key) {
@@ -126,6 +173,7 @@ it("pins text and revision to one SQLite read snapshot", async () => {
       reads++;
       const value = await target.first();
       await env.DB.prepare("UPDATE links SET original_text='new' WHERE id=?").bind(id).run();
+      await env.DB.prepare("UPDATE custom_tags SET label='New label',normalized_label='new label',revision=revision+1 WHERE id='snapshot-mark'").run();
       return value;
     };
     return Reflect.get(target, key);
@@ -133,11 +181,15 @@ it("pins text and revision to one SQLite read snapshot", async () => {
   const db = new Proxy(env.DB, { get(target, key) {
     return key === "prepare" ? (sql: string) => wrap(target.prepare(sql)) : Reflect.get(target, key);
   } });
-  const snapshot = await readSelectionSnapshot({ DB: db } as Env, id, true);
+  const snapshot = await readSelectionSnapshot({ DB: db } as Env, id, true, -1, true);
   expect(reads).toBe(1);
   expect((snapshot?.link as unknown as { original_text: string }).original_text).toBe("old");
   expect(snapshot?.contentRevision).toBe(originalRevision);
-  const fresh = await readSelectionSnapshot({ DB: env.DB } as Env, id, true);
+  expect(JSON.parse((snapshot?.link as unknown as { tag_custom_tags: string }).tag_custom_tags))
+    .toMatchObject([{ id: "snapshot-mark", label: "Old label", revision: 1 }]);
+  const fresh = await readSelectionSnapshot({ DB: env.DB } as Env, id, true, -1, true);
   expect((fresh?.link as unknown as { original_text: string }).original_text).toBe("new");
   expect(fresh?.contentRevision).toBe((originalRevision ?? 0) + 1);
+  expect(JSON.parse((fresh?.link as unknown as { tag_custom_tags: string }).tag_custom_tags))
+    .toMatchObject([{ id: "snapshot-mark", label: "New label", revision: 2 }]);
 });
