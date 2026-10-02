@@ -4,7 +4,7 @@ import { tagQuality } from "./tag-quality";
 import { bookmarkFilters, type Env } from "./index";
 import { canonicalJSON, compactOverrides, effectiveView, normalizeField, type Override, type OverrideField, type OverrideAction } from "./domain";
 import { projectionInputGuard, projectionWrites, rebuildProjection } from "./domain-routes";
-import { readSelectionSnapshot, readSelectionExport, readTagSummaries, tagSummaryFromRow, type TagSummaryRow, type TagSummary } from "./selection-state";
+import { readSelectionSnapshot, readSelectionExport, readTagSummaries, tagSummaryFromRow, type TagSummaryRow, type TagSummary, type TagOriginsRow, type TagDetailRow } from "./selection-state";
 import { selectionPayload } from "./taxonomy-routes";
 import { findTerm, taxonomyV2, normalizeTerm, topicGranularityAware, termForTransport } from "./taxonomy-v2";
 
@@ -82,12 +82,16 @@ function projectTagSummaries(items: Array<Record<string, unknown>>, summaryOf: (
   });
 }
 async function manualOrigins(env: Env, id: number, revision: number) {
-  const rows = await env.DB.prepare(`SELECT f.field,f.term,f.action,o.actions,o.context FROM tag_change_facts f
+  const rows = await env.DB.prepare(`SELECT f.field,f.term,f.action,o.actions,
+    CASE WHEN o.context IS NULL THEN NULL ELSE json_object('restored_actions',json_extract(o.context,'$.restored_actions')) END AS context FROM tag_change_facts f
     LEFT JOIN tag_operations o ON o.operation_key=f.operation_id WHERE f.link_id=? AND f.revision<=? AND f.field<>'operation'
-    ORDER BY f.revision,f.id`).bind(id, revision).all<{ field: string; term: string; action: string; actions: string | null; context: string | null }>();
+    ORDER BY f.revision,f.id`).bind(id, revision).all<TagOriginsRow>();
+  return originsFromRows(rows.results);
+}
+function originsFromRows(rows: TagOriginsRow[]) {
   const origins: Record<string, "accept" | "confirm"> = {};
-  for (const row of rows.results) {
-    const context = row.context ? JSON.parse(row.context) as { restored_actions?: Record<string, "accept" | "confirm"> } : {};
+  for (const row of rows) {
+    const context = (typeof row.context === "string" ? JSON.parse(row.context) : row.context ?? {}) as { restored_actions?: Record<string, "accept" | "confirm"> };
     const logical = row.actions ? JSON.parse(row.actions) as Action[] : [];
     const key = `${row.field}:${row.term}`;
     origins[key] = context.restored_actions?.[key] ?? (logical.some(a => a.action === "confirm" &&
@@ -96,11 +100,12 @@ async function manualOrigins(env: Env, id: number, revision: number) {
   return origins;
 }
 export async function tagPayload(env: Env, id: number) {
-  const snapshot = await readSelectionSnapshot(env, id);
+  const snapshot = await readSelectionSnapshot(env, id, false, -1, true, true);
   if (!snapshot) return null;
   const params = new URLSearchParams({ include_state: "1", include_automatic: "1", tag_system: "1" });
   const payload = selectionPayload(snapshot, id, params);
-  const origins = await manualOrigins(env, id, snapshot.link.personal_revision);
+  const row = snapshot.link as unknown as TagDetailRow;
+  const origins = originsFromRows(JSON.parse(row.tag_origins));
   for (const [dimension, state] of Object.entries(payload.state!.fields)) {
     for (const value of state.values) {
       if (value.origin !== "human") continue;
@@ -109,13 +114,11 @@ export async function tagPayload(env: Env, id: number) {
     }
   }
   const evidence = snapshot.state.evidence;
-  const archive = await env.DB.prepare(`SELECT CASE WHEN length(trim(COALESCE(original_text,'')))>0 THEN 1 ELSE 0 END AS available
-    FROM links WHERE id=? AND content_revision=?`).bind(id, snapshot.contentRevision).first<{ available: number }>();
   const sourceStatus = evidence ? evidence.completeness === "empty" ? "empty" :
-    evidence.truncated || ["partial", "truncated"].includes(evidence.completeness) ? "partial" : "available" : archive ? archive.available ? "available" : "empty" : "unknown";
+    evidence.truncated || ["partial", "truncated"].includes(evidence.completeness) ? "partial" : "available" : row.source_available ? "available" : "empty";
   return { ...payload, content_revision: snapshot.contentRevision, decision_id: snapshot.decisionId,
     source_state: { status: sourceStatus, basis: evidence ? "evidence_snapshot" : "archive", content_revision: snapshot.contentRevision, evidence_snapshot_id: evidence?.id ?? null },
-    custom_tags: await customOf(env, id) };
+    custom_tags: tagSummaryFromRow(row).custom_tags.map(tagged) };
 }
 type Action = Record<string, unknown>;
 type Receipt = { link_id: number; payload_hash: string; revision: number; actions: string; before_overrides: string; before_custom: string; reverts_operation: string | null; context?: string };

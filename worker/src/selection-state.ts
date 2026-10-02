@@ -22,6 +22,8 @@ type Row = { id: number; personal_revision: number; content_revision: number; cl
 export type SummaryCustomTag = { id: string; owner_id: string; label: string; revision: number; status: string };
 export type TagSummary = { topics: string[]; resource_kinds: string[]; content_functions: string[]; custom_tags: SummaryCustomTag[] };
 export type TagSummaryRow = { tag_topics: string; tag_resources: string; tag_functions: string; tag_custom_tags: string };
+export type TagOriginsRow = { field: string; term: string; action: string; actions: string | null; context: string | null };
+export type TagDetailRow = TagSummaryRow & { tag_origins: string; source_available: number };
 
 // Membership is maintained transactionally from canonical facts by 0049.
 // Ordering is the automatic order followed by surviving manual action order.
@@ -103,9 +105,16 @@ function selectionSQL(where: string, includeReading: boolean, extraColumns = "")
     FROM links l WHERE ${where}`;
 }
 
-export async function readSelectionSnapshot(env: Env, id: number, includeReading = false, knownBodyRevision = -1, includeTags = false) {
+export async function readSelectionSnapshot(env: Env, id: number, includeReading = false, knownBodyRevision = -1, includeTags = false, includeTagDetails = false) {
+  const detailColumns = includeTagDetails ? `,
+    CASE WHEN length(trim(COALESCE(l.original_text,'')))>0 THEN 1 ELSE 0 END AS source_available,
+    (SELECT json_group_array(json_object('field',f.field,'term',f.term,'action',f.action,'actions',o.actions,
+      'context',CASE WHEN o.context IS NULL THEN NULL ELSE json_object('restored_actions',json_extract(o.context,'$.restored_actions')) END))
+      FROM (SELECT field,term,action,operation_id FROM tag_change_facts
+        WHERE link_id=l.id AND revision<=l.personal_revision AND field<>'operation' ORDER BY revision,id) f
+      LEFT JOIN tag_operations o ON o.operation_key=f.operation_id) AS tag_origins` : "";
   const link = await env.DB.prepare(selectionSQL("l.id=?", includeReading,
-    includeTags ? `,${tagSummaryColumns("l")}` : ""))
+    (includeTags ? `,${tagSummaryColumns("l")}` : "") + detailColumns))
     .bind(...(includeReading ? [knownBodyRevision, knownBodyRevision, id] : [id])).first<Row>();
   return link ? selectionFromRow(link) : null;
 }

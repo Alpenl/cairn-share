@@ -1,4 +1,6 @@
 import { readBoundedJSON, readJSONObject } from "./json-body";
+import { ReadProfile, profileBindings } from "./read-profiling";
+import { indexedSearchCandidate } from "./search-index";
 import { encodeCursor, decodeCursor } from "./cursor";
 import { cleanupDeletedImages, maintainPrivacy } from "./privacy";
 import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
@@ -156,8 +158,8 @@ type ErrorCode =
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest",
-  "Access-Control-Expose-Headers": "X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage, If-None-Match",
+  "Access-Control-Expose-Headers": "X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -242,6 +244,7 @@ function cacheIdentityColumns(enabled: boolean): string {
 type CacheState = "MISS" | "HIT" | "BYPASS";
 
 class TimingCollector {
+  readonly profile = new ReadProfile();
   private readonly started = performance.now();
   private readonly entries: Array<{ name: string; duration: number }> = [];
   private cacheState: CacheState | null = null;
@@ -293,7 +296,10 @@ class TimingCollector {
     if (this.cacheState !== null) {
       metrics.push(`cache-state;desc="${this.cacheState}"`);
     }
-    for (const entry of this.entries) {
+    metrics.push(`db;dur=${formatDuration(this.profile.dbMilliseconds)}`, `r2;dur=${formatDuration(this.profile.r2Milliseconds)}`,
+      `sql-count;desc="${this.profile.sqlCount}"`, `db-round-trips;desc="${this.profile.dbRoundTrips}"`,
+      `rows-read;desc="${this.profile.rowsRead}"`, `rows-read-unknown;desc="${this.profile.unknownRows}"`, `r2-calls;desc="${this.profile.r2Calls}"`);
+    for (const entry of this.entries.filter(entry => entry.name !== "db")) {
       metrics.push(`${entry.name};dur=${formatDuration(entry.duration)}`);
     }
     return metrics.join(", ");
@@ -306,6 +312,7 @@ export default {
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const timing = new TimingCollector();
+    env = profileBindings(env, timing.profile);
     const path = new URL(request.url).pathname;
     if (path === "/api/internal/observability" || request.method === "OPTIONS") {
       return withServerTiming(await handleRequest(request, env, timing), timing);
@@ -382,6 +389,9 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   if (candidateFlag !== null && candidateFlag !== "2") return error("capability_mismatch", 409);
   if (request.headers.has("X-Cairn-Search-Summary") && request.headers.get("X-Cairn-Search-Summary") !== "1") return error("capability_mismatch", 409);
   const granularityFlag = request.headers.get("X-Cairn-Topic-Granularity");
+  for (const capability of ["X-Cairn-Image-Privacy", "X-Cairn-Backstage"]) {
+    if (request.headers.has(capability) && request.headers.get(capability) !== "1") return error("capability_mismatch", 409);
+  }
   if (granularityFlag !== null && (granularityFlag !== "1" || !topicGranularityAware(request))) return error("capability_mismatch", 409);
   if (url.searchParams.has("topic_refinements") && !topicGranularityAware(request)) return error("capability_mismatch", 409);
   // This is an internal cache discriminator for the two negotiated bookmark
@@ -584,6 +594,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => getEnrichmentOverview(request, url, env, timing));
+  }
+
+  if (path === "/api/enrichment/backstage") {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => getEnrichmentBackstage(request, url, env, timing));
   }
 
   if (path === "/api/enrichment/taxonomy") {
@@ -987,6 +1003,8 @@ export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; 
   if (query !== undefined) {
     const terms = query.split(/\s+/);
     if (terms.length > 10) return error("invalid_query");
+    const candidate = indexedSearchCandidate(terms);
+    if (candidate) { clauses.push(candidate.clause); bindings.push(candidate.binding); }
     for (const term of terms) {
       const like = `%${escapeLike(term)}%`;
       const fields = ["url", "note", "ai_title", "summary", "translated_text", "original_text", "why",
@@ -996,7 +1014,7 @@ export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; 
         `(CASE WHEN NOT EXISTS (SELECT 1 FROM entity_states WHERE link_id=links.id)
           AND NOT EXISTS (SELECT 1 FROM curation_overrides WHERE link_id=links.id AND field IN ('entity','entities'))
           THEN json_extract(classification, '$.entities')
-          ELSE (SELECT group_concat(term, ' ') FROM effective_entity_terms WHERE link_id=links.id) END)`];
+          ELSE (SELECT group_concat(term, ' ') FROM effective_entity_memberships WHERE link_id=links.id) END)`];
       clauses.push(`(${fields.map((field) => `COALESCE(${field}, '') LIKE ? ESCAPE '\\'`).join(" OR ")})`);
       bindings.push(...fields.map(() => like));
     }
@@ -1091,6 +1109,33 @@ interface EnrichmentOverviewRow extends EnrichmentCountRow {
   view_compiled: number;
   view_drop: number;
   view_uncertain: number;
+}
+
+async function getEnrichmentBackstage(request: Request, url: URL, env: Env, timing: TimingCollector): Promise<Response> {
+  if (request.headers.get("X-Cairn-Backstage") !== "1") return error("capability_mismatch", 409);
+  if (url.searchParams.size) return error("invalid_query");
+  const tagAware = request.headers.get("X-Cairn-Tag-System") === "1";
+  const rows = env.DB.prepare(`SELECT id,url,note,created_at,${ENRICHMENT_COLUMNS},${contentColumns(true)}
+    ${tagAware ? "," + tagSummaryColumns() : ""} FROM links
+    WHERE is_x=1 AND enrichment_status IN('failed','exhausted') ORDER BY id DESC LIMIT 100`);
+  const aggregate = env.DB.prepare(`SELECT COUNT(*) AS total,
+    ${["pending","processing","completed","failed","exhausted"].map(status => `COALESCE(SUM(is_x=1 AND enrichment_status='${status}'),0) AS ${status}`).join(",")},
+    COALESCE(SUM(is_x=0),0) AS unsupported,
+    ${["inbox","kept","compiled","drop"].map(status => `COALESCE(SUM(curation_status='${status}'),0) AS view_${status}`).join(",")},
+    COALESCE(SUM(curation IS NULL AND COALESCE(json_extract(classification,'$.uncertainty'),1)=1),0) AS view_uncertain FROM links`);
+  // Attention, totals and fixed views are from one transactional D1 round trip.
+  const [attentionResult, aggregateResult] = await timing.measure("db", () => env.DB.batch([rows,aggregate]));
+  const row = aggregateResult.results[0] as unknown as EnrichmentOverviewRow;
+  const counts = mapEnrichmentCounts(row);
+  const items = attentionResult.results as unknown as Array<EnrichmentListRow & TagSummaryRow>;
+  const mapped = items.map(item => ({ ...mapEnrichmentListItem(item), content_loaded: false }));
+  return json({ version: 1,
+    attention: tagAware ? projectTagSummaryRows(mapped, items, true, contentFunctionsAware(request)) : mapped,
+    attention_total: counts.failed + counts.exhausted, counts,
+    overview: { version: 1, views: { all: counts.total, inbox: row.view_inbox, kept: row.view_kept,
+      compiled: row.view_compiled, drop: row.view_drop, uncertain: row.view_uncertain }, counts,
+      attention: counts.failed + counts.exhausted, queued: counts.pending + counts.processing }
+  },200,{ "X-Cairn-Backstage": "1" });
 }
 
 async function getEnrichmentOverview(request: Request, url: URL, env: Env, timing: TimingCollector): Promise<Response> {
@@ -2063,21 +2108,26 @@ async function getEnrichmentImage(request: Request, env: Env, key: string): Prom
   if (!isValidImageKey(key)) return error("not_found", 404);
 
   const id = Number(key.split("/")[1]);
-  if (!Number.isSafeInteger(id) || !await env.DB.prepare("SELECT id FROM links WHERE id=?").bind(id).first()) return error("not_found", 404);
-  const object = await env.ENRICHMENT_IMAGES.get(key);
+  const privacyAware = request.headers.get("X-Cairn-Image-Privacy") === "1";
+  const visible = () => env.DB.prepare(`SELECT id FROM links WHERE id=?${privacyAware ? ` AND EXISTS(
+    SELECT 1 FROM json_each(links.images) image WHERE json_extract(image.value,'$.key')=?)` : ""}`)
+    .bind(...(privacyAware ? [id,key] : [id])).first();
+  if (!Number.isSafeInteger(id) || !await visible()) return error("not_found", 404);
+  const conditional = request.headers.get("if-none-match");
+  const object = await env.ENRICHMENT_IMAGES.get(key, conditional ? { onlyIf: new Headers({ "If-None-Match": conditional }) } : undefined);
   // Recheck after storage I/O, including before conditional 304 responses.
-  if (!await env.DB.prepare("SELECT id FROM links WHERE id=?").bind(id).first()) {
-    await object?.body.cancel();
+  if (!await visible()) {
+    if (object && "body" in object) await object.body.cancel();
     return error("not_found", 404);
   }
   if (object === null) return error("not_found", 404);
 
   const etag = object.httpEtag;
-  if (request.headers.get("if-none-match") === etag) {
-    await object.body.cancel();
+  if (!("body" in object) || conditional === etag) {
+    if ("body" in object) await object.body.cancel();
     return new Response(null, {
       status: 304,
-      headers: { ETag: etag, "Cache-Control": "private, no-store", ...CORS_HEADERS }
+      headers: { ETag: etag, "Cache-Control": "private, no-store", ...(privacyAware ? { "X-Cairn-Image-Privacy": "1" } : {}), ...CORS_HEADERS }
     });
   }
 
@@ -2086,6 +2136,7 @@ async function getEnrichmentImage(request: Request, env: Env, key: string): Prom
   headers.set("ETag", etag);
   headers.set("Cache-Control", "private, no-store");
   headers.set("X-Content-Type-Options", "nosniff");
+  if (privacyAware) headers.set("X-Cairn-Image-Privacy", "1");
   return new Response(object.body, { headers });
 }
 
