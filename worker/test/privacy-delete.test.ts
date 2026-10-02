@@ -161,7 +161,7 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("entity_cache",{cache_key:"private-entity",link_id:id,evidence_snapshot_id:snapshotID,content_revision:1,content_hash:"hash",source_links:"[]",owner_token:"owner",status:"completed",request_json:"private entity material",candidates:"[]",spec_hash:"spec",answers:"{}",created_at:1,expires_at:Date.now()+86400000});
   const tables=["entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links","custom_tag_links","tag_operations","tag_change_facts"];
   tables.push("effective_tag_memberships","classification_reservations","classification_attempt_operations","classification_provider_attempts");
-  tables.push("effective_entity_memberships","bookmark_search_documents","bookmark_search_grams");
+  tables.push("effective_entity_memberships","bookmark_search_documents","bookmark_search_grams","bookmark_search_fields","bookmark_search_field_grams");
   await env.DB.prepare("INSERT OR IGNORE INTO effective_entity_memberships(link_id,term) VALUES(?,'private derived entity')").bind(id).run();
   const schema=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_*'").all<{name:string}>();
   const linked:string[]=[];
@@ -172,9 +172,10 @@ it("atomically deletes populated private tables, references, budgets and cached 
   expect(linked.sort()).toEqual([...tables].sort());
   // Recovery rows require a settled permit and expired lease. The real route
   // and its deletion are exercised in provider-attempts.test.ts.
-  for(const table of tables.filter(t=>t!=="bookmark_search_grams")) expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first("n"),table)
+  for(const table of tables.filter(t=>!["bookmark_search_grams","bookmark_search_fields","bookmark_search_field_grams"].includes(t))) expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first("n"),table)
     .toBe(table==="enrichment_provider_source_recoveries" || table==="enrichment_provider_reading_recoveries"?0:1);
-  expect(await env.DB.prepare("SELECT COUNT(*) n FROM bookmark_search_grams WHERE link_id=?").bind(id).first<number>("n")).toBeGreaterThan(0);
+  for (const table of ["bookmark_search_grams","bookmark_search_fields","bookmark_search_field_grams"])
+    expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first<number>("n"),table).toBeGreaterThan(0);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_decision_runs").first("n")).toBe(1);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_run_reuse_sources").first("n")).toBe(1);
   const before=await request(`links/${id}`);expect(before.status).toBe(200);expect(before.headers.get("Cache-Control")).toBe("private, no-store");
