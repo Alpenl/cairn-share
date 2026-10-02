@@ -18,6 +18,7 @@ internal data class BookmarkFilters(
     val affordances: List<String> = emptyList(),
     val entityState: String = "",
     val topics: List<String> = emptyList(),
+    val topicRefinements: List<String> = emptyList(),
     val resourceKinds: List<String> = emptyList(),
     val customTags: List<String> = emptyList(),
     val topicsMode: String = "any",
@@ -29,18 +30,19 @@ internal data class BookmarkFilters(
         require(listOf(topicsMode, resourceMode, customMode, functionsMode).all { it in setOf("any", "all") })
     }
 
-    fun needsEffectiveFilterContract(): Boolean = topic.isNotEmpty() || topics.isNotEmpty() ||
+    fun needsEffectiveFilterContract(): Boolean = topic.isNotEmpty() || topics.isNotEmpty() || topicRefinements.isNotEmpty() ||
         form.isNotEmpty() || use.isNotEmpty() || contentFunctions.isNotEmpty() ||
         carriers.isNotEmpty() || affordances.isNotEmpty() || entityState.isNotEmpty() ||
         resourceKinds.isNotEmpty() || customTags.isNotEmpty()
 
-    fun needsTagFilterContract(): Boolean = resourceKinds.isNotEmpty() || customTags.isNotEmpty() ||
+    fun needsTagFilterContract(): Boolean = resourceKinds.isNotEmpty() || customTags.isNotEmpty() || topicRefinements.isNotEmpty() ||
         (topicsMode == "all" && (topics.isNotEmpty() || topic.isNotBlank())) || (functionsMode == "all" && contentFunctions.isNotEmpty())
 
     fun parameters(now: Instant = Instant.now()): Map<String, String> = buildMap {
         put("curation_status", curationStatus)
         put("topic", topic)
         if (topics.isNotEmpty()) put("topics", topics.joinToString(","))
+        if (topicRefinements.isNotEmpty()) put("topic_refinements", topicRefinements.joinToString(","))
         if (resourceKinds.isNotEmpty()) put("resource_kinds", resourceKinds.joinToString(","))
         if (customTags.isNotEmpty()) put("custom_tags", customTags.joinToString(","))
         if (topicsMode == "all" && (topics.isNotEmpty() || topic.isNotBlank())) put("topics_mode", topicsMode)
@@ -63,6 +65,7 @@ internal data class BookmarkFilters(
         val labels = data?.classification
         return (curationStatus.isBlank() || (data?.curationStatus?.apiValue ?: "inbox") == curationStatus) &&
             matchesValues(topics + listOf(topic).filter { it.isNotBlank() }, labels?.topics.orEmpty(), topicsMode) &&
+            matchesValues(topicRefinements, labels?.topics.orEmpty(), "all") &&
             (form.isBlank() || labels?.form == form) && (use.isBlank() || labels?.use == use) &&
             (source.isBlank() || data?.source == source) &&
             matchesValues(resourceKinds, labels?.resourceKinds.orEmpty(), resourceMode) &&

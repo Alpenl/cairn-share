@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -99,7 +100,7 @@ internal fun MultidimensionalCurationSection(
             }
         }
         val newTags = taxonomy.resourceKinds.isNotEmpty()
-        DimensionRow("主题", "topics", taxonomy.topics.filter { it.active || it.id in effective.topics }.map { it.id to it.label }, effective.topics, busy, onAction, known = "topics" !in effective.unknownResetFields, state = effective.state?.fields?.get("topics"), pending = "topics" in effective.pendingFields, separateRemoval = newTags)
+        DimensionRow("主题", "topics", taxonomy.topics.filter { it.active || it.id in effective.topics }.map { it.id to it.label }, effective.topics, busy, onAction, known = "topics" !in effective.unknownResetFields, state = effective.state?.fields?.get("topics"), pending = "topics" in effective.pendingFields, separateRemoval = newTags, aliases = taxonomy.topics.associate { it.id to it.aliases })
         if (newTags) DimensionRow("资源类型", "resource_kinds", taxonomy.resourceKinds.filter { it.active || it.id in effective.resourceKinds }.map { it.id to it.label }, effective.resourceKinds, busy, onAction, known = "resource_kinds" !in effective.unknownResetFields, state = effective.state?.fields?.get("resource_kinds"), pending = "resource_kinds" in effective.pendingFields, separateRemoval = true)
         DimensionRow("内容功能", "content_functions", taxonomy.contentFunctions.map { it.id to it.label }, effective.contentFunctions, busy, onAction, known = "content_functions" !in effective.unknownResetFields, state = effective.state?.fields?.get("content_functions"), pending = "content_functions" in effective.pendingFields, separateRemoval = newTags)
         var showSecondary by remember(linkId) { mutableStateOf(false) }
@@ -174,8 +175,10 @@ private fun DimensionRow(
     state: SelectionFieldState? = null,
     pending: Boolean = false,
     separateRemoval: Boolean = false,
+    aliases: Map<String, List<String>> = emptyMap(),
 ) {
     var inspecting by remember(field) { mutableStateOf<String?>(null) }
+    var query by remember(field) { mutableStateOf("") }
     if (inspecting != null) AlertDialog(
         onDismissRequest = { inspecting = null },
         title = { Text(terms.firstOrNull { it.first == inspecting }?.second ?: inspecting.orEmpty()) },
@@ -204,8 +207,10 @@ private fun DimensionRow(
                 modifier = Modifier.testTag("v2_${field}_reset_pending"))
             return@Column
         }
+        if (field == "topics") OutlinedTextField(query, { query = it }, label = { Text("查找主题标签") }, singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("v2_topics_search"))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            for ((id, termLabel) in terms) {
+            for ((id, termLabel) in terms.filter { (id, label) -> query.isBlank() || (listOf(id, label) + aliases[id].orEmpty()).any { it.contains(query.trim(), ignoreCase = true) } }) {
                 val isSelected = selected.contains(id)
                 AssistChip(
                     onClick = {

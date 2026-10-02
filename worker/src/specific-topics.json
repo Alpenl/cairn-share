@@ -1,0 +1,849 @@
+[
+  {
+    "id": "portrait_photography",
+    "label": "写真",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "人物写真"
+    ],
+    "description": "以人物写真、肖像摄影或写真风格图像为主要制作目标，包含实拍和生成。",
+    "includes": [
+      "人像写真制作",
+      "写真复拍"
+    ],
+    "excludes": [
+      "普通头像或人物插画",
+      "仅有照片配图",
+      "仅研究人物一致性而不制作写真"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "写真",
+      "portrait photography",
+      "portrait photo",
+      "photo shoot",
+      "photoshoot",
+      "复拍"
+    ],
+    "relations": [
+      {
+        "id": "image_creation",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "character_consistency",
+    "label": "人物一致性",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "角色一致性"
+    ],
+    "description": "跨图像、镜头或生成轮次维持同一人物身份、外貌与特征。",
+    "includes": [
+      "人物锁定资料板",
+      "同一人物换场景换机位"
+    ],
+    "excludes": [
+      "只是出现人像",
+      "仅写作角色性格一致",
+      "一般风格一致"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "人物一致性",
+      "人物锁定",
+      "身份分控",
+      "identity consistency",
+      "character consistency",
+      "same person"
+    ],
+    "relations": [
+      {
+        "id": "image_creation",
+        "kind": "related"
+      },
+      {
+        "id": "video_creation",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "whiteboard_animation",
+    "label": "白板动画",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "制作手绘白板或逐步描画的讲解动画。",
+    "includes": [
+      "字幕驱动白板动画",
+      "手绘讲解视频"
+    ],
+    "excludes": [
+      "静态白板笔记",
+      "一般界面动画"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "白板动画",
+      "whiteboard animation",
+      "手绘白板"
+    ],
+    "relations": [
+      {
+        "id": "video_creation",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "code_refactoring",
+    "label": "代码重构",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "代码重构优化"
+    ],
+    "description": "改善已有代码结构、清理冗余和技术债，同时保持预期行为。",
+    "includes": [
+      "整理长期迭代代码",
+      "清理屎山与补充回归测试"
+    ],
+    "excludes": [
+      "仅新建软件",
+      "只推荐编程助手"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "代码重构",
+      "重构",
+      "屎山",
+      "refactor",
+      "technical debt",
+      "代码清理"
+    ],
+    "relations": [
+      {
+        "id": "ai_coding",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "writing_style_imitation",
+    "label": "文风模仿",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "从作者样本提取并复现其写作风格、语气和表达习惯。",
+    "includes": [
+      "写作风格蒸馏",
+      "个人文风样本库"
+    ],
+    "excludes": [
+      "仅通用润色",
+      "模型权重蒸馏",
+      "图像风格迁移"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "文风",
+      "写作蒸馏",
+      "writing style",
+      "风格模仿",
+      "风格提取"
+    ],
+    "relations": [
+      {
+        "id": "writing_creation",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "natural_writing",
+    "label": "去AI味",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "去 AI 味"
+    ],
+    "description": "识别和减少文本中模板化、空泛或机械的AI表达，使其更自然具体。",
+    "includes": [
+      "清除AI写作套路",
+      "减少模板句式"
+    ],
+    "excludes": [
+      "去除图片商业抛光",
+      "规避检测器而不改善写作",
+      "仅泛泛称文笔好"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "去AI味",
+      "去 AI 味",
+      "AI腔",
+      "AI 腔",
+      "ai slop",
+      "humanize writing",
+      "模板感"
+    ],
+    "relations": [
+      {
+        "id": "writing_creation",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "fiction_writing",
+    "label": "小说创作",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "小说的叙事、角色、设定、场景描写和创作工具。",
+    "includes": [
+      "AI小说工作流",
+      "改善小说场景描写"
+    ],
+    "excludes": [
+      "一般商业文案",
+      "人物图像生成"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "小说",
+      "fiction",
+      "novel writing",
+      "叙事",
+      "角色设定"
+    ],
+    "relations": [
+      {
+        "id": "writing_creation",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "wechat_records",
+    "label": "微信记录",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "读取、检索、导出或整理微信聊天记录和个人微信数据。",
+    "includes": [
+      "群聊摘要",
+      "本地微信资料检索"
+    ],
+    "excludes": [
+      "抓取公开公众号文章",
+      "仅在微信发布推广",
+      "泛用聊天软件"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "微信记录",
+      "微信聊天",
+      "微信数据",
+      "群聊",
+      "wechat",
+      "wx-cli"
+    ],
+    "relations": [
+      {
+        "id": "knowledge_workflow",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "wechat_publishing",
+    "label": "公众号运营",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "公众号定位、选题、创作发布、增长和变现的实际方法或资源。",
+    "includes": [
+      "公众号创作流程",
+      "公众号运营经验"
+    ],
+    "excludes": [
+      "仅采集公开文章",
+      "文章发布在公众号但内容无关"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "公众号",
+      "公众号运营",
+      "wechat public account",
+      "选题",
+      "图文发布"
+    ],
+    "relations": [
+      {
+        "id": "creator_business",
+        "kind": "related"
+      },
+      {
+        "id": "writing_creation",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "agent_memory",
+    "label": "Agent记忆",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "为AI Agent设计或配置跨轮次、跨会话记忆及可检索历史，以减少上下文丢失。",
+    "includes": [
+      "笔记替代上下文压缩",
+      "Agent长期记忆"
+    ],
+    "excludes": [
+      "仅归档用户资料",
+      "一般硬件内存",
+      "文章提到历史但未讨论Agent记忆"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "长期记忆",
+      "上下文压缩",
+      "会话记忆",
+      "agent memory",
+      "可搜索历史",
+      "笔记功能"
+    ],
+    "relations": [
+      {
+        "id": "agent_workflow",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "agent_instructions",
+    "label": "长期指令",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "Agent长期指令"
+    ],
+    "description": "配置、审计和维护AGENTS.md、项目规则等长期生效的Agent行为指令。",
+    "includes": [
+      "审计AGENTS.md",
+      "移除过时或冲突规则"
+    ],
+    "excludes": [
+      "仅发布领域Skill",
+      "一次性提示词",
+      "一般工作制度"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "AGENTS.md",
+      "长期指令",
+      "项目规则",
+      "SKILL.md",
+      "agent instructions",
+      "规则审计"
+    ],
+    "relations": [
+      {
+        "id": "agent_workflow",
+        "kind": "related"
+      },
+      {
+        "id": "ai_coding",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "ui_motion",
+    "label": "界面动效",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "UI动效"
+    ],
+    "description": "网页或App中的微交互、加载反馈、转场及动画组件设计。",
+    "includes": [
+      "加载动画",
+      "React微交互组件"
+    ],
+    "excludes": [
+      "视频动画",
+      "白板讲解视频",
+      "仅静态界面排版"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "微交互",
+      "界面动效",
+      "加载动效",
+      "motion",
+      "microinteraction",
+      "动画组件",
+      "easing"
+    ],
+    "relations": [
+      {
+        "id": "ui_design",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "design_systems",
+    "label": "设计规范",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "界面的字体、颜色、间距、组件和交互规范及设计系统。",
+    "includes": [
+      "移动UI设计token",
+      "统一按钮卡片规范"
+    ],
+    "excludes": [
+      "仅展示一个好看页面",
+      "一般产品使用说明"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "设计规范",
+      "设计系统",
+      "design system",
+      "design token",
+      "typography",
+      "字距"
+    ],
+    "relations": [
+      {
+        "id": "ui_design",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "web_archiving",
+    "label": "网页采集",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "抓取网页或公开文章，提取正文并导出、归档或同步保存。",
+    "includes": [
+      "公众号文章导出Markdown",
+      "网页正文采集"
+    ],
+    "excludes": [
+      "仅推荐网站入口",
+      "私有微信聊天记录读取",
+      "浏览器自动操作但不采集内容"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "网页采集",
+      "文章导出",
+      "抓取",
+      "爬虫",
+      "web scraping",
+      "markdown",
+      "采集文章"
+    ],
+    "relations": [
+      {
+        "id": "knowledge_workflow",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "broll",
+    "label": "B-roll",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "补充镜头"
+    ],
+    "description": "为主叙述或口播制作、选取和编排补充镜头或视觉素材。",
+    "includes": [
+      "口播补充镜头",
+      "纸拼贴B-roll素材包"
+    ],
+    "excludes": [
+      "一般视频片段",
+      "只有口播主镜头"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "B-roll",
+      "b roll",
+      "补充镜头",
+      "口播素材",
+      "collage broll"
+    ],
+    "relations": [
+      {
+        "id": "video_creation",
+        "kind": "related"
+      },
+      {
+        "id": "image_creation",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "screen_recording",
+    "label": "录屏",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "屏幕录制"
+    ],
+    "description": "屏幕录制、软件演示录像及相关编辑导出工具。",
+    "includes": [
+      "产品Demo录制",
+      "鼠标跟踪放大录屏"
+    ],
+    "excludes": [
+      "一般视频拍摄",
+      "静态截图"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "录屏",
+      "screen recording",
+      "screencast",
+      "demo recording"
+    ],
+    "relations": [
+      {
+        "id": "video_creation",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "local_inference",
+    "label": "本地推理",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "在本机或自有设备运行模型推理，讨论运行方式、硬件、延迟或部署资源。",
+    "includes": [
+      "本地决策模型",
+      "消费级硬件推理"
+    ],
+    "excludes": [
+      "仅数据存本地而模型在云端",
+      "训练但未涉及部署推理"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "本地推理",
+      "本地部署",
+      "local inference",
+      "Ollama",
+      "离线模型",
+      "on-device"
+    ],
+    "relations": [
+      {
+        "id": "model_practice",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "model_finetuning",
+    "label": "模型微调",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "模型微调训练"
+    ],
+    "description": "用训练样本更新已有模型参数以适配任务，包含LoRA和QLoRA。",
+    "includes": [
+      "小模型QLoRA训练",
+      "微调数据与评估"
+    ],
+    "excludes": [
+      "只修改提示词",
+      "写作风格提示词蒸馏",
+      "仅量化权重"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "微调",
+      "fine-tuning",
+      "finetuning",
+      "QLoRA",
+      "LoRA",
+      "SFT"
+    ],
+    "relations": [
+      {
+        "id": "model_practice",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "model_quantization",
+    "label": "模型量化",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "权重量化"
+    ],
+    "description": "降低模型权重或计算精度并评估内存、速度和质量的取舍。",
+    "includes": [
+      "GGUF量化权重",
+      "低显存量化部署"
+    ],
+    "excludes": [
+      "一般压缩文件",
+      "仅模型参数少"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "量化",
+      "quantization",
+      "GGUF",
+      "Q4_K_M",
+      "W4A8",
+      "NVFP4"
+    ],
+    "relations": [
+      {
+        "id": "model_practice",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "browser_automation",
+    "label": "浏览器自动化",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "网页自动化"
+    ],
+    "description": "通过程序或AI Agent操作浏览器、执行网页任务或自动测试。",
+    "includes": [
+      "为Agent设计的浏览器",
+      "Playwright自动任务"
+    ],
+    "excludes": [
+      "只用浏览器阅读",
+      "普通网页工具",
+      "非浏览器自动化"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "浏览器自动化",
+      "browser automation",
+      "Playwright",
+      "Puppeteer",
+      "浏览器代理"
+    ],
+    "relations": [
+      {
+        "id": "agent_workflow",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "market_data",
+    "label": "行情数据",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "提供或获取证券等金融市场的价格、成交、K线、异动及相关数据接口。",
+    "includes": [
+      "A股实时行情API",
+      "历史K线数据"
+    ],
+    "excludes": [
+      "仅投资观点",
+      "一般创作者收入"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "行情",
+      "K线",
+      "金融数据",
+      "financial api",
+      "market data",
+      "龙虎榜"
+    ],
+    "relations": [
+      {
+        "id": "finance_resources",
+        "kind": "related"
+      }
+    ]
+  },
+  {
+    "id": "english_learning",
+    "label": "英语学习",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "英语词汇、听说读写和英语学习计划、工具或资源。",
+    "includes": [
+      "程序员英语学习指南",
+      "AI英语学习系统"
+    ],
+    "excludes": [
+      "文章仅用英语写成",
+      "通用翻译工具"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "英语学习",
+      "学英语",
+      "English learning",
+      "learn English",
+      "英语指南"
+    ],
+    "relations": []
+  },
+  {
+    "id": "reverse_engineering",
+    "label": "逆向分析",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [],
+    "description": "分析软件、协议或二进制的实现与行为，以及相应工具和方法。",
+    "includes": [
+      "逆向工程工具",
+      "协议分析"
+    ],
+    "excludes": [
+      "泛指逆向思维",
+      "普通代码阅读",
+      "仅项目名包含reverse"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "逆向",
+      "reverse engineering",
+      "反编译",
+      "协议分析",
+      "binary analysis"
+    ],
+    "relations": []
+  },
+  {
+    "id": "footer_design",
+    "label": "页脚设计",
+    "active": true,
+    "status": "active",
+    "definition_version": 1,
+    "display_revision": 1,
+    "aliases": [
+      "网页页脚设计"
+    ],
+    "description": "网页页脚的信息组织、布局、视觉设计及参考资源。",
+    "includes": [
+      "footer设计参考",
+      "页脚布局"
+    ],
+    "excludes": [
+      "页眉hero",
+      "文档页码",
+      "仅页面恰好有页脚"
+    ],
+    "granularity": "specific",
+    "navigation": false,
+    "recall_terms": [
+      "页脚",
+      "footer",
+      "footer.design"
+    ],
+    "relations": [
+      {
+        "id": "ui_design",
+        "kind": "related"
+      }
+    ]
+  }
+]

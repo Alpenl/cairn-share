@@ -76,7 +76,7 @@ automatic AS (
 SELECT field,term FROM effective`;
 
 const dimensions = ["topics", "content_functions", "carriers", "affordances", "resource_kinds"] as const;
-export const SELECTION_FILTER_KEYS = ["filter_contract_version", "topic", "form", "use", ...dimensions, "entity_state", "custom_tags", "topics_mode", "resource_mode", "custom_mode", "functions_mode", "resource_kind", "custom_tag", "topic_mode"];
+export const SELECTION_FILTER_KEYS = ["filter_contract_version", "topic", "form", "use", ...dimensions, "entity_state", "custom_tags", "topics_mode", "resource_mode", "custom_mode", "functions_mode", "resource_kind", "custom_tag", "topic_mode", "topic_refinements"];
 
 export function selectionFilters(params: URLSearchParams): { clauses: string[]; bindings: string[] } | null {
   params = new URLSearchParams(params);
@@ -104,16 +104,25 @@ export function selectionFilters(params: URLSearchParams): { clauses: string[]; 
     if (existing) existing.terms = [...new Set([...existing.terms, ...terms])];
     else groups.push({ field, terms: [...new Set(terms)], mode: params.get(field === "topics" ? "topics_mode" : field === "resource_kinds" ? "resource_mode" : field === "content_functions" ? "functions_mode" : "") ?? "any" });
   }
+  if (params.has("topic_refinements")) {
+    const entries = params.getAll("topic_refinements");
+    if (entries.length !== 1 || entries[0].length > 1024) return null;
+    const terms = entries[0].split(',');
+    if (terms.length > 64 || terms.some(id => findTerm("topics", id)?.granularity !== "specific")) return null;
+    // A second topics group is intentional: (A OR B) AND C must not turn into
+    // A OR B OR C or change the user's original group from ANY to ALL.
+    groups.push({ field: "topics", terms: [...new Set(terms)], mode: "all" });
+  }
   const clauses: string[] = [], bindings: string[] = [];
   if (groups.length) {
     // One bound JSON value keeps the D1 bind count bounded even for combined
     // dimensions. Every group must match, with OR inside its terms array.
     clauses.push(`links.id IN (SELECT link_id FROM (
-      SELECT effective.link_id,effective.field FROM json_each(?) requested
+      SELECT effective.link_id,requested.key AS filter_group FROM json_each(?) requested
       JOIN effective_tag_memberships effective INDEXED BY effective_tag_memberships_term_idx
         ON effective.field=json_extract(requested.value,'$.field')
         AND effective.term IN (SELECT value FROM json_each(requested.value,'$.terms'))
-      GROUP BY effective.link_id,effective.field
+      GROUP BY effective.link_id,requested.key
       HAVING json_extract(requested.value,'$.mode')='any'
         OR COUNT(DISTINCT effective.term)=json_array_length(requested.value,'$.terms'))
       GROUP BY link_id HAVING COUNT(*)=${groups.length})`);

@@ -67,7 +67,9 @@ class ReaderOptimizationInstrumentedTest {
             ActivityScenario.launch<LauncherActivity>(intent(server)).use {
                 waitTag("link_28"); compose.onNodeWithTag("link_28").performClick()
                 waitTag("reader_tag_overview")
-                compose.onNodeWithTag("reader_tag_overview").assertTextContains("LLM · 提示词 · 方法")
+                compose.onNodeWithTag("reader_tag_overview").onChildren().filter(hasText("LLM")).assertCountEquals(1)
+                compose.onNodeWithTag("reader_tag_overview").onChildren().filter(hasText("提示词")).assertCountEquals(1)
+                compose.onNodeWithTag("reader_tag_overview").onChildren().filter(hasText("方法")).assertCountEquals(1)
                 compose.onNodeWithTag("v2_section").assertDoesNotExist()
                 compose.onNodeWithTag("personal_tags").assertDoesNotExist()
                 compose.onNodeWithTag("reader_curation_toggle").performClick()
@@ -113,7 +115,7 @@ class ReaderOptimizationInstrumentedTest {
                 waitTag("link_28"); compose.onNodeWithTag("link_28").performClick()
                 waitTag("offline_read_status")
                 compose.onNodeWithTag("offline_read_status").assertTextContains("云端版本尚未确认", substring = true).assertTextContains("超过 7 天", substring = true)
-                compose.onNodeWithTag("reader_tag_overview").assertTextContains("提示词", substring = true)
+                compose.onNodeWithTag("reader_tag_overview").onChildren().filter(hasText("提示词")).assertCountEquals(1)
                 compose.onNodeWithTag("detail_content").performScrollToNode(hasText("只属于隔离测试的归档正文 28"))
                 compose.onNodeWithText("只属于隔离测试的归档正文 28").assertExists()
             }

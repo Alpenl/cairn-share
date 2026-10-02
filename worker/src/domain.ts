@@ -115,6 +115,25 @@ export function validQuestionSpec(value: unknown): value is QuestionSpec {
   if (typeof value.spec_id !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(value.spec_id)) return false;
   if (!Number.isSafeInteger(value.spec_version) || (value.spec_version as number) < 1) return false;
   if (!record(value.questions) && !Array.isArray(value.questions)) return false;
+  if (Array.isArray(value.questions)) {
+    if (value.questions.length > 128) return false;
+    const ids = new Set<string>();
+    for (const question of value.questions) {
+      if (!record(question) || typeof question.id !== "string" || ids.has(question.id)) return false;
+      ids.add(question.id);
+      if (question.granularity !== undefined && question.granularity !== "" && question.granularity !== "specific") return false;
+      if (question.granularity === "specific" && (normalizeField(question.dimension) !== "topics" || question.kind !== "noul")) return false;
+      for (const key of ["recall_terms", "related_question_ids"]) {
+        const entries = question[key];
+        if (entries !== undefined && (!Array.isArray(entries) || entries.length > 32 ||
+          entries.some(v => typeof v !== "string" || !v.trim() || v.length > 120))) return false;
+      }
+    }
+    for (const question of value.questions as Array<Record<string, unknown>>) {
+      if (Array.isArray(question.related_question_ids) && (new Set(question.related_question_ids).size !== question.related_question_ids.length ||
+        question.related_question_ids.some(id => id === question.id || !ids.has(String(id))))) return false;
+    }
+  }
   if (value.display_only !== undefined && typeof value.display_only !== "boolean") return false;
   return canonicalJSON(value).length <= MAX_SPEC_BYTES;
 }
@@ -336,7 +355,7 @@ export interface FieldDecision {
   candidate?: string;
   verdict: "accepted" | "rejected" | "abstained";
   reason: string;
-  probability: number;
+  probability?: number;
 }
 
 export interface Assessment {
@@ -361,8 +380,10 @@ export function validAssessment(value: unknown): value is Assessment {
         (decision.value === undefined || boundedText(decision.value, 80)) &&
         (decision.candidate === undefined || boundedText(decision.candidate, 80)) &&
         ["accepted", "rejected", "abstained"].includes(String(decision.verdict)) &&
-        typeof decision.probability === "number" && Number.isFinite(decision.probability) &&
-        decision.probability >= 0 && decision.probability <= 1;
+        (typeof decision.probability === "number" && Number.isFinite(decision.probability) &&
+          decision.probability >= 0 && decision.probability <= 1 ||
+          decision.probability === undefined && decision.verdict === "abstained" &&
+          ["not_recalled", "candidate_limit"].includes(String(decision.reason)));
     });
 }
 
@@ -455,9 +476,10 @@ export function effectiveView(automatic: AutomaticView, overrides: Override[]): 
 export function taxonomyVersion(): string { return taxonomy.version; }
 
 // semanticSpecHash is the cross-language identity of a question spec. It covers
-// exactly the provider-visible semantics (type, instructions, criteria) plus
-// the spec id, version and score flag — never internal handles or display
-// metadata. The Go classifier computes the same hash over the same projection
+// provider-visible semantics plus frozen candidate selection metadata. Per-
+// question provider hashes deliberately omit those metadata, allowing reuse
+// when only recall/navigation changes. Display labels and internal handles
+// remain outside the hash. Go computes exactly this same projection
 // and both sides assert the same golden vectors, so a spec registered by the
 // consumer verifies against the Worker's stored copy (F14).
 export async function semanticSpecHash(spec: QuestionSpec): Promise<string> {
@@ -466,7 +488,10 @@ export async function semanticSpecHash(spec: QuestionSpec): Promise<string> {
         id: question.id,
         kind: question.kind,
         instructions: question.instructions,
-        criteria: question.criteria
+        criteria: question.criteria,
+        ...(question.granularity ? { granularity: question.granularity } : {}),
+        ...(Array.isArray(question.recall_terms) && question.recall_terms.length ? { recall_terms: question.recall_terms } : {}),
+        ...(Array.isArray(question.related_question_ids) && question.related_question_ids.length ? { related_question_ids: question.related_question_ids } : {})
       }))
     : spec.questions;
   const payload = {

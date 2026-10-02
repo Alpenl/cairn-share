@@ -2,6 +2,7 @@ import type { Env } from "./index";
 import { record } from "./curation";
 import { canonicalJSON } from "./domain";
 import { hydrateRunPayload, type ArchivedPayloadRow } from "./run-archive";
+import { validateCandidateManifest, validCandidateAutomatic } from "./candidate-manifest";
 
 const hashShape = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 async function hash(value: string): Promise<string> {
@@ -14,10 +15,10 @@ async function hash(value: string): Promise<string> {
 // actual bounded state. Reuse references may only point to this link's runs.
 export async function validRunProvenance(env: Env, linkId: number, raw: unknown, expected: {
   specId: string; specHash: string; requestedModel: string; resolvedModel: string;
-  coverage: string; answers: Record<string, unknown>; usage: unknown;
+  coverage: string; answers: Record<string, unknown>; usage: unknown; automatic?: unknown;
 }): Promise<boolean> {
   if (raw === undefined || raw === null || (record(raw) && raw.metadata_version === undefined)) return true;
-  if (!record(raw) || raw.metadata_version !== 1 || raw.spec_id !== expected.specId ||
+  if (!record(raw) || (raw.metadata_version !== 1 && raw.metadata_version !== 2) || raw.spec_id !== expected.specId ||
       raw.spec_hash !== expected.specHash || raw.requested_model !== expected.requestedModel ||
       raw.resolved_model !== expected.resolvedModel || raw.coverage !== expected.coverage ||
       typeof raw.batch_semantics !== "string" || !raw.batch_semantics ||
@@ -37,13 +38,18 @@ export async function validRunProvenance(env: Env, linkId: number, raw: unknown,
   const questions = new Map<string, Record<string, unknown>>();
   for (const question of spec.questions) {
     if (!record(question) || typeof question.id !== "string") return false;
+    if (questions.has(question.id)) return false;
     questions.set(question.id, question);
   }
+  const selection = raw.metadata_version === 2 ? await validateCandidateManifest(raw, questions) : null;
+  if (raw.metadata_version === 2 && (!selection || expected.automatic !== undefined && !validCandidateAutomatic(raw, expected.automatic))) return false;
+  if (raw.metadata_version === 1 && raw.candidate_manifest !== undefined) return false;
+  const selected = selection?.selected ?? new Set(questions.keys());
   if (Object.keys(raw.judgments).length !== Object.keys(expected.answers).length ||
       Object.keys(raw.question_hashes).length !== Object.keys(raw.judgments).length) return false;
   for (const [id, judgment] of Object.entries(raw.judgments)) {
     const question = questions.get(id), answer = expected.answers[id];
-    if (!question || !record(judgment) || !record(answer) || judgment.question_id !== id ||
+    if (!question || !selected.has(id) || !record(judgment) || !record(answer) || judgment.question_id !== id ||
         judgment.kind !== question.kind || judgment.dimension !== question.dimension ||
         (judgment.term_id ?? "") !== (question.term_id ?? "")) return false;
     const expectedHash = await hash(canonicalJSON({ id, kind: question.kind, instructions: question.instructions, criteria: question.criteria }));
@@ -69,7 +75,7 @@ export async function validRunProvenance(env: Env, linkId: number, raw: unknown,
   let input = 0, output = 0, usageMissing = false;
   for (const call of calls) {
     if (!record(call) || !hashShape(call.request_hash) || call.state_hash !== raw.evidence_hash ||
-        call.requested_model !== expected.requestedModel || !Array.isArray(call.question_ids) || !call.question_ids.length ||
+        call.requested_model !== expected.requestedModel || !Array.isArray(call.question_ids) || !call.question_ids.length || call.question_ids.length > 32 ||
         (complete && (call.resolved_model !== expected.resolvedModel || call.http_status !== 200))) return false;
     const usage = call.usage;
     const known = record(usage) && Number.isSafeInteger(usage.input_tokens) && Number(usage.input_tokens) >= 0 && Number.isSafeInteger(usage.output_tokens) && Number(usage.output_tokens) >= 0;
@@ -77,13 +83,13 @@ export async function validRunProvenance(env: Env, linkId: number, raw: unknown,
     usageMissing ||= !known;
     if (known && record(usage)) { input += Number(usage.input_tokens); output += Number(usage.output_tokens); }
     for (const id of call.question_ids) {
-      if (typeof id !== "string" || !questions.has(id) || covered.has(id)) return false;
+      if (typeof id !== "string" || !selected.has(id) || covered.has(id)) return false;
       covered.add(id);
     }
   }
   const priorRuns = new Map<number, { resolved_model: string; coverage: string; raw_judgments: string | null }>();
   for (const id of reused) {
-    if (typeof id !== "string" || !questions.has(id) || covered.has(id) || !Number.isSafeInteger(sources[id]) || Number(sources[id]) <= 0) return false;
+    if (typeof id !== "string" || !selected.has(id) || covered.has(id) || !Number.isSafeInteger(sources[id]) || Number(sources[id]) <= 0) return false;
     const sourceID = Number(sources[id]);
     let old = priorRuns.get(sourceID);
     if (!old) {
@@ -96,12 +102,12 @@ export async function validRunProvenance(env: Env, linkId: number, raw: unknown,
     }
     if (!old.raw_judgments || old.resolved_model !== expected.resolvedModel || old.coverage !== "complete") return false;
     const prior: unknown = JSON.parse(old.raw_judgments);
-    if (!record(prior) || prior.metadata_version !== 1 || prior.evidence_hash !== raw.evidence_hash || prior.batch_semantics !== raw.batch_semantics ||
+    if (!record(prior) || (prior.metadata_version !== 1 && prior.metadata_version !== 2) || prior.evidence_hash !== raw.evidence_hash || prior.batch_semantics !== raw.batch_semantics ||
         !record(prior.question_hashes) || prior.question_hashes[id] !== raw.question_hashes[id] || !record(prior.judgments) ||
         canonicalJSON(prior.judgments[id]) !== canonicalJSON(raw.judgments[id])) return false;
     covered.add(id);
   }
   if (Object.keys(sources).length !== reused.length || (raw.usage_missing === true) !== usageMissing) return false;
   if (!usageMissing && (!Number.isSafeInteger(input) || !Number.isSafeInteger(output) || !record(raw.usage) || raw.usage.input_tokens !== input || raw.usage.output_tokens !== output)) return false;
-  return !complete || (covered.size === questions.size && Object.keys(raw.judgments).length === questions.size);
+  return !complete || (covered.size === selected.size && Object.keys(raw.judgments).length === selected.size);
 }

@@ -64,7 +64,7 @@ internal fun LinkEnrichment.statusLabel(): String = when (status) {
 
 internal fun BookmarkClassification.label(taxonomy: BookmarkTaxonomy?): String {
     fun term(terms: List<TaxonomyTerm>?, id: String) = terms?.firstOrNull { it.id == id }?.label ?: id
-    val main = topics.map { term(taxonomy?.topics, it) }
+    val main = orderedTopics(topics, taxonomy).map { term(taxonomy?.topics, it) }
     val other = if (taxonomy?.resourceKinds?.isNotEmpty() == true) resourceKinds.map { term(taxonomy.resourceKinds, it) }
         else listOf(term(taxonomy?.forms, form), term(taxonomy?.uses, use))
     return (main + other)
@@ -266,6 +266,7 @@ private fun filterPanelLabel(filters: BookmarkFilters): String {
     if (filters.uncertain) parts += "待确认"
     if (filters.recentDays > 0) parts += "近 ${filters.recentDays} 天"
     if (filters.topic.isNotBlank() || filters.topics.isNotEmpty()) parts += "主题"
+    if (filters.topicRefinements.isNotEmpty()) parts += "进一步筛选"
     if (filters.resourceKinds.isNotEmpty()) parts += "资源类型"
     if (filters.customTags.isNotEmpty()) parts += "自定义标记"
     if (filters.contentFunctions.isNotEmpty()) parts += "内容功能"
@@ -280,7 +281,7 @@ private fun filterPanelLabel(filters: BookmarkFilters): String {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTaxonomy?, onChange: (BookmarkFilters) -> Unit,
-    baseUrl: String = "", apiToken: String = "") {
+    baseUrl: String = "", apiToken: String = "", query: String = "", learned: String = "all") {
     // 已激活筛选时保持展开，让用户随时看到当前筛选条件；默认收起，
     // 避免一堆标签把真正的链接列表挤到首屏之外。
     var expanded by rememberSaveable { mutableStateOf(filters != BookmarkFilters()) }
@@ -319,8 +320,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                 for (days in listOf(7, 30)) FilterChip(selected = filters.recentDays == days, onClick = { onChange(filters.copy(recentDays = if (filters.recentDays == days) 0 else days)) }, label = { Text("近 $days 天") })
             }
             if (taxonomy != null) {
-                val topicValues = (filters.topics + listOf(filters.topic).filter { it.isNotBlank() }).distinct()
-                FilterDimension("主题", "topics", topicValues, taxonomy.topics) { onChange(filters.copy(topic = "", topics = it)) }
+                TopicNavigation(filters, taxonomy.topics, baseUrl, apiToken, query, learned, onChange)
                 if (taxonomy.resourceKinds.isNotEmpty()) {
                     TagFilterMode(filters.topicsMode) { onChange(filters.copy(topicsMode = it)) }
                     FilterDimension("资源类型", "resource_kinds", filters.resourceKinds, taxonomy.resourceKinds) { onChange(filters.copy(resourceKinds = it)) }

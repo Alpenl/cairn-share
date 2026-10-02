@@ -9,10 +9,11 @@ import { extensionBudgetRoute } from "./extension-budget";
 import { rerankCacheRoute } from "./rerank-cache";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
+import { validCandidateAutomatic } from "./candidate-manifest";
 import { hydrateRunPayload, type ArchivedPayloadRow } from "./run-archive";
 import type { Env } from "./index";
 import { taxonomyV2, classificationTaxonomy, type V2Selection } from "./taxonomy-v2";
-import { storedClassification, taxonomy, type Classification } from "./curation";
+import { storedClassification, taxonomy, record, type Classification } from "./curation";
 import {
   canonicalJSON, contentHash, effectiveView, EMPTY_AUTOMATIC, normalizeField, objectivePayload,
   semanticSpecHash, snapshotCompleteness, objectiveUseAllowed, validOverride, validQuestionSpec, validSnapshot, validAssessment,
@@ -554,6 +555,8 @@ async function listRuns(request: Request, env: Env, id: number): Promise<Respons
 async function submitRun(request: Request, env: Env, id: number): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
+  if (record(body.raw_judgments) && body.raw_judgments.metadata_version === 2 &&
+    request.headers.get("X-Cairn-Candidate-Manifest") !== "2") return fail("capability_mismatch", 409);
   const operationKey = body.operation_key;
   if (!text(operationKey, 200)) return fail("invalid_operation_key");
   if (!text(body.spec_id, 64) || !text(body.spec_hash, 128) || !Number.isSafeInteger(body.content_revision) ||
@@ -613,8 +616,8 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
   const row = await env.DB.prepare(
     `INSERT INTO classification_runs(link_id, content_revision, spec_id, spec_hash, target_generation, requested_model,
        resolved_model, policy_version, policy, answers, usage, attempt, operation_key, coverage, evidence_coverage,
-       alias_drift, status, created_at, payload_hash, raw_judgments, evidence_snapshot_id, source_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+       alias_drift, status, created_at, payload_hash, raw_judgments, evidence_snapshot_id, source_hash,wire_evidence_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?) RETURNING id`
   ).bind(id, body.content_revision, body.spec_id, body.spec_hash, body.target_generation,
     text(body.requested_model, 200) ? body.requested_model : "",
     text(body.resolved_model, 200) ? body.resolved_model : "",
@@ -623,7 +626,7 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
     text(body.evidence_coverage, 40) ? body.evidence_coverage : "",
     body.alias_drift === true ? 1 : 0,
     coverage === "complete" ? "succeeded" : "partial", now, payloadHash, body.raw_judgments == null ? null : canonicalJSON(body.raw_judgments),
-    body.evidence_snapshot_id ?? null, body.source_hash ?? null).first<{ id: number }>();
+    body.evidence_snapshot_id ?? null, body.source_hash ?? null, runWireHash(body.raw_judgments)).first<{ id: number }>();
   return reply({ id, run: { id: row?.id, coverage, status: coverage === "complete" ? "succeeded" : "partial", created_at: now }, replayed: false });
 }
 
@@ -633,6 +636,12 @@ async function submitRun(request: Request, env: Env, id: number): Promise<Respon
 export interface WriteGuard {
   sql: string;
   bindings: Array<string | number | null>;
+}
+
+function runWireHash(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  return (value.metadata_version === 1 || value.metadata_version === 2) && text(value.evidence_hash, 64) ? value.evidence_hash : null;
 }
 
 // runInsertStatement is the statement form used inside an atomic completion so
@@ -647,13 +656,14 @@ export function runInsertStatement(env: Env, run: {
   return env.DB.prepare(
     `INSERT INTO classification_runs(link_id, content_revision, spec_id, spec_hash, target_generation, requested_model,
        resolved_model, policy_version, policy, answers, usage, attempt, operation_key, coverage, evidence_coverage,
-       alias_drift, status, created_at, payload_hash, raw_judgments, evidence_snapshot_id, source_hash)
-     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`
+       alias_drift, status, created_at, payload_hash, raw_judgments, evidence_snapshot_id, source_hash,wire_evidence_hash)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,? WHERE ${guard.sql}`
   ).bind(run.linkId, run.contentRevision, run.specId, run.specHash, run.targetGeneration, run.requestedModel,
     run.resolvedModel, run.policyVersion, canonicalJSON(run.policy), canonicalJSON(run.answers),
     canonicalJSON(run.usage), run.attempt, run.operationKey, run.coverage, run.evidenceCoverage,
     run.aliasDrift ? 1 : 0, run.coverage === "complete" ? "succeeded" : "partial", run.createdAt,
-    run.payloadHash, run.rawJudgments == null ? null : canonicalJSON(run.rawJudgments), run.evidenceSnapshotId, run.sourceHash, ...guard.bindings);
+    run.payloadHash, run.rawJudgments == null ? null : canonicalJSON(run.rawJudgments), run.evidenceSnapshotId, run.sourceHash,
+    runWireHash(run.rawJudgments), ...guard.bindings);
 }
 
 export function decisionInsertStatement(env: Env, decision: {
@@ -699,7 +709,7 @@ async function latestDecision(env: Env, id: number): Promise<Response> {
 // re-derives the effective view from the stored overrides itself and writes the
 // decision under the same in-transaction guard as the rest of the domain
 // (R2-01/R2-02/R2-12). A caller-supplied `effective` is never trusted.
-interface DecisionRun {
+interface DecisionRun extends ArchivedPayloadRow {
   id: number; content_revision: number; spec_id: string; spec_hash: string; requested_model: string;
   resolved_model: string; coverage: string; status: string; operation_key: string; target_generation: number;
   evidence_snapshot_id: number | null; source_hash: string | null; raw_judgments: string | null;
@@ -708,7 +718,7 @@ interface DecisionRun {
 
 function validReplayPolicy(value: Record<string, unknown>): boolean {
   const allowed = ["version", "calibrated", "topic_accept", "topic_reject", "choice_accept", "choice_margin", "max_display_topics",
-    "max_effective_topics", "allow_alias_drift", "block_personal_use", "min_primary_tags", "max_primary_tags", "function_support_accept"];
+    "max_effective_topics", "allow_alias_drift", "block_personal_use", "min_primary_tags", "max_primary_tags", "function_support_accept", "prefer_specific_topics"];
   if (Object.keys(value).some(k => !allowed.includes(k)) || typeof value.calibrated !== "boolean" || typeof value.allow_alias_drift !== "boolean" ||
     value.block_personal_use !== true || !["topic_accept", "topic_reject", "choice_accept", "choice_margin"].every(k =>
       typeof value[k] === "number" && Number(value[k]) >= 0 && Number(value[k]) <= 1) ||
@@ -716,8 +726,11 @@ function validReplayPolicy(value: Record<string, unknown>): boolean {
     !["max_display_topics", "max_effective_topics"].every(k => Number.isSafeInteger(value[k]) && Number(value[k]) >= 1 && Number(value[k]) <= 64) ||
     Number(value.max_display_topics) > Number(value.max_effective_topics)) return false;
   const density = ["min_primary_tags", "max_primary_tags", "function_support_accept"].some(k => value[k] !== undefined && value[k] !== 0);
+  if (value.prefer_specific_topics !== undefined && typeof value.prefer_specific_topics !== "boolean" ||
+    ["jev-policy-v2", "jev-policy-v3", "jev-policy-v4"].includes(String(value.version)) && value.prefer_specific_topics === true ||
+    value.version === "jev-policy-v5" && value.prefer_specific_topics !== true) return false;
   if (["jev-policy-v2", "jev-policy-v3"].includes(String(value.version)) && density) return false;
-  return !(value.version === "jev-policy-v4" || density) ||
+  return !(["jev-policy-v4", "jev-policy-v5"].includes(String(value.version)) || density) ||
     Number.isSafeInteger(value.min_primary_tags) && Number.isSafeInteger(value.max_primary_tags) && Number(value.min_primary_tags) >= 1 &&
     Number(value.max_primary_tags) >= 2 && Number(value.min_primary_tags) <= Number(value.max_primary_tags) && Number(value.max_primary_tags) <= 64 &&
     typeof value.function_support_accept === "number" && value.function_support_accept > Number(value.topic_reject) && value.function_support_accept <= Number(value.topic_accept);
@@ -789,10 +802,14 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
   }
   if (body.content_revision !== undefined && body.content_revision !== link.content_revision) return fail("run_stale", 409);
   const runs = await env.DB.prepare(`SELECT id,content_revision,spec_id,spec_hash,requested_model,resolved_model,
-    coverage,status,operation_key,target_generation,evidence_snapshot_id,source_hash,raw_judgments,wire_evidence_hash
+    coverage,status,operation_key,target_generation,evidence_snapshot_id,source_hash,raw_judgments,wire_evidence_hash,
+    policy,answers,usage,archive_key,archive_hash,archive_bytes
     FROM classification_runs WHERE link_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY id`)
     .bind(id, JSON.stringify(runIDs)).all<DecisionRun>();
   if (runs.results.length !== runIDs.length) return fail("unknown_run", 409, { found: runs.results.map((run) => run.id) });
+  try {
+    for (let index = 0; index < runs.results.length; index++) runs.results[index] = await hydrateRunPayload(env, runs.results[index]);
+  } catch { return fail("run_archive_unavailable", 503); }
   for (const run of runs.results) {
     if (run.status !== "succeeded") return fail("run_not_succeeded", 409, { run_id: run.id, status: run.status });
     if (run.coverage !== "complete") return fail("run_incomplete", 409, { run_id: run.id });
@@ -812,11 +829,17 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
   if (policyReplay && target && (primary.spec_id !== target.spec_id || primary.spec_hash !== target.spec_hash ||
     primary.requested_model !== target.requested_model)) return fail("run_identity_mismatch", 409);
   if (policyReplay && target && !validReplayAutomatic(automatic, target.taxonomy_version)) return fail("invalid_automatic");
+  const rawRuns = runs.results.map(run => parseJSON(run.raw_judgments ?? "null", null));
+  const judged = new Set<string>();
+  for (const raw of rawRuns) if (record(raw) && record(raw.judgments)) {
+    for (const question of Object.keys(raw.judgments)) judged.add(question);
+  }
+  if (rawRuns.some(raw => !validCandidateAutomatic(raw, automatic, judged))) return fail("invalid_candidate_automatic");
   if (policyReplay && await env.DB.prepare(`SELECT 1 FROM classification_jobs WHERE link_id=? AND status='processing' AND lease_until>?`)
     .bind(id, new Date().toISOString()).first()) return fail("classification_in_progress", 409);
   const wireHash = (run: DecisionRun): string | null => {
     const raw = parseJSON(run.raw_judgments ?? "null", null) as Record<string, unknown> | null;
-    return raw?.metadata_version === 1 && text(raw.evidence_hash, 64) ? raw.evidence_hash : run.wire_evidence_hash;
+    return runWireHash(raw) ?? run.wire_evidence_hash;
   };
   const identity = (run: DecisionRun) => canonicalJSON([run.spec_id, run.spec_hash, run.resolved_model,
     run.content_revision, run.target_generation, run.source_hash, wireHash(run)]);
@@ -856,7 +879,7 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
             AND (ct.protocol='legacy' OR (ct.spec_id=cr.spec_id AND ct.spec_hash=cr.spec_hash)))
           AND cr.source_hash IS json_extract(p.value,'$.source_hash')
           AND cr.evidence_snapshot_id IS json_extract(p.value,'$.evidence_snapshot_id')
-          AND COALESCE(CASE WHEN json_extract(cr.raw_judgments,'$.metadata_version')=1
+          AND COALESCE(CASE WHEN json_extract(cr.raw_judgments,'$.metadata_version') IN (1,2)
             THEN json_extract(cr.raw_judgments,'$.evidence_hash') END,cr.wire_evidence_hash) IS json_extract(p.value,'$.wire_hash')
           AND ((cr.evidence_snapshot_id IS NULL AND cr.source_hash IS NULL) OR EXISTS (
             SELECT 1 FROM evidence_snapshots es WHERE es.id=cr.evidence_snapshot_id AND es.link_id=cr.link_id

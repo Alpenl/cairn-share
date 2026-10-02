@@ -5,6 +5,7 @@
 // definitions, but every v2 projection must remain expressible as a legal v1
 // payload so an old client can still read it.
 import taxonomy from "./taxonomy.json";
+import specificTopics from "./specific-topics.json";
 
 export interface TermRelation {
   /** Stable ID of the related term. */
@@ -31,6 +32,12 @@ export interface TermDefinition {
   definition_version?: number;
   display_revision?: number;
   status?: "active" | "deprecated";
+  /** Topic specificity guides display and selection, never inherited membership. */
+  granularity?: "broad" | "specific";
+  /** Whether this term is offered as a default navigation entry. */
+  navigation?: boolean;
+  /** Bounded retrieval clues; unlike aliases these do not assert equivalence. */
+  recall_terms?: string[];
 }
 
 export interface Taxonomy {
@@ -100,7 +107,19 @@ export function legacyTaxonomyV2(): Taxonomy { return legacyV2; }
 
 // Historical completion validation uses the catalog its immutable run recorded.
 export function classificationTaxonomy(version: string): Taxonomy | null {
-  return [v2, previousTagV2, legacyV2].find(catalog => catalog.version === version) ?? null;
+  return [v2, previousDensityV2, previousTagV2, legacyV2].find(catalog => catalog.version === version) ?? null;
+}
+
+export function topicGranularityAware(request: Request): boolean {
+  return request.headers.get("X-Cairn-Tag-System") === "1" && request.headers.get("X-Cairn-Topic-Granularity") === "1";
+}
+
+// Only metadata is negotiated. Stable IDs, meanings and exact memberships are
+// identical for both client generations. Do not strip arbitrary run payloads.
+export function termForTransport<T extends Record<string, unknown>>(definition: T, granularity: boolean): T {
+  if (granularity) return definition;
+  const { granularity: _granularity, navigation: _navigation, recall_terms: _recall, relations: _relations, ...legacy } = definition;
+  return legacy as T;
 }
 
 const term = (id: string, label: string, description: string, excludes: string[]): TermDefinition =>
@@ -135,13 +154,22 @@ const previousTagV2: Taxonomy = {
   ]
 };
 
-const v2: Taxonomy = {
+const previousDensityV2: Taxonomy = {
   ...previousTagV2, version: "2026-09-30.2", definition_version: 4,
   topics: [
     ...previousTagV2.topics,
     { ...term("clothing_style", "服饰与穿搭", "服饰品牌、款式、面料和穿搭选择的具体介绍、体验或评价。",
       ["只有价格或泛泛购物感想", "AI 生成服饰图片但不讨论服饰本身", "仅偶然提到穿着"]),
       includes: ["服饰品牌和款式评价", "面料体验", "穿搭选择"] }
+  ]
+};
+
+const v2: Taxonomy = {
+  ...previousDensityV2, version: "2026-10-02.1", definition_version: 5,
+  topics: [
+    ...previousDensityV2.topics.map(definition => ({ ...definition,
+      granularity: "broad" as const, navigation: definition.active && !definition.deprecated, recall_terms: [] })),
+    ...(specificTopics as TermDefinition[])
   ]
 };
 
@@ -168,6 +196,16 @@ export function validateTaxonomy(candidate: Taxonomy = v2): string[] {
       if (!/^[a-z][a-z0-9_]{0,39}$/.test(term.id)) problems.push(`${name}: invalid id ${term.id}`);
       if (ids.has(term.id)) problems.push(`${name}: duplicate id ${term.id}`);
       ids.add(term.id);
+      if (term.granularity !== undefined && (name !== "topics" || !["broad", "specific"].includes(term.granularity))) {
+        problems.push(`${name}: invalid granularity for ${term.id}`);
+      }
+      if (term.navigation !== undefined && (name !== "topics" || typeof term.navigation !== "boolean")) {
+        problems.push(`${name}: invalid navigation for ${term.id}`);
+      }
+      if (term.recall_terms !== undefined && (name !== "topics" || !Array.isArray(term.recall_terms) ||
+        term.recall_terms.length > 32 || term.recall_terms.some(clue => typeof clue !== "string" || clue.trim().length === 0 || clue.length > 120))) {
+        problems.push(`${name}: invalid recall terms for ${term.id}`);
+      }
       for (const alias of [term.id, term.label, ...(term.aliases ?? [])]) {
         const key = normalizeTerm(alias);
         const owner = aliases.get(key);

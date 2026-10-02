@@ -6,13 +6,14 @@ export async function verifyRelease({ token, fetcher = fetch, base = "https://sh
   const checks = [];
   const get = async (path, capabilities = true) => {
     const headers = { Authorization: `Bearer ${token}` };
-    if (capabilities) Object.assign(headers, { "X-Cairn-Tag-System": "1", "X-Cairn-Content-Functions": "1", "X-Cairn-Search-Summary": "1" });
+    if (capabilities) Object.assign(headers, { "X-Cairn-Tag-System": "1", "X-Cairn-Content-Functions": "1", "X-Cairn-Search-Summary": "1", "X-Cairn-Topic-Granularity": "1" });
     const start = performance.now();
     const response = await fetcher(base + path, { method: "GET", headers, redirect: "error", signal: AbortSignal.timeout(20000) });
     if (!response.ok) throw new Error(`readonly_check_http_${response.status}`);
     const body = await response.json();
     if (capabilities && response.headers.get("X-Cairn-Tag-System") !== "1") throw new Error("missing_tag_contract");
     if (capabilities && response.headers.get("X-Cairn-Content-Functions") !== "1") throw new Error("missing_content_functions_contract");
+    if (capabilities && response.headers.get("X-Cairn-Topic-Granularity") !== "1") throw new Error("missing_topic_granularity_contract");
     checks.push({ route: path.split("?")[0].replace(/\/\d+(?=\/|$)/g, "/:id"), status: response.status,
       ms: Math.round(performance.now() - start), server_timing: response.headers.get("Server-Timing") || "" });
     return { body, response };
@@ -32,6 +33,20 @@ export async function verifyRelease({ token, fetcher = fetch, base = "https://sh
   await get("/api/v2/tags/counts");
   const { body: quality } = await get("/api/v2/tags/quality");
   if (quality.version !== 1 || !Array.isArray(quality.terms)) throw new Error("invalid_quality_contract");
+  const { body: catalog } = await get("/api/v2/taxonomy");
+  const portrait = catalog.topics?.find(term => term.id === "portrait_photography");
+  const image = catalog.topics?.find(term => term.id === "image_creation");
+  if (portrait?.granularity !== "specific" || portrait.navigation !== false || image?.granularity !== "broad" || image.navigation !== true)
+    throw new Error("invalid_topic_granularity_catalog");
+  const refinement = "topics=image_creation,video_creation&topics_mode=any&topic_refinements=portrait_photography&filter_contract_version=1";
+  const { body: refined } = await get(`/api/enrichment/jobs?view=summary&limit=2&${refinement}`);
+  if (!Array.isArray(refined.items) || refined.items.length > 2 || refined.items.some(item =>
+    !item.classification?.topics?.includes("portrait_photography") ||
+    !item.classification.topics.some(id => ["image_creation", "video_creation"].includes(id)))) throw new Error("topic_refinement_ignored");
+  const { body: refinedCounts } = await get(`/api/v2/tags/counts?${refinement}`);
+  if (!Number.isSafeInteger(refinedCounts.total) || refinedCounts.total < refined.items.length || !Array.isArray(refinedCounts.topics) ||
+    (refinedCounts.topics.find(term => term.id === "portrait_photography")?.count ?? 0) !== refinedCounts.total)
+    throw new Error("topic_refinement_counts_mismatch");
   if (page.items.length) {
     const id = page.items[0].id;
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("invalid_bookmark_id");
@@ -66,6 +81,9 @@ export async function verifyRelease({ token, fetcher = fetch, base = "https://sh
     if (Object.hasOwn(item, "custom_tags") || Object.hasOwn(item, "search_excerpt") ||
       item.classification && ["resource_kinds", "content_functions"].some(key => Object.hasOwn(item.classification, key))) throw new Error("legacy_unknown_fields");
   }
+  const { body: legacyCatalog } = await get("/api/v2/taxonomy", false);
+  if (!Array.isArray(legacyCatalog.topics) || legacyCatalog.topics.some(term =>
+    ["granularity", "navigation", "recall_terms"].some(key => Object.hasOwn(term, key)))) throw new Error("legacy_granularity_fields");
   return { version: 1, at: new Date().toISOString(), model_calls: 0, mutations: 0, checks };
 }
 

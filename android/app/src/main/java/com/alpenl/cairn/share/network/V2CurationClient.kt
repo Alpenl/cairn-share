@@ -65,6 +65,7 @@ internal class V2CurationClient(
         connection.instanceFollowRedirects = false
         connection.setRequestProperty("Accept", "application/json")
         connection.setRequestProperty("X-Cairn-Tag-System", "1")
+        connection.setRequestProperty("X-Cairn-Topic-Granularity", "1")
         connection.setRequestProperty("X-Cairn-Content-Functions", "1")
         connection.setRequestProperty("User-Agent", userAgent)
         if (apiToken.isNotBlank()) {
@@ -203,7 +204,11 @@ internal class V2CurationClient(
                 connection.outputStream.use { it.write(bytes) }
             }
             when (connection.responseCode) {
-                HttpURLConnection.HTTP_OK, HttpURLConnection.HTTP_CREATED -> V2Result.Loaded(JSONObject(connection.inputStream.bufferedReader().readText()))
+                HttpURLConnection.HTTP_OK, HttpURLConnection.HTTP_CREATED -> {
+                    if (endpoint(path).query.orEmpty().split('&').any { it.startsWith("topic_refinements=") } &&
+                        (connection.getHeaderField("X-Cairn-Topic-Granularity") != "1" || connection.getHeaderField("X-Cairn-Tag-System") != "1")) V2Result.Unsupported
+                    else V2Result.Loaded(JSONObject(connection.inputStream.bufferedReader().readText()))
+                }
                 HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD -> V2Result.Unsupported
                 HttpURLConnection.HTTP_UNAUTHORIZED -> V2Result.Failed(FailureKind.Unauthorized)
                 HttpURLConnection.HTTP_CONFLICT -> {
@@ -230,7 +235,8 @@ internal class V2CurationClient(
                 HttpURLConnection.HTTP_OK -> {
                     val payload = JSONObject(connection.inputStream.bufferedReader().readText())
                     if (payload.optBoolean("available", true) == false) V2Result.Unsupported
-                    else V2Result.Loaded(decodeTaxonomy(payload))
+                    else V2Result.Loaded(decodeTaxonomy(payload, topicGranularity =
+                        connection.getHeaderField("X-Cairn-Topic-Granularity") == "1" && connection.getHeaderField("X-Cairn-Tag-System") == "1"))
                 }
                 HttpURLConnection.HTTP_UNAUTHORIZED -> V2Result.Failed(FailureKind.Unauthorized)
                 HttpURLConnection.HTTP_NOT_FOUND -> V2Result.Unsupported

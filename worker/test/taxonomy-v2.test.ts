@@ -247,18 +247,16 @@ it("pure v1 helpers preserve folded topics and hidden dimensions", () => {
 
 // --- Taxonomy proposals -----------------------------------------------------
 
-it("a proposal never mutates the vocabulary until approved", async () => {
+it("an incomplete legacy topic proposal stays pending until its definition and evidence can be validated", async () => {
   const created = await request("v2/taxonomy/proposals", { kind: "add_term", dimension: "topics", term_id: "robotics", payload: { label: "机器人" } });
   expect(created.status).toBe(200);
   const body = await created.json() as { id: string; applied: boolean; impact: { requires_definition_version_bump: boolean } };
   expect(body.applied).toBe(false);
   expect(body.impact.requires_definition_version_bump).toBe(true);
   const decision = await request(`v2/taxonomy/proposals/${body.id}/decision`, { decision: "approved", expected_revision: 1 });
-  const decided = await decision.json() as { vocabulary_changed: boolean; status: string };
-  expect(decided.status).toBe("approved");
-  expect(decided.vocabulary_changed).toBe(false);
-  // Deciding twice is a conflict, not a silent no-op.
-  expect((await request(`v2/taxonomy/proposals/${body.id}/decision`, { decision: "approved" })).status).toBe(409);
+  expect(decision.status).toBe(409);
+  expect(await decision.json()).toMatchObject({ error: "topic_definition_required" });
+  expect(await env.DB.prepare("SELECT status FROM taxonomy_proposals WHERE id=?").bind(body.id).first("status")).toBe("pending");
 });
 
 it("a label rename is display-only and does not require re-evaluation", () => {

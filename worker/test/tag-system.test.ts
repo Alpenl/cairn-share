@@ -32,15 +32,18 @@ async function act(id: number, actions: unknown[], key = crypto.randomUUID()) {
     expected_decision_id: state.decision_id, expected_content_revision: state.content_revision, actions });
 }
 
-it("publishes 13 independent topics and 6 resources while preserving historical catalog identities", async () => {
+it("publishes 37 independent topics and 6 resources while preserving historical catalog identities", async () => {
   const old = await (await call("v2-taxonomy", undefined, "GET", false)).json() as any;
   expect(old.version).toBe("2026-09-20.1"); expect(old).not.toHaveProperty("resource_kinds");
   const current = await (await call("v2-taxonomy")).json() as any;
-  expect(current.version).toBe("2026-09-30.2");
-  expect(current.topics.filter((t: any) => t.active && !t.deprecated)).toHaveLength(13);
+  expect(current.version).toBe("2026-10-02.1");
+  expect(current.topics.filter((t: any) => t.active && !t.deprecated)).toHaveLength(37);
   expect(current.resource_kinds).toHaveLength(6);
   expect(current.topics.find((t: any) => t.id === "llm").deprecated).toBe(true);
   expect(validateTaxonomy()).toEqual([]);
+  const density = classificationTaxonomy("2026-09-30.2")!;
+  expect(density.topics.filter(t => t.active && !t.deprecated)).toHaveLength(13);
+  expect(density.topics.some(t => t.id === "portrait_photography")).toBe(false);
   const previous = classificationTaxonomy("2026-09-30.1")!;
   expect(previous.topics.filter(t => t.active && !t.deprecated)).toHaveLength(12);
   expect(previous.topics.some(t => t.id === "clothing_style")).toBe(false);
