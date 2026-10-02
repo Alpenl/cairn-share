@@ -317,11 +317,15 @@ export default {
     if (path === "/api/internal/observability" || request.method === "OPTIONS") {
       return withServerTiming(await handleRequest(request, env, timing), timing);
     }
-    const policy = await requestPolicy(env.DB);
+    // Log policy and business data are independent reads. Start both before
+    // waiting, but resolve the policy before emitting any logs or its headers.
+    const policyRead = requestPolicy(env.DB);
     const started = performance.now();
     let response: Response | null = null;
     try {
-      response = withServerTiming(await handleRequest(request, env, timing), timing);
+      response = await handleRequest(request, env, timing);
+      const policy = await policyRead;
+      response = withServerTiming(response, timing);
       if (contentFunctionsAware(request)) response.headers.set("X-Cairn-Content-Functions", "1");
       if (request.headers.get("X-Cairn-Search-Summary") === "1") response.headers.set("X-Cairn-Search-Summary", "1");
       if (request.headers.get("X-Cairn-Tag-System") === "1") response.headers.set("X-Cairn-Tag-System", "1");
@@ -340,6 +344,7 @@ export default {
       else if (policy.version === -1) response.headers.set("X-Cairn-Observability-Status", "unconfigured");
       return response;
     } finally {
+      const policy = await policyRead;
       for (const event of timing.workerBusinessEvents()) {
         try { emitWorkerBusiness(policy, event); } catch { /* optional logs never fail business */ }
       }
