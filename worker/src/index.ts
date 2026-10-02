@@ -6,7 +6,7 @@ import { tagSystemRoute, attachTagSummaries, projectTagSummaryRows, contentFunct
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
-import { applyV1Write } from "./taxonomy-v2";
+import { applyV1Write, topicGranularityAware } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
 import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
 import { readSelectionSnapshot, tagSummaryColumns, type TagSummaryRow } from "./selection-state";
@@ -156,8 +156,8 @@ type ErrorCode =
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts",
-  "Access-Control-Expose-Headers": "X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest",
+  "Access-Control-Expose-Headers": "X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -326,6 +326,8 @@ export default {
         const body = await response.clone().json();
         response = new Response(JSON.stringify(removeNew(body)), { status: response.status, headers: response.headers });
       }
+      if (topicGranularityAware(request)) response.headers.set("X-Cairn-Topic-Granularity", "1");
+      if (request.headers.get("X-Cairn-Candidate-Manifest") === "2") response.headers.set("X-Cairn-Candidate-Manifest", "2");
       response.headers.set("X-Cairn-Observability-Version", String(policy.version));
       if (!policyReadAvailable(policy)) response.headers.set("X-Cairn-Observability-Status", "unavailable");
       else if (policy.version === -1) response.headers.set("X-Cairn-Observability-Status", "unconfigured");
@@ -376,7 +378,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   const path = trimTrailingSlash(url.pathname);
   const functionsFlag = request.headers.get("X-Cairn-Content-Functions");
   if (functionsFlag !== null && (functionsFlag !== "1" || !contentFunctionsAware(request))) return error("capability_mismatch", 409);
+  const candidateFlag = request.headers.get("X-Cairn-Candidate-Manifest");
+  if (candidateFlag !== null && candidateFlag !== "2") return error("capability_mismatch", 409);
   if (request.headers.has("X-Cairn-Search-Summary") && request.headers.get("X-Cairn-Search-Summary") !== "1") return error("capability_mismatch", 409);
+  const granularityFlag = request.headers.get("X-Cairn-Topic-Granularity");
+  if (granularityFlag !== null && (granularityFlag !== "1" || !topicGranularityAware(request))) return error("capability_mismatch", 409);
+  if (url.searchParams.has("topic_refinements") && !topicGranularityAware(request)) return error("capability_mismatch", 409);
   // This is an internal cache discriminator for the two negotiated bookmark
   // read shapes. Aggregate routes reject queries and do not need it. A caller
   // cannot select the negotiated cache by supplying this query parameter.

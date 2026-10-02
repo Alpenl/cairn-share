@@ -170,6 +170,13 @@ internal fun CairnLinksApp(
     val snackbarHostState = remember { SnackbarHostState() }
     val currentEntry by navController.currentBackStackEntryAsState()
     val currentRoute = currentEntry?.destination?.route
+    val onTagFilter: (ReaderTag) -> Unit = { tag ->
+        viewModel.setBookmarkFilters(state.bookmarkFilters.withTag(tag))
+        if (currentRoute != Routes.Library && currentRoute != Routes.Search) navController.navigate(Routes.Library) {
+            popUpTo(navController.graph.startDestinationId)
+            launchSingleTop = true
+        }
+    }
     val showBottomBar = currentRoute in TopDestinations.map { it.route }
     val startDestination = restorableRoute(state.preferences.lastRoute) ?: Routes.Library
 
@@ -229,6 +236,7 @@ internal fun CairnLinksApp(
                     state = state,
                     onFilterChange = viewModel::setFilter,
                     onBookmarkFiltersChange = viewModel::setBookmarkFilters,
+                    onTagFilter = onTagFilter,
                     onLoadMore = viewModel::loadMoreLibraryResults,
                     onRetryFilters = viewModel::retryLibraryFilters,
                     onOpenSearch = { navController.navigate(Routes.Search) },
@@ -241,6 +249,7 @@ internal fun CairnLinksApp(
                     state = state,
                     onMarkAll = viewModel::markAllPendingLearned,
                     onRefresh = viewModel::refreshQueue,
+                    onTagFilter = onTagFilter,
                     onLoadMore = viewModel::loadMoreQueue,
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
@@ -275,6 +284,7 @@ internal fun CairnLinksApp(
                     },
                     onSearchQueryChange = viewModel::setSearchQuery,
                     onLoadMoreSearchResults = viewModel::loadMoreSearchResults,
+                    onTagFilter = onTagFilter,
                     onBookmarkFiltersChange = viewModel::setBookmarkFilters,
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
@@ -284,6 +294,7 @@ internal fun CairnLinksApp(
                     DetailTopBar(title = "离线阅读", onBack = { navController.popBackStack() })
                     Text("本机保存的最近阅读与固定正文；联网后会确认版本。离线图片不在缓存内。", style = MaterialTheme.typography.bodySmall)
                     LinkList(items = state.offlineLinks.sortedWith(compareByDescending<SavedLink> { state.offlineReads[it.id]?.pinned == true }.thenByDescending { it.id }),
+                        onTagFilter = onTagFilter,
                         taxonomy = state.v2Taxonomy ?: state.taxonomy,
                         loading = false, emptyText = "成功阅读归档正文后会自动缓存，也可以在阅读页固定。",
                         onOpenLinkDetail = { link -> viewModel.openOfflineLink(link); navController.navigate(Routes.detail(link.id)) })
@@ -303,6 +314,7 @@ internal fun CairnLinksApp(
                     onOpenExternal = onOpenExternal,
                     onCopy = onCopy,
                     onToggleLearned = viewModel::toggleLearned,
+                    onTagFilter = onTagFilter,
                     onLoadTaxonomy = viewModel::loadTaxonomy,
                     onSaveCuration = { update, onSuccess -> viewModel.saveCuration(id, update, onSuccess) },
                     onLoadV2 = viewModel::loadV2Selection,
@@ -526,6 +538,7 @@ private fun LibraryScreen(
     state: CairnLinksUiState,
     onFilterChange: (LinkFilter) -> Unit,
     onBookmarkFiltersChange: (BookmarkFilters) -> Unit,
+    onTagFilter: (ReaderTag) -> Unit,
     onLoadMore: () -> Unit,
     onRetryFilters: () -> Unit,
     onOpenSearch: () -> Unit,
@@ -558,13 +571,14 @@ private fun LibraryScreen(
             enabled = true,
             onFilterChange = onFilterChange,
         )
-        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken)
+        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken, learned = state.filter.apiValue)
         if (querying) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text((if (state.libraryStale) "上一次条件的结果 · " else "") + state.libraryStatusText, Modifier.weight(1f).testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onRetryFilters, enabled = !state.libraryLoading, modifier = Modifier.testTag("retry_library_filters")) { Text("重新筛选") }
         }
         LinkList(
             items = items,
+            onTagFilter = onTagFilter,
             taxonomy = state.v2Taxonomy ?: state.taxonomy,
             loading = loading && items.isEmpty(),
             emptyText = if (querying) state.libraryStatusText.ifBlank { "正在筛选..." } else libraryEmptyText(state),
@@ -584,6 +598,7 @@ private fun SearchScreen(
     onSearchQueryChange: (String) -> Unit,
     onLoadMoreSearchResults: () -> Unit,
     onBookmarkFiltersChange: (BookmarkFilters) -> Unit,
+    onTagFilter: (ReaderTag) -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
     val results = remember(state.searchResults) { state.searchResultLinks() }
@@ -594,13 +609,14 @@ private fun SearchScreen(
             onValueChange = onSearchQueryChange,
             enabled = true,
         )
-        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken)
+        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken, query = state.searchQuery)
         if (state.searchQuery.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text((if (state.searchStale) "上一次搜索的结果 · " else "") + state.searchStatusText, Modifier.weight(1f).testTag("search_status"), style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = { onSearchQueryChange(state.searchQuery) }, enabled = !state.searchLoading) { Text("重新搜索") }
         }
         LinkList(
             items = results,
+            onTagFilter = onTagFilter,
             taxonomy = state.v2Taxonomy ?: state.taxonomy,
             loading = state.searchLoading && results.isEmpty(),
             emptyText = when {
@@ -621,6 +637,7 @@ private fun QueueScreen(
     state: CairnLinksUiState,
     onMarkAll: () -> Unit,
     onRefresh: () -> Unit,
+    onTagFilter: (ReaderTag) -> Unit,
     onLoadMore: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
@@ -641,6 +658,7 @@ private fun QueueScreen(
         }
         LinkList(
             items = queue,
+            onTagFilter = onTagFilter,
             taxonomy = state.v2Taxonomy ?: state.taxonomy,
             loading = state.queueLoading && queue.isEmpty(),
             emptyText = state.queueStatusText.ifBlank { "正在读取待学习队列…" },
@@ -969,6 +987,7 @@ private fun DetailScreen(
     onOpenExternal: (String) -> Unit,
     onCopy: (String) -> Unit,
     onToggleLearned: (SavedLink) -> Unit,
+    onTagFilter: (ReaderTag) -> Unit,
     onLoadTaxonomy: () -> Unit,
     onSaveCuration: (CurationUpdate, () -> Unit) -> Unit,
     onLoadV2: (Int, Boolean) -> Unit,
@@ -1034,9 +1053,7 @@ private fun DetailScreen(
                             Text(if (curateExpanded) "收起标签与备注" else "标签与备注")
                         }
                         if (!curateExpanded) {
-                            if (tags.isNotEmpty()) Text(tags.take(5).joinToString(" · ") { it.label } +
-                                if (tags.size > 5) " +${tags.size - 5}" else "", modifier = Modifier.testTag("reader_tag_overview"),
-                                style = MaterialTheme.typography.bodySmall)
+                            if (tags.isNotEmpty()) ReaderTagChips(tags, onTagFilter, Modifier.testTag("reader_tag_overview"))
                             if (enrichment?.why?.isNotBlank() == true) Text(enrichment.why, maxLines = 1,
                                 overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                             if ((state.v2Queued[id] ?: 0) > 0 || state.v2Conflicts.containsKey(id) || (state.personalTagQueued[id] ?: 0) > 0) Text("有待同步或冲突的标签修改，展开后处理。", style = MaterialTheme.typography.bodySmall)
@@ -1579,6 +1596,7 @@ private fun ColumnScope.LinkList(
     loading: Boolean,
     emptyText: String,
     onOpenLinkDetail: (SavedLink) -> Unit,
+    onTagFilter: ((ReaderTag) -> Unit)? = null,
     fifo: Boolean = false,
     refreshing: Boolean = false,
     hasMore: Boolean = false,
@@ -1612,6 +1630,7 @@ private fun ColumnScope.LinkList(
                 link = link,
                 fifo = fifo,
                 taxonomy = taxonomy,
+                onTagFilter = onTagFilter,
                 onClick = { onOpenLinkDetail(link) },
             )
         }
@@ -1643,6 +1662,7 @@ private fun LinkRow(
     link: SavedLink,
     fifo: Boolean,
     taxonomy: com.alpenl.cairn.share.network.BookmarkTaxonomy?,
+    onTagFilter: ((ReaderTag) -> Unit)?,
     onClick: () -> Unit,
 ) {
     val title = remember(link.url, link.enrichment?.aiTitle) { link.displayTitle() }
@@ -1694,9 +1714,12 @@ private fun LinkRow(
                     )
                 }
                 val tags = readerTags(link, null, taxonomy)
-                if (tags.isNotEmpty()) Text(tags.take(2).joinToString(" · ") { it.label } + if (tags.size > 2) " +${tags.size - 2}" else "",
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("link_tags_${link.id}"))
+                if (tags.isNotEmpty()) {
+                    if (onTagFilter != null) ReaderTagChips(tags, onTagFilter, Modifier.testTag("link_tags_${link.id}"))
+                    else Text(tags.take(5).joinToString(" · ") { it.label } + if (tags.size > 5) " +${tags.size - 5}" else "",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("link_tags_${link.id}"))
+                }
             }
             StateDot(learned = link.learned)
         }

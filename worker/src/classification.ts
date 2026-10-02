@@ -549,6 +549,8 @@ export async function classificationRoute(request: Request, env: Env, path: stri
   if (match[2] === "complete") {
     if (!record(body.result)) return fail("invalid_classification");
     const result = body.result;
+    if (record(result.raw_judgments) && result.raw_judgments.metadata_version === 2 &&
+      request.headers.get("X-Cairn-Candidate-Manifest") !== "2") return fail("capability_mismatch");
     const isV2 = v2ResultShape(result);
     // A negotiated v2 projection uses its immutable target vocabulary; the old
     // v1 executable taxonomy cannot validate the new stable topic identities.
@@ -565,7 +567,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     if (isV2 && !await validRunProvenance(env, id, result.raw_judgments, {
       specId: String(result.spec_id), specHash: String(result.spec_hash),
       requestedModel: String(result.requested_model ?? result.model), resolvedModel: String(result.model),
-      coverage: result.coverage === "partial" ? "partial" : "complete", answers: result.answers, usage: result.usage ?? { missing: true }
+      coverage: result.coverage === "partial" ? "partial" : "complete", answers: result.answers, usage: result.usage ?? { missing: true }, automatic
     })) return fail("invalid_classification");
     const key = operationKey(body);
     // The logical payload identity covers the link, the lease epoch and the
@@ -580,7 +582,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         (result.requested_model ?? result.model) !== target.requested_model ||
         result.policy_version !== target.policy_version)) return { failure: "target_changed" as const };
       if (classificationTaxonomy(target.taxonomy_version)?.resource_kinds !== undefined && (!isV2 ||
-        !record(result.raw_judgments) || result.raw_judgments.metadata_version !== 1 ||
+        !record(result.raw_judgments) || (result.raw_judgments.metadata_version !== 1 && result.raw_judgments.metadata_version !== 2) ||
         automatic?.resource_kinds === undefined)) return { failure: "invalid_classification" as const };
       if (isV2 && automatic && !validAutomaticProjection(classification, automatic, target.taxonomy_version)) {
         return { failure: "invalid_classification" as const };

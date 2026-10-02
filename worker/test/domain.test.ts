@@ -733,10 +733,10 @@ it("applies an approved display-only rename without changing semantics (B05-T11)
     kind: "add_term", dimension: "topics", term_id: "new_topic", payload: { label: "新主题" }
   });
   const semanticID = (await semantic.json() as { id: string }).id;
-  await request(`v2/taxonomy/proposals/${semanticID}/decision`, { decision: "approved" });
+  expect((await request(`v2/taxonomy/proposals/${semanticID}/decision`, { decision: "approved" })).status).toBe(409);
   const refused = await request(`v2/taxonomy/proposals/${semanticID}/apply`, {});
   expect(refused.status).toBe(409);
-  expect((await refused.json() as { error: string }).error).toBe("requires_new_version");
+  expect((await refused.json() as { error: string }).error).toBe("not_approved");
 });
 
 it("generates a proposal only from repeated human corrections and never applies it (B09-T11)", async () => {

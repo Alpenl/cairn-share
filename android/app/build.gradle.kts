@@ -15,7 +15,7 @@ fun versionCodeFrom(versionName: String): Int {
 }
 
 val releaseVersionName = providers.gradleProperty("cairnShareVersionName")
-    .orElse("0.3.2")
+    .orElse("0.6.0")
     .get()
 val releaseVersionCode = providers.gradleProperty("cairnShareVersionCode")
     .map(String::toInt)

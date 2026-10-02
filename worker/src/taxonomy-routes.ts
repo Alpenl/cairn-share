@@ -3,8 +3,10 @@ import { readSelectionSnapshot } from "./selection-state";
 import type { Env } from "./index";
 import { computeEffective, persistSelectionOverrides, rebuildProjection, selectionOperationReceipt } from "./domain-routes";
 import { canonicalJSON } from "./domain";
+import { validateTopicProposal, type TopicProposalEvidence } from "./topic-proposals";
 import {
   applyV1Write, findTerm, proposalImpact, projectV1, taxonomyV2, legacyTaxonomyV2, validateTaxonomy, validateV2Selection,
+  topicGranularityAware, termForTransport,
   type TaxonomyProposal, type V2Selection
 } from "./taxonomy-v2";
 import { V1_V2_MAPPING, validateMapping } from "./taxonomy-mapping";
@@ -67,7 +69,7 @@ export async function taxonomyV2Route(request: Request, env: Env, path: string):
   // definitions are untouched so no stored decision is invalidated.
   if (path === "/api/v2/taxonomy") {
     if (request.method !== "GET") return fail("method_not_allowed", 405);
-    return reply(await taxonomyWithDisplayOverrides(env, request.headers.get("X-Cairn-Tag-System") === "1"));
+    return reply(await taxonomyWithDisplayOverrides(env, request.headers.get("X-Cairn-Tag-System") === "1", topicGranularityAware(request)));
   }
   if (path === "/api/v2/taxonomy/validate") {
     const problems = validateTaxonomy();
@@ -155,10 +157,9 @@ async function generateProposals(env: Env): Promise<Response> {
 // taxonomyWithDisplayOverrides returns the executable vocabulary with approved
 // display-only renames applied to labels. Definitions, ids and relations are
 // unchanged, so the model input and every stored decision stay valid.
-async function taxonomyWithDisplayOverrides(env: Env, tags = false): Promise<Record<string, unknown>> {
+async function taxonomyWithDisplayOverrides(env: Env, tags = false, granularity = false): Promise<Record<string, unknown>> {
   const vocabulary = (tags ? taxonomyV2() : legacyTaxonomyV2()) as unknown as Record<string, unknown>;
   const rows = await env.DB.prepare(`SELECT term_id, dimension, label,display_revision FROM taxonomy_display_overrides`).all<{ term_id: string; dimension: string; label: string; display_revision: number }>();
-  if (rows.results.length === 0) return vocabulary;
   const overlays = new Map(rows.results.map((row) => [`${row.dimension}:${row.term_id}`, row]));
   const result: Record<string, unknown> = { ...vocabulary };
   for (const dimension of ["topics", "forms", "uses", "content_functions", "carriers", "affordances", "resource_kinds"]) {
@@ -166,8 +167,9 @@ async function taxonomyWithDisplayOverrides(env: Env, tags = false): Promise<Rec
     if (!Array.isArray(terms)) continue;
     result[dimension] = terms.map((term) => {
       const display = overlays.get(`${dimension}:${(term as { id: string }).id}`);
-      return display === undefined ? term : { ...(term as Record<string, unknown>), label: display.label, display_overridden: true,
+      const definition = display === undefined ? term : { ...(term as Record<string, unknown>), label: display.label, display_overridden: true,
         ...(tags ? { display_revision: display.display_revision } : {}) };
+      return termForTransport(definition as Record<string, unknown>, granularity);
     });
   }
   return result;
@@ -329,6 +331,23 @@ async function listProposals(env: Env): Promise<Response> {
   return reply({ proposals: rows.results.map((row) => ({ ...row, impact: JSON.parse(String((row as { impact: string }).impact ?? "{}")) })) });
 }
 
+// The validator proves a source snapshot before the write. Bind the exact text
+// as well as its revision so a deletion or in-place source change between those
+// reads and the SQL statement cannot leave an apparently current proposal.
+async function proposalSourceGuard(env: Env, evidence: TopicProposalEvidence[]): Promise<{ sql: string; bindings: Array<string | number> } | null> {
+  const bindings: Array<string | number> = [];
+  for (const item of evidence) {
+    const row = await env.DB.prepare("SELECT original_text,content_revision FROM links WHERE id=?").bind(item.link_id)
+      .first<{ original_text: string | null; content_revision: number }>();
+    if (!row?.original_text || row.content_revision !== item.content_revision) return null;
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(row.original_text));
+    const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+    if (hash !== item.source_hash) return null;
+    bindings.push(item.link_id, item.content_revision, row.original_text);
+  }
+  return { sql: evidence.map(() => "EXISTS(SELECT 1 FROM links WHERE id=? AND content_revision=? AND original_text IS ?)").join(" AND "), bindings };
+}
+
 async function createProposal(request: Request, env: Env): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
@@ -341,17 +360,40 @@ async function createProposal(request: Request, env: Env): Promise<Response> {
   }
   // The proposal must reference a real dimension.
   if (!(dimension in taxonomyV2())) return fail("invalid_proposal");
-  const id = crypto.randomUUID();
+  let payload = (body.payload as Record<string, unknown>) ?? {};
+  let sourceGuard: Awaited<ReturnType<typeof proposalSourceGuard>> = null;
+  let fingerprint: string | undefined;
+  if (dimension === "topics" && kind === "add_term" && topicGranularityAware(request)) {
+    const validated = await validateTopicProposal(payload, env);
+    if (!validated.ok) return fail(validated.error, validated.error === "stale_topic_evidence" ? 409 : 400,
+      validated.existing_terms ? { existing_terms: validated.existing_terms } : {});
+    if (termID !== validated.term.id) return fail("proposal_term_mismatch");
+    sourceGuard = await proposalSourceGuard(env, validated.evidence);
+    if (!sourceGuard) return fail("stale_topic_evidence", 409);
+    fingerprint = validated.fingerprint;
+    payload = { term: validated.term, evidence: validated.evidence, fingerprint };
+  }
+  const id = fingerprint ? `topic_${fingerprint.slice(0, 56)}` : crypto.randomUUID();
   const proposal: TaxonomyProposal = {
     id, kind: kind as TaxonomyProposal["kind"], dimension, term_id: termID,
-    payload: (body.payload as Record<string, unknown>) ?? {}, status: "pending", revision: 1,
+    payload, status: "pending", revision: 1,
     submitted_at: new Date().toISOString(),
   };
   const impact = proposalImpact(proposal);
-  await env.DB.prepare(
+  const result = await env.DB.prepare(
     `INSERT INTO taxonomy_proposals(id, kind, dimension, term_id, payload, status, revision, impact, submitted_at)
-     VALUES (?, ?, ?, ?, ?, 'pending', 1, ?, ?)`
-  ).bind(id, proposal.kind, dimension, termID, JSON.stringify(proposal.payload), JSON.stringify(impact), proposal.submitted_at).run();
+     SELECT ?, ?, ?, ?, ?, 'pending', 1, ?, ? WHERE ${sourceGuard?.sql ?? "1"}
+       ${fingerprint ? "AND NOT EXISTS(SELECT 1 FROM taxonomy_proposals WHERE id=? OR (dimension='topics' AND kind='add_term' AND term_id=? AND status IN ('pending','approved')))" : ""}`
+  ).bind(id, proposal.kind, dimension, termID, canonicalJSON(proposal.payload), JSON.stringify(impact), proposal.submitted_at,
+    ...(sourceGuard?.bindings ?? []), ...(fingerprint ? [id, termID] : [])).run();
+  if (fingerprint && !result.meta.changes) {
+    const prior = await env.DB.prepare("SELECT id,status,impact FROM taxonomy_proposals WHERE id=?").bind(id)
+      .first<{ id: string; status: string; impact: string }>();
+    if (prior) return reply({ id: prior.id, status: prior.status, impact: JSON.parse(prior.impact), applied: false });
+    const duplicate = await env.DB.prepare("SELECT id FROM taxonomy_proposals WHERE dimension='topics' AND kind='add_term' AND term_id=? AND status IN ('pending','approved')")
+      .bind(termID).first<{ id: string }>();
+    return duplicate ? fail("proposal_definition_conflict", 409, { proposal_id: duplicate.id }) : fail("stale_topic_evidence", 409);
+  }
   // A proposal never mutates the vocabulary on its own.
   return reply({ id, status: "pending", impact, applied: false });
 }
@@ -359,15 +401,33 @@ async function createProposal(request: Request, env: Env): Promise<Response> {
 async function decideProposal(request: Request, env: Env, id: string): Promise<Response> {
   const body = await bodyOf(request);
   if (!body || !["approved", "rejected"].includes(String(body.decision))) return fail("invalid_decision");
-  const existing = await env.DB.prepare(`SELECT status, revision FROM taxonomy_proposals WHERE id = ?`).bind(id)
-    .first<{ status: string; revision: number }>();
+  const existing = await env.DB.prepare(`SELECT status,revision,kind,dimension,term_id,payload FROM taxonomy_proposals WHERE id = ?`).bind(id)
+    .first<{ status: string; revision: number; kind: string; dimension: string; term_id: string; payload: string }>();
   if (!existing) return fail("not_found", 404);
   if (existing.status !== "pending") return fail("already_decided", 409, { status: existing.status });
   if (body.expected_revision !== undefined && body.expected_revision !== existing.revision) {
     return fail("revision_conflict", 409, { revision: existing.revision });
   }
-  await env.DB.prepare(`UPDATE taxonomy_proposals SET status = ?, decided_at = ?, revision = revision + 1 WHERE id = ? AND status = 'pending'`)
-    .bind(body.decision, new Date().toISOString(), id).run();
+  let sourceGuard: Awaited<ReturnType<typeof proposalSourceGuard>> = null;
+  let approvedPayload = existing.payload;
+  if (body.decision === "approved" && existing.dimension === "topics" && existing.kind === "add_term") {
+    const payload = JSON.parse(existing.payload) as Record<string, unknown>;
+    const validated = await validateTopicProposal(payload, env);
+    if (!validated.ok) return fail(validated.error, 409, validated.existing_terms ? { existing_terms: validated.existing_terms } : {});
+    if (validated.term.id !== existing.term_id) return fail("proposal_term_mismatch", 409);
+    // A previously bound definition must retain the exact original source
+    // identity even when a changed article still contains the same quote.
+    if (payload.fingerprint !== undefined && payload.fingerprint !== validated.fingerprint) return fail("stale_topic_evidence", 409);
+    sourceGuard = await proposalSourceGuard(env, validated.evidence);
+    if (!sourceGuard) return fail("stale_topic_evidence", 409);
+    // A complete draft submitted through an older protocol can be reviewed,
+    // but its successful review must leave the same durable source identities.
+    approvedPayload = canonicalJSON({ term: validated.term, evidence: validated.evidence, fingerprint: validated.fingerprint });
+  }
+  const result = await env.DB.prepare(`UPDATE taxonomy_proposals SET status = ?, decided_at = ?, payload=?, revision = revision + 1
+    WHERE id = ? AND status = 'pending' AND revision=? AND payload=? AND ${sourceGuard?.sql ?? "1"}`)
+    .bind(body.decision, new Date().toISOString(), approvedPayload, id, existing.revision, existing.payload, ...(sourceGuard?.bindings ?? [])).run();
+  if (!result.meta.changes) return fail("proposal_changed", 409);
   // Approval records the decision; enabling it in the executable vocabulary is
   // a separate, explicitly versioned step so a label change never re-evaluates
   // stored decisions implicitly.

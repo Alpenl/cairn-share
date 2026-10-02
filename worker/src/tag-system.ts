@@ -6,7 +6,7 @@ import { canonicalJSON, compactOverrides, effectiveView, normalizeField, type Ov
 import { projectionInputGuard, projectionWrites, rebuildProjection } from "./domain-routes";
 import { readSelectionSnapshot, readSelectionExport, readTagSummaries, tagSummaryFromRow, type TagSummaryRow, type TagSummary } from "./selection-state";
 import { selectionPayload } from "./taxonomy-routes";
-import { findTerm, taxonomyV2, normalizeTerm } from "./taxonomy-v2";
+import { findTerm, taxonomyV2, normalizeTerm, topicGranularityAware, termForTransport } from "./taxonomy-v2";
 
 const headers = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, no-store", "X-Cairn-Tag-System": "1" };
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers });
@@ -255,7 +255,7 @@ async function applyActions(request: Request, env: Env, id: number) {
   return receipt ? acknowledge(receipt, false) : fail("revision_conflict", 409, { current: await tagPayload(env, id) });
 }
 
-async function history(env: Env, id: number, params: URLSearchParams) {
+async function history(env: Env, id: number, params: URLSearchParams, granularity = false) {
   const limit = Math.min(100, Math.max(1, Number(params.get("limit") ?? 30))), before = Number(params.get("before_id") ?? Number.MAX_SAFE_INTEGER);
   if (!Number.isSafeInteger(limit) || !Number.isSafeInteger(before)) return fail("invalid_pagination");
   if (!(await env.DB.prepare(`SELECT id FROM links WHERE id=?`).bind(id).first())) return fail("not_found", 404);
@@ -265,7 +265,12 @@ async function history(env: Env, id: number, params: URLSearchParams) {
     WHERE f.link_id=? AND f.id<? AND (o.operation_key IS NULL OR f.field='operation') ORDER BY f.id DESC LIMIT ?`)
     .bind(id, before, limit + 1).all<Record<string, unknown>>();
   const rows = facts.results.slice(0, limit);
-  return reply({ events: rows.map(r => ({ ...r, tag_ref: r.field === "custom_tags" ? `custom/${owner}/${r.term}` : r.field === "operation" ? null : `system/${normalizeField(r.field) ?? r.field}/${r.term}`, context: JSON.parse(String(r.context)),
+  const contextForTransport = (raw: unknown) => {
+    const context = JSON.parse(String(raw)) as Record<string, unknown>;
+    if (!object(context) || !Array.isArray(context.tag_definitions)) return context;
+    return { ...context, tag_definitions: context.tag_definitions.map(definition => object(definition) ? termForTransport(definition, granularity) : definition) };
+  };
+  return reply({ events: rows.map(r => ({ ...r, tag_ref: r.field === "custom_tags" ? `custom/${owner}/${r.term}` : r.field === "operation" ? null : `system/${normalizeField(r.field) ?? r.field}/${r.term}`, context: contextForTransport(r.context),
     actions: r.actions ? JSON.parse(String(r.actions)) : [{ action: r.action, field: r.field, term: r.term }],
     before: r.before_effective ? JSON.parse(String(r.before_effective)) : null, after: r.after_effective ? JSON.parse(String(r.after_effective)) : null })),
     next_before_id: facts.results.length > limit ? rows[rows.length - 1].id : null, coverage: "available_facts", legacy_context: "unknown" });
@@ -429,7 +434,7 @@ export async function tagSystemRoute(request: Request, env: Env, path: string): 
   if (query) return request.method === "GET" ? queryTags(request, env, query[1] as "counts" | "export") : fail("method_not_allowed", 405);
   const link = path.match(/^\/api\/v2\/links\/(\d+)\/(tags|tag-history)$/)!;
   const id = Number(link[1]);
-  if (link[2] === "tag-history") return request.method === "GET" ? history(env, id, new URL(request.url).searchParams) : fail("method_not_allowed", 405);
+  if (link[2] === "tag-history") return request.method === "GET" ? history(env, id, new URL(request.url).searchParams, topicGranularityAware(request)) : fail("method_not_allowed", 405);
   if (request.method === "GET") { const payload = await tagPayload(env, id); return payload ? reply(payload) : fail("not_found", 404); }
   return request.method === "POST" ? applyActions(request, env, id) : fail("method_not_allowed", 405);
 }

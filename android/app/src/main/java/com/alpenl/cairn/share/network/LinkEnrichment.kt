@@ -112,6 +112,9 @@ internal data class TaxonomyTerm(
     val active: Boolean,
     val deprecated: Boolean = false,
     val description: String = "",
+    val aliases: List<String> = emptyList(),
+    val granularity: String = "broad",
+    val navigation: Boolean = true,
 )
 
 internal data class BookmarkTaxonomy(
@@ -208,13 +211,16 @@ internal fun SavedLink.retainLoadedContent(previous: SavedLink?): SavedLink {
     ))
 }
 
-internal fun decodeTaxonomy(json: JSONObject): BookmarkTaxonomy {
+internal fun decodeTaxonomy(json: JSONObject, topicGranularity: Boolean = false): BookmarkTaxonomy {
     fun terms(key: String): List<TaxonomyTerm> = json.optJSONArray(key)?.let { items ->
         List(items.length()) { index -> items.getJSONObject(index).let {
             TaxonomyTerm(
                 it.getString("id"), it.getString("label"), it.optBoolean("active", false),
                 deprecated = it.optBoolean("deprecated", false),
                 description = it.optString("description"),
+                aliases = it.optJSONArray("aliases").strings(),
+                granularity = if (topicGranularity && it.optString("granularity") == "specific") "specific" else "broad",
+                navigation = if (topicGranularity) it.optBoolean("navigation", it.optString("granularity") != "specific") else true,
             )
         } }
     }.orEmpty()

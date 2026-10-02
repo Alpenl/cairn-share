@@ -95,7 +95,8 @@ internal class LinksApiClient(
             when (status) {
                 HttpURLConnection.HTTP_OK -> if ((filters.needsEffectiveFilterContract() && JSONObject(body).opt("filter_contract_version") != 1) ||
                     (filters.needsTagFilterContract() && connection.getHeaderField("X-Cairn-Tag-System") != "1") ||
-                    (filters.functionsMode == "all" && filters.contentFunctions.isNotEmpty() && connection.getHeaderField("X-Cairn-Content-Functions") != "1")) {
+                    (filters.functionsMode == "all" && filters.contentFunctions.isNotEmpty() && connection.getHeaderField("X-Cairn-Content-Functions") != "1") ||
+                    (filters.topicRefinements.isNotEmpty() && connection.getHeaderField("X-Cairn-Topic-Granularity") != "1")) {
                     LinkPageResult.UnsupportedFilters
                 } else LinkPageResult.Loaded(LinkJson.decodePage(body))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> LinkPageResult.Failed(FailureKind.Unauthorized)
@@ -289,6 +290,7 @@ internal class LinksApiClient(
         connection.instanceFollowRedirects = false
         connection.setRequestProperty("Accept", "application/json")
         connection.setRequestProperty("X-Cairn-Tag-System", "1")
+        connection.setRequestProperty("X-Cairn-Topic-Granularity", "1")
         connection.setRequestProperty("X-Cairn-Content-Functions", "1")
         connection.setRequestProperty("X-Cairn-Search-Summary", "1")
         connection.setRequestProperty("User-Agent", userAgent)
@@ -310,7 +312,8 @@ internal class LinksApiClient(
             configure(connection, apiToken)
             cancellation?.attach(connection)
             when (connection.responseCode) {
-                HttpURLConnection.HTTP_OK -> TaxonomyResult.Loaded(decodeTaxonomy(JSONObject(responseBody(connection))))
+                HttpURLConnection.HTTP_OK -> TaxonomyResult.Loaded(decodeTaxonomy(JSONObject(responseBody(connection)),
+                    topicGranularity = connection.getHeaderField("X-Cairn-Topic-Granularity") == "1" && connection.getHeaderField("X-Cairn-Tag-System") == "1"))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> TaxonomyResult.Failed(FailureKind.Unauthorized)
                 else -> TaxonomyResult.Failed(FailureKind.Server)
             }
