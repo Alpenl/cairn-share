@@ -40,6 +40,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -151,6 +152,7 @@ internal fun TopicNavigation(filters: BookmarkFilters, terms: List<TaxonomyTerm>
     val account = accountKeyFor(baseUrl, apiToken)
     val context = LocalContext.current
     val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     val preferences = remember(context) { context.getSharedPreferences("topic-navigation", Context.MODE_PRIVATE) }
     var pinned by remember(account) { mutableStateOf(preferences.getStringSet("pins:$account", emptySet()).orEmpty().toSet()) }
     var search by rememberSaveable(account) { mutableStateOf("") }
@@ -228,7 +230,7 @@ internal fun TopicNavigation(filters: BookmarkFilters, terms: List<TaxonomyTerm>
                     val refine = term.id in refinements || current.isNotEmpty() && term.granularity == "specific" && term.id !in selected
                     if (managingPins) {
                         QuietFilterTag(label = term.label, selected = term.id in pinned, onClick = {
-                            focus.clearFocus()
+                            focus.clearFocus(); keyboard?.hide()
                             pinned = if (term.id in pinned) pinned - term.id else pinned + term.id
                             preferences.edit().putStringSet("pins:$account", pinned).apply()
                         }, enabled = term.active && !term.deprecated || term.id in pinned,
@@ -238,7 +240,7 @@ internal fun TopicNavigation(filters: BookmarkFilters, terms: List<TaxonomyTerm>
                     } else {
                         QuietFilterTag(label = term.label + (if (!term.active || term.deprecated) "（已停用）" else "") + (counts[term.id]?.let { " $it" } ?: ""),
                             selected = term.id in current, onClick = {
-                            focus.clearFocus()
+                            focus.clearFocus(); keyboard?.hide()
                             if (refine) onChange(filters.copy(topicRefinements = if (term.id in refinements) filters.topicRefinements - term.id else filters.topicRefinements + term.id))
                             else onChange(filters.copy(topic = "", topics = if (term.id in selected) selected.toList() - term.id else selected.toList() + term.id))
                         },
@@ -248,7 +250,7 @@ internal fun TopicNavigation(filters: BookmarkFilters, terms: List<TaxonomyTerm>
             }
         }
         for (id in current.filter { id -> terms.none { it.id == id } }) QuietFilterTag("$id（词表不可用）", true, onClick = {
-            focus.clearFocus()
+            focus.clearFocus(); keyboard?.hide()
             if (id in refinements) onChange(filters.copy(topicRefinements = filters.topicRefinements - id))
             else onChange(filters.copy(topic = "", topics = selected.toList() - id))
         })

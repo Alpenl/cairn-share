@@ -2,6 +2,7 @@ package com.alpenl.cairn.share
 
 import android.content.Intent
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.test.core.app.ActivityScenario
@@ -334,7 +335,9 @@ class V2CurationInstrumentedTest {
             compose.waitUntil(20_000) { lastLibraryToken.get() == "Bearer $token" }
             compose.waitUntil(20_000) { runCatching {
                 compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("reader_curation_toggle"))
-                compose.onNodeWithTag("reader_curation_toggle").assertTextContains("标签与备注")
+                compose.onNodeWithTag("reader_curation_toggle")
+                    .assertContentDescriptionEquals("编辑标签与备注")
+                    .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "已折叠"))
                 true
             }.getOrDefault(false) }
             // Changing the active account resets the reader's editor to folded.

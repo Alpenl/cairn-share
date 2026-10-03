@@ -66,7 +66,7 @@ class ReaderOptimizationInstrumentedTest {
         }
         try {
             ActivityScenario.launch<LauncherActivity>(intent(server)).use {
-                waitTag("link_28"); compose.onNodeWithTag("link_28").performClick()
+                waitTag("link_28"); compose.onNodeWithTag("link_28").performScrollTo().assertIsDisplayed().performClick()
                 waitTag("reader_tag_overview")
                 compose.onNodeWithTag("reader_tag_overview").onChildren().filter(hasText("LLM")).assertCountEquals(1)
                 compose.onNodeWithTag("reader_tag_overview").onChildren().filter(hasText("提示词")).assertCountEquals(1)
@@ -83,17 +83,19 @@ class ReaderOptimizationInstrumentedTest {
                 compose.onNodeWithTag("reader_curation_toggle").assertContentDescriptionEquals("编辑标签与备注")
                     .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "已折叠"))
                 compose.onNodeWithTag("reader_curation_toggle").performSemanticsAction(SemanticsActions.OnClick) { it() }
+                scroll("reader_curation_toggle")
                 compose.onNodeWithTag("reader_curation_toggle").assertTextContains("收起标签与备注")
                 scroll("personal_tag_name"); compose.onNodeWithTag("personal_tag_name").assertTextContains("保留未提交名称")
                 scroll("edit_curation")
                 compose.onNodeWithTag("edit_curation").assertIsEnabled()
                     .performSemanticsAction(SemanticsActions.OnClick) { it() }
-                waitTag("curation_why"); compose.onNodeWithTag("curation_why").performTextReplacement("已编辑的收藏原因")
-                compose.onNodeWithTag("save_curation").performClick()
+                waitTag("curation_why"); scroll("curation_why")
+                compose.onNodeWithTag("curation_why").assertIsDisplayed().performTextReplacement("已编辑的收藏原因")
+                scroll("save_curation"); compose.onNodeWithTag("save_curation").assertIsDisplayed().performClick()
                 compose.waitUntil(10_000) { changed.get() == 1 }
                 scroll("reader_curation_toggle"); compose.onNodeWithTag("reader_curation_toggle").assertTextContains("收起标签与备注")
                 compose.onNodeWithContentDescription("返回").performClick()
-                waitTag("link_27"); compose.onNodeWithTag("link_27").performClick()
+                waitTag("link_27"); compose.onNodeWithTag("link_27").performScrollTo().assertIsDisplayed().performClick()
                 waitTag("reader_tag_overview"); compose.onNodeWithTag("v2_section").assertDoesNotExist()
             }
         } finally { runBlocking { OfflineReadStore(context).clear(account); PersonalTagOutbox(context).discard(account, 28) }; server.shutdown() }
