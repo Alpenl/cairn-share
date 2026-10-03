@@ -3,7 +3,6 @@ package com.alpenl.cairn.share
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.SystemClock
-import android.view.KeyEvent
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.unit.dp
@@ -150,8 +149,16 @@ class AndroidUiRedesignInstrumentedTest {
 
     private fun systemBack() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        // A dismissed dialog can still own the native window while Compose is already idle.
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
+        SystemClock.sleep(800)
+        // Inject through the system input dispatcher, including IME/dialog windows.
+        // Instrumentation's app-scoped key injection is unreliable across windows on API 35.
+        instrumentation.uiAutomation.executeShellCommand("input keyevent 4").use { output ->
+            java.io.FileInputStream(output.fileDescriptor).use { it.readBytes() }
+        }
+        instrumentation.uiAutomation.waitForIdle(250, 5_000)
+        SystemClock.sleep(800)
         compose.waitForIdle()
     }
 
@@ -183,6 +190,17 @@ class AndroidUiRedesignInstrumentedTest {
     @Test fun navigationUsesRealScreensAndSourceActionRemainsVisibleWhileReading() {
         launch().use {
             waitTag("link_49")
+            if (context.resources.configuration.fontScale <= 1.05f) {
+                val heightDp = compose.onNodeWithTag("library_header").fetchSemanticsNode().boundsInRoot.height /
+                    context.resources.displayMetrics.density
+                println("LIBRARY_HEADER_HEIGHT_DP=$heightDp")
+                assertTrue("Compact library header is at most 112 dp (was $heightDp)", heightDp <= 112f)
+            }
+            compose.onNodeWithTag("open_search").assertIsDisplayed().assertHeightIsAtLeast(48.dp)
+            compose.onNodeWithTag("bookmark_filters").assertIsDisplayed().assertHeightIsAtLeast(48.dp)
+            val tabs = compose.onNodeWithTag("filter_all").fetchSemanticsNode().boundsInRoot
+            val filter = compose.onNodeWithTag("bookmark_filters").fetchSemanticsNode().boundsInRoot
+            assertTrue("Reading state and filters share one row", kotlin.math.abs(tabs.center.y - filter.center.y) < 2f)
             screenshot("library", compose.onNodeWithTag("bookmark_filters"))
             compose.onNodeWithTag("bookmark_filters").performScrollTo().performClick()
             waitTag("filter_topics_image_creation")

@@ -498,24 +498,19 @@ private fun LibraryScreen(
     ScreenColumn {
         LinkList(
             header = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                AppHeader(
-                    title = "收藏",
-                    subtitle = if (querying && !state.libraryStale && !loading) "${items.size} 条筛选结果" else "已加载 ${stats.total} 条 · ${stats.pending} 条未读",
-                    actions = {
-                        if (state.offlineReads.isNotEmpty()) HeaderIconButton(CairnIcons.Offline, "离线阅读", onOpenOffline, Modifier.testTag("open_offline_reading"))
-                        HeaderIconButton(Icons.Default.Refresh, if (querying) "重新筛选" else "刷新收藏", if (querying) onRetryFilters else onRefresh,
-                            Modifier.testTag(if (querying) "retry_library_filters" else "refresh_library"), enabled = !loading)
-                    },
-                )
-                Surface(onClick = onOpenSearch, shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().testTag("open_search")) {
-                    Row(Modifier.padding(horizontal = 14.dp).heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
-                        Text("搜索标题、正文或备注", style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(Modifier.testTag("library_header"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp).heightIn(min = 48.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("收藏", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium)
+                        Text(if (querying && !state.libraryStale && !loading) "${items.size} 条筛选结果" else "${stats.total} 条 · ${stats.pending} 未读",
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
+                    HeaderIconButton(Icons.Default.Search, "搜索收藏", onOpenSearch, Modifier.testTag("open_search"))
+                    if (state.offlineReads.isNotEmpty()) HeaderIconButton(CairnIcons.Offline, "离线阅读", onOpenOffline, Modifier.testTag("open_offline_reading"))
+                    HeaderIconButton(Icons.Default.Refresh, if (querying) "重新筛选" else "刷新收藏", if (querying) onRetryFilters else onRefresh,
+                        Modifier.testTag(if (querying) "retry_library_filters" else "refresh_library"), enabled = !loading)
                 }
                 if (state.preferences.apiToken.isBlank()) {
                     Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.primaryContainer) {
@@ -526,12 +521,9 @@ private fun LibraryScreen(
                         }
                     }
                 }
-                FilterRow(
-                    selected = state.filter,
-                    enabled = true,
-                    onFilterChange = onFilterChange,
-                )
-                BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken, learned = state.filter.apiValue)
+                BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange,
+                    state.apiBaseUrl, state.preferences.apiToken, learned = state.filter.apiValue,
+                    leadingContent = { FilterRow(state.filter, true, onFilterChange, Modifier.weight(1f)) })
                 if (!querying && !state.loading && state.statusText.isNotBlank() && !state.statusText.startsWith("已同步") && !state.statusText.startsWith("已加载")) StatusText(state.statusText)
                 if (querying && !state.libraryStatusText.startsWith("已显示")) {
                     Text((if (state.libraryStale) "上一次条件的结果 · " else "") + state.libraryStatusText, Modifier.fillMaxWidth().testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1405,9 +1397,10 @@ private fun FilterRow(
     selected: LinkFilter,
     enabled: Boolean,
     onFilterChange: (LinkFilter) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     // 用轻量的文本切换代替一排 Chip，降低视觉噪声，让链接列表成为主角。
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = modifier.fillMaxWidth()) {
         FilterTab("全部", selected == LinkFilter.All, enabled, { onFilterChange(LinkFilter.All) }, Modifier.weight(1f).testTag("filter_all"))
         FilterTab("未读", selected == LinkFilter.Unlearned, enabled, { onFilterChange(LinkFilter.Unlearned) }, Modifier.weight(1f).testTag("filter_unlearned"))
         FilterTab("已读", selected == LinkFilter.Learned, enabled, { onFilterChange(LinkFilter.Learned) }, Modifier.weight(1f).testTag("filter_learned"))
@@ -1423,7 +1416,7 @@ private fun FilterTab(label: String, selected: Boolean, enabled: Boolean, onClic
         val accent = MaterialTheme.colorScheme.primary
         Box(Modifier.heightIn(min = 48.dp).drawBehind {
             if (selected) drawLine(accent, Offset(size.width * 0.4f, size.height - 1.dp.toPx()), Offset(size.width * 0.6f, size.height - 1.dp.toPx()), 2.dp.toPx())
-        }.padding(horizontal = 12.dp, vertical = 12.dp), contentAlignment = Alignment.Center) {
+        }.padding(horizontal = 8.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
             Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
         }
     }
