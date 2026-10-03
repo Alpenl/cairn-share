@@ -330,6 +330,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
         containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp,
         shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.9f).testTag("bookmark_filter_sheet")) {
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("筛选收藏", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 TextButton(onClick = { onChange(BookmarkFilters()) }, enabled = filters != BookmarkFilters(),
@@ -340,7 +341,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
             Text("点选即生效 · 分组间同时满足", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 8.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
+            Column(Modifier.padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 TopicNavigation(filters, taxonomy?.topics.orEmpty(), baseUrl, apiToken, query, learned, onChange)
                 if (taxonomy == null) Text("标签词表暂未加载；已选条件保留，也可清除后重试。", style = MaterialTheme.typography.bodySmall)
@@ -410,6 +411,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                             modifier = Modifier.testTag("filter_entity_state_$value"))
                     }
                 }
+            }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Button(onClick = { expanded = false }, shape = RoundedCornerShape(8.dp), elevation = null,
