@@ -1,7 +1,9 @@
 package com.alpenl.cairn.share
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -11,7 +13,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -24,8 +28,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,6 +42,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -47,6 +50,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 @Composable
 internal fun SettingsScreen(
@@ -99,10 +103,10 @@ internal fun SettingsScreen(
             SettingsRow(CairnIcons.Offline, "离线阅读", "本机已存 ${state.offlineReads.size} 条正文 · 最近阅读与固定收藏", onOpenOffline)
             Text("最近 30 条正文与最多 20 条固定收藏，共用 16 MB 缓存；图片需要联网。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp))
+                modifier = Modifier.padding(start = 32.dp, end = 4.dp))
             TextButton(onClick = { confirmClearCache = true }, enabled = state.offlineReads.isNotEmpty(),
-                modifier = Modifier.padding(start = 4.dp).heightIn(min = 48.dp).testTag("clear_offline_cache")) {
-                Text("清除当前账号的离线缓存")
+                modifier = Modifier.padding(start = 20.dp).heightIn(min = 48.dp).testTag("clear_offline_cache")) {
+                Text("清除当前账号的离线缓存", style = MaterialTheme.typography.labelMedium)
             }
         }
         SettingsGroup("分享") {
@@ -142,7 +146,7 @@ internal fun SettingsScreen(
                 OutlinedTextField(value = tokenDraft, onValueChange = { tokenDraft = it }, label = { Text("Bearer Token") }, singleLine = true,
                     visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = { TextButton(onClick = { showToken = !showToken }, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (showToken) "隐藏" else "显示") } },
-                    shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().testTag("settings_token_input"))
+                    shape = RoundedCornerShape(6.dp), modifier = Modifier.fillMaxWidth().testTag("settings_token_input"))
             }
         },
         confirmButton = { TextButton(onClick = { onApiTokenChange(tokenDraft); tokenDialogOpen = false }) { Text("保存") } },
@@ -152,39 +156,49 @@ internal fun SettingsScreen(
 
 @Composable
 private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
-    SectionLabel(title)
-    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface,
-        modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(vertical = 4.dp), content = content)
+    Column(Modifier.fillMaxWidth()) {
+        Text(title, style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.4.sp),
+            fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp, bottom = 8.dp).semantics { heading() })
+        Column(content = content)
     }
 }
 @Composable
-private fun SettingsDivider() { HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant) }
+private fun SettingsDivider() {
+    HorizontalDivider(modifier = Modifier.padding(start = 32.dp), thickness = 0.5.dp,
+        color = MaterialTheme.colorScheme.outlineVariant)
+}
 
 @Composable
 internal fun SettingsRow(icon: ImageVector, title: String, subtitle: String, onClick: (() -> Unit)?, modifier: Modifier = Modifier, trailingIcon: ImageVector = CairnIcons.Chevron) {
-    Row(modifier = modifier.fillMaxWidth().heightIn(min = 64.dp).clip(RoundedCornerShape(12.dp))
+    Row(modifier = modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(4.dp))
         .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
-        .padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        .padding(vertical = 9.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f), modifier = Modifier.size(20.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 20.sp))
+            Text(subtitle, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 17.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        if (onClick != null) Icon(trailingIcon, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (onClick != null) Icon(trailingIcon, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f))
     }
 }
 
 @Composable
 private fun SettingsSwitchRow(icon: ImageVector, title: String, subtitle: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit, modifier: Modifier = Modifier) {
-    Row(modifier = modifier.fillMaxWidth().heightIn(min = 64.dp).clip(RoundedCornerShape(12.dp))
+    Row(modifier = modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(4.dp))
         .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
-        .padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        .padding(vertical = 9.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f), modifier = Modifier.size(20.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 20.sp))
+            Text(subtitle, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 17.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(checked = checked, onCheckedChange = null)
+        // The whole row owns the toggle semantics and touch target; this is only its visual state.
+        Box(Modifier.width(36.dp).height(22.dp).clip(RoundedCornerShape(11.dp))
+            .background(if (checked) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.outlineVariant)
+            .padding(3.dp)) {
+            Box(Modifier.align(if (checked) Alignment.CenterEnd else Alignment.CenterStart).size(16.dp).clip(CircleShape)
+                .background(if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)))
+        }
     }
 }

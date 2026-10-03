@@ -8,17 +8,20 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -306,26 +309,39 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
     }
     val labels = bookmarkFilterLabels(filters, taxonomy, customCatalog)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = { expanded = true }, modifier = Modifier.weight(1f).testTag("bookmark_filters")
+        TextButton(onClick = { expanded = true }, shape = RoundedCornerShape(6.dp),
+            contentPadding = PaddingValues(horizontal = 2.dp),
+            colors = ButtonDefaults.textButtonColors(contentColor = if (labels.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary),
+            modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("bookmark_filters")
             .semantics { contentDescription = if (labels.isEmpty()) "筛选收藏" else "筛选收藏，已选：${labels.joinToString("，")}" }) {
-            Icon(CairnIcons.Filter, contentDescription = null)
+            Icon(CairnIcons.Filter, contentDescription = null, modifier = Modifier.size(17.dp))
             Text(if (labels.isEmpty()) "筛选" else labels.take(2).joinToString(" · ") + if (labels.size > 2) " +${labels.size - 2}" else "",
+                style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.weight(1f).padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Icon(CairnIcons.Down, contentDescription = null, modifier = Modifier.size(14.dp))
         }
-        if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) }, modifier = Modifier.testTag("clear_bookmark_filters")) { Text("清除筛选") }
+        if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) },
+            modifier = Modifier.heightIn(min = 48.dp).testTag("clear_bookmark_filters")) {
+            Text("清除筛选", style = MaterialTheme.typography.labelMedium)
+        }
     }
     if (expanded) ModalBottomSheet(onDismissRequest = { expanded = false },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.surface) {
+        containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp,
+        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.9f).testTag("bookmark_filter_sheet")) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("筛选收藏", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                TextButton(onClick = { onChange(BookmarkFilters()) }, enabled = filters != BookmarkFilters(), modifier = Modifier.testTag("reset_filter_sheet")) { Text("重置") }
+                Text("筛选收藏", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                TextButton(onClick = { onChange(BookmarkFilters()) }, enabled = filters != BookmarkFilters(),
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("reset_filter_sheet")) {
+                    Text("重置", style = MaterialTheme.typography.labelMedium)
+                }
             }
-            Text("点选即生效，不同分组同时满足", style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
+            Text("点选即生效 · 分组间同时满足", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 TopicNavigation(filters, taxonomy?.topics.orEmpty(), baseUrl, apiToken, query, learned, onChange)
                 if (taxonomy == null) Text("标签词表暂未加载；已选条件保留，也可清除后重试。", style = MaterialTheme.typography.bodySmall)
                 if (!taxonomy?.resourceKinds.isNullOrEmpty() || filters.resourceKinds.isNotEmpty()) {
@@ -337,24 +353,30 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                         TagFilterMode("资源类型匹配", filters.resourceMode) { onChange(filters.copy(resourceMode = it)) }
                     }
                 }
-                TextButton(onClick = { advanced = !advanced }, modifier = Modifier.testTag("advanced_bookmark_filters")
-                    .semantics { stateDescription = if (advanced) "已展开" else "已折叠" }) { Text(if (advanced) "收起更多条件" else "更多筛选条件") }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.padding(top = 8.dp))
+                TextButton(onClick = { advanced = !advanced }, contentPadding = PaddingValues(horizontal = 0.dp),
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("advanced_bookmark_filters")
+                    .semantics { stateDescription = if (advanced) "已展开" else "已折叠" }) {
+                    Text(if (advanced) "收起更多条件" else "更多筛选条件", style = MaterialTheme.typography.labelMedium)
+                    Icon(if (advanced) CairnIcons.Down else CairnIcons.Chevron, contentDescription = null,
+                        modifier = Modifier.padding(start = 6.dp).size(14.dp))
+                }
                 if (advanced) {
-                    Text("整理状态", style = MaterialTheme.typography.titleSmall)
+                    Text("整理状态", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for (status in CurationStatus.entries) FilterChip(
+                        for (status in CurationStatus.entries) QuietFilterTag(label = status.label,
                             selected = filters.curationStatus == status.apiValue,
                             onClick = { onChange(filters.copy(curationStatus = if (filters.curationStatus == status.apiValue) "" else status.apiValue)) },
-                            label = { Text(status.label) }, modifier = Modifier.testTag("filter_curation_${status.apiValue}"),
+                            modifier = Modifier.testTag("filter_curation_${status.apiValue}"),
                         )
                     }
-                    Text("来源与时间", style = MaterialTheme.typography.titleSmall)
+                    Text("来源与时间", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for ((value, label) in listOf("x" to "X", "wechat" to "公众号", "other" to "其他来源")) FilterChip(
-                            selected = filters.source == value, onClick = { onChange(filters.copy(source = if (filters.source == value) "" else value)) }, label = { Text(label) },
+                        for ((value, label) in listOf("x" to "X", "wechat" to "公众号", "other" to "其他来源")) QuietFilterTag(label = label,
+                            selected = filters.source == value, onClick = { onChange(filters.copy(source = if (filters.source == value) "" else value)) },
                         )
-                        FilterChip(selected = filters.uncertain, onClick = { onChange(filters.copy(uncertain = !filters.uncertain)) }, label = { Text("分类待确认") })
-                        for (days in listOf(7, 30)) FilterChip(selected = filters.recentDays == days, onClick = { onChange(filters.copy(recentDays = if (filters.recentDays == days) 0 else days)) }, label = { Text("近 $days 天") })
+                        QuietFilterTag(label = "分类待确认", selected = filters.uncertain, onClick = { onChange(filters.copy(uncertain = !filters.uncertain)) })
+                        for (days in listOf(7, 30)) QuietFilterTag(label = "近 $days 天", selected = filters.recentDays == days, onClick = { onChange(filters.copy(recentDays = if (filters.recentDays == days) 0 else days)) })
                     }
                     if (customCatalog.isNotEmpty() || filters.customTags.isNotEmpty()) {
                         FilterDimension("自定义标记", "custom_tags", filters.customTags, customCatalog.map { TaxonomyTerm(it.id, it.label, it.active) }) { onChange(filters.copy(customTags = it)) }
@@ -380,19 +402,20 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                         TermSelector("形态", filters.form, taxonomy?.forms.orEmpty()) { onChange(filters.copy(form = it)) }
                         TermSelector("用途", filters.use, taxonomy?.uses.orEmpty()) { onChange(filters.copy(use = it)) }
                     }
-                    Text("实体处理状态（任一）", style = MaterialTheme.typography.titleSmall)
+                    Text("实体处理状态（任一）", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         val selected = filters.entityState.split(',').filter { it.isNotEmpty() }
-                        for ((value, label) in entityFilterLabels) FilterChip(selected = value in selected,
+                        for ((value, label) in entityFilterLabels) QuietFilterTag(label = label, selected = value in selected,
                             onClick = { onChange(filters.copy(entityState = (if (value in selected) selected - value else selected + value).joinToString(","))) },
-                            label = { Text(label) }, modifier = Modifier.testTag("filter_entity_state_$value"))
+                            modifier = Modifier.testTag("filter_entity_state_$value"))
                     }
                 }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Button(onClick = { expanded = false }, shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp).testTag("view_filter_results")) {
-                Text("查看结果")
+            Button(onClick = { expanded = false }, shape = RoundedCornerShape(8.dp), elevation = null,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)
+                    .heightIn(min = 48.dp).testTag("view_filter_results")) {
+                Text("查看结果", style = MaterialTheme.typography.labelLarge)
             }
         }
     }
@@ -401,13 +424,14 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FilterDimension(label: String, key: String, selected: List<String>, terms: List<TaxonomyTerm>, onChange: (List<String>) -> Unit) {
-    Text(label, style = MaterialTheme.typography.labelLarge)
+    Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 8.dp))
     val choices = terms.filter { it.active || it.id in selected }.map { it.id to (it.label + if (it.active) "" else "（已停用）") } +
         selected.filter { id -> terms.none { it.id == id } }.map { it to "$it（词表不可用）" }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        for ((id, text) in choices) FilterChip(selected = id in selected,
+        for ((id, text) in choices) QuietFilterTag(label = text, selected = id in selected,
             onClick = { onChange(if (id in selected) selected - id else selected + id) },
-            label = { Text(text) }, modifier = Modifier.testTag("filter_${key}_$id"))
+            modifier = Modifier.testTag("filter_${key}_$id"))
     }
 }
 
@@ -415,8 +439,9 @@ private fun FilterDimension(label: String, key: String, selected: List<String>, 
 @Composable
 private fun TagFilterMode(label: String, mode: String, onChange: (String) -> Unit) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        for ((value, label) in listOf("any" to "任一", "all" to "全部")) FilterChip(
-            selected = mode == value, onClick = { onChange(value) }, label = { Text(label) })
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.align(Alignment.CenterVertically))
+        for ((value, label) in listOf("any" to "任一", "all" to "全部")) QuietFilterTag(label = label,
+            selected = mode == value, onClick = { onChange(value) })
     }
 }

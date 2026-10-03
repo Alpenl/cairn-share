@@ -14,7 +14,7 @@ internal object CairnIcons {
     private fun icon(name: String, draw: PathBuilder.() -> Unit) = ImageVector.Builder(
         name = name, defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
     ).apply {
-        path(stroke = SolidColor(Color.Black), strokeLineWidth = 1.8f,
+        path(stroke = SolidColor(Color.Black), strokeLineWidth = 1.55f,
             strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round, pathBuilder = draw)
     }.build()
 
@@ -48,5 +48,13 @@ internal object CairnIcons {
     val Offline = icon("Offline") {
         moveTo(12f, 3f); lineTo(12f, 15f); moveTo(7f, 10f); lineTo(12f, 15f); lineTo(17f, 10f)
         moveTo(4f, 16f); lineTo(4f, 21f); lineTo(20f, 21f); lineTo(20f, 16f)
+    }
+    val Settings = icon("Settings") {
+        moveTo(3f, 6f); lineTo(7f, 6f); moveTo(11f, 6f); lineTo(21f, 6f)
+        moveTo(7f, 6f); curveTo(7f, 3.3f, 11f, 3.3f, 11f, 6f); curveTo(11f, 8.7f, 7f, 8.7f, 7f, 6f)
+        moveTo(3f, 12f); lineTo(14f, 12f); moveTo(18f, 12f); lineTo(21f, 12f)
+        moveTo(14f, 12f); curveTo(14f, 9.3f, 18f, 9.3f, 18f, 12f); curveTo(18f, 14.7f, 14f, 14.7f, 14f, 12f)
+        moveTo(3f, 18f); lineTo(7f, 18f); moveTo(11f, 18f); lineTo(21f, 18f)
+        moveTo(7f, 18f); curveTo(7f, 15.3f, 11f, 15.3f, 11f, 18f); curveTo(11f, 20.7f, 7f, 20.7f, 7f, 18f)
     }
 }

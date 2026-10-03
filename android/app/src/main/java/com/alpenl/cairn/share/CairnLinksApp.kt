@@ -7,9 +7,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.ui.platform.LocalFocusManager
@@ -61,7 +58,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -74,6 +71,7 @@ import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -95,6 +93,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -148,7 +148,7 @@ private data class TopDestination(
 private val TopDestinations = listOf(
     TopDestination(Routes.Library, "收藏", CairnIcons.Library),
     TopDestination(Routes.Queue, "待读", CairnIcons.Reading),
-    TopDestination(Routes.Settings, "设置", Icons.Default.Settings),
+    TopDestination(Routes.Settings, "设置", CairnIcons.Settings),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -217,13 +217,14 @@ internal fun CairnLinksApp(
         },
         floatingActionButton = {
             if (currentRoute == Routes.Library) {
-                ExtendedFloatingActionButton(
-                    text = { Text("收藏链接") },
-                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                FloatingActionButton(
                     onClick = viewModel::openManualAdd,
-                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 2.dp),
-                    modifier = Modifier.testTag("add_link"),
-                )
+                    shape = CircleShape,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.primary,
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 1.dp),
+                    modifier = Modifier.size(52.dp).testTag("add_link"),
+                ) { Icon(Icons.Default.Add, contentDescription = "收藏链接", modifier = Modifier.size(22.dp)) }
             }
         },
         containerColor = MaterialTheme.colorScheme.background,
@@ -432,23 +433,25 @@ internal fun CairnLinksApp(
 @Composable
 private fun CairnBottomBar(currentRoute: String?, uploadCount: Int, onNavigate: (String) -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surface) {
-        Column {
+        Column(Modifier.navigationBarsPadding()) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
+            Row(Modifier.fillMaxWidth()) {
                 TopDestinations.forEach { destination ->
-                    NavigationBarItem(
-                        selected = currentRoute == destination.route,
-                        onClick = { onNavigate(destination.route) },
-                        icon = {
+                    val selected = currentRoute == destination.route
+                    val tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    Surface(color = Color.Transparent, contentColor = tint,
+                        modifier = Modifier.weight(1f).selectable(selected, role = Role.Tab,
+                            onClick = { onNavigate(destination.route) }).testTag("nav_${destination.route}")) {
+                        Column(Modifier.heightIn(min = 64.dp).padding(vertical = 9.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)) {
                             BadgedIcon(destination.icon, destination.label, when (destination.route) {
                                 Routes.Settings -> uploadCount.takeIf { it > 0 }
                                 else -> null
                             })
-                        },
-                        label = { Text(destination.label) },
-                        colors = NavigationBarItemDefaults.colors(indicatorColor = MaterialTheme.colorScheme.primaryContainer),
-                        modifier = Modifier.testTag("nav_${destination.route}"),
-                    )
+                            Text(destination.label, style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
+                        }
+                    }
                 }
             }
         }
@@ -497,19 +500,19 @@ private fun LibraryScreen(
             header = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 AppHeader(
-                    title = "我的收藏",
-                    subtitle = "已加载 ${stats.total} 条 · ${stats.pending} 条未读",
+                    title = "收藏",
+                    subtitle = if (querying && !state.libraryStale && !loading) "${items.size} 条筛选结果" else "已加载 ${stats.total} 条 · ${stats.pending} 条未读",
                     actions = {
                         if (state.offlineReads.isNotEmpty()) HeaderIconButton(CairnIcons.Offline, "离线阅读", onOpenOffline, Modifier.testTag("open_offline_reading"))
-                        HeaderIconButton(Icons.Default.Refresh, "刷新收藏", onRefresh,
-                            Modifier.testTag("refresh_library"), enabled = !loading)
+                        HeaderIconButton(Icons.Default.Refresh, if (querying) "重新筛选" else "刷新收藏", if (querying) onRetryFilters else onRefresh,
+                            Modifier.testTag(if (querying) "retry_library_filters" else "refresh_library"), enabled = !loading)
                     },
                 )
                 Surface(onClick = onOpenSearch, shape = MaterialTheme.shapes.medium,
                     color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().testTag("open_search")) {
-                    Row(Modifier.padding(horizontal = 16.dp).heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(Modifier.padding(horizontal = 14.dp).heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                         Text("搜索标题、正文或备注", style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -530,9 +533,8 @@ private fun LibraryScreen(
                 )
                 BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken, learned = state.filter.apiValue)
                 if (!querying && !state.loading && state.statusText.isNotBlank() && !state.statusText.startsWith("已同步") && !state.statusText.startsWith("已加载")) StatusText(state.statusText)
-                if (querying) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text((if (state.libraryStale) "上一次条件的结果 · " else "") + state.libraryStatusText, Modifier.weight(1f).testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = onRetryFilters, enabled = !state.libraryLoading, modifier = Modifier.testTag("retry_library_filters")) { Text("重新筛选") }
+                if (querying && !state.libraryStatusText.startsWith("已显示")) {
+                    Text((if (state.libraryStale) "上一次条件的结果 · " else "") + state.libraryStatusText, Modifier.fillMaxWidth().testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 }
             },
@@ -884,15 +886,21 @@ private fun DetailScreen(
                         val vocabulary = state.v2Taxonomy ?: state.taxonomy
                         val offlineLabels = state.offlineReads[id]?.tagLabels.orEmpty()
                         val tags = if (effective == null && vocabulary == null && offlineLabels.isNotEmpty()) offlineLabels else readerTags(link, effective, vocabulary)
-                        TextButton(onClick = { curateExpanded = !curateExpanded }, modifier = Modifier.testTag("reader_curation_toggle").semantics { stateDescription = if (curateExpanded) "已展开" else "已折叠" }) {
-                            Text(if (curateExpanded) "收起标签与备注" else "标签与备注")
-                        }
                         if (!curateExpanded) {
-                            if (tags.isNotEmpty()) ReaderTagChips(tags, onTagFilter, Modifier.testTag("reader_tag_overview"))
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                if (tags.isNotEmpty()) ReaderTagChips(tags, onTagFilter, Modifier.weight(1f).testTag("reader_tag_overview"))
+                                else Text("标签与备注", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                IconButton(onClick = { curateExpanded = true }, modifier = Modifier.size(48.dp).testTag("reader_curation_toggle").semantics { stateDescription = "已折叠" }) {
+                                    Icon(CairnIcons.Chevron, contentDescription = "编辑标签与备注", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
                             if (enrichment?.why?.isNotBlank() == true) Text(enrichment.why, maxLines = 1,
                                 overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                             if ((state.v2Queued[id] ?: 0) > 0 || state.v2Conflicts.containsKey(id) || (state.personalTagQueued[id] ?: 0) > 0) Text("有待同步或冲突的标签修改，展开后处理。", style = MaterialTheme.typography.bodySmall)
                         } else {
+                            TextButton(onClick = { curateExpanded = false }, modifier = Modifier.testTag("reader_curation_toggle").semantics { stateDescription = "已展开" }) {
+                                Text("收起标签与备注", style = MaterialTheme.typography.labelMedium)
+                            }
                             editorState.SaveableStateProvider("$id:${state.accountGeneration}") {
                             MultidimensionalCurationSection(
                                 linkId = id, taxonomy = state.v2Taxonomy ?: state.taxonomy,
@@ -932,11 +940,11 @@ private fun DetailScreen(
                     if (readingText.isNotBlank()) {
                         item(key = "reading_controls") {
                             FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(if (showOriginal || enrichment.translatedText.isBlank()) "原文 ${enrichment.originalLanguage}" else "中文译文", style = MaterialTheme.typography.titleMedium)
+                                Text(if (showOriginal || enrichment.translatedText.isBlank()) "原文 ${enrichment.originalLanguage}" else "中文译文", modifier = Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 if (enrichment.originalText.isNotBlank() && enrichment.translatedText.isNotBlank()) TextButton(
                                     onClick = { showOriginal = !showOriginal }, modifier = Modifier.testTag("toggle_original"),
                                 ) { Text(if (showOriginal) "查看译文" else "查看原文") }
-                                TextButton(onClick = { onCopy(readingText) }) { Text("复制全文") }
+                                TextButton(onClick = { onCopy(readingText) }) { Text("复制全文", style = MaterialTheme.typography.labelMedium) }
                             }
                         }
                         items(paragraphs.size, key = { "paragraph_$it" }, contentType = { "paragraph" }) { index ->
@@ -972,14 +980,16 @@ private fun DetailScreen(
         if (link != null) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = { onToggleLearned(link) }, enabled = id !in state.busyIds,
-                    shape = MaterialTheme.shapes.small, modifier = Modifier.weight(1f).heightIn(min = 52.dp).testTag("toggle_${link.id}")) {
+                TextButton(onClick = { onToggleLearned(link) }, enabled = id !in state.busyIds,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                    shape = MaterialTheme.shapes.small, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("toggle_${link.id}")) {
                     if (id in state.busyIds) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     else Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp)); Text(if (link.learned) "改为未读" else "标为已读")
                 }
                 Button(onClick = { onOpenExternal(link.url) }, shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.weight(1f).heightIn(min = 52.dp).testTag("open_original")) {
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("open_original")) {
                     Text("打开原帖"); Spacer(Modifier.width(6.dp))
                     Icon(CairnIcons.External, contentDescription = null, modifier = Modifier.size(18.dp))
                 }
@@ -1309,7 +1319,7 @@ internal fun AppHeader(
             Text(
                 title,
                 style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.Medium,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -1341,12 +1351,12 @@ private fun DetailTopBar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", modifier = Modifier.size(20.dp))
         }
         Text(
             title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Normal,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1383,7 +1393,8 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit, enabled:
         trailingIcon = { if (value.isNotEmpty()) IconButton(onClick = { onValueChange("") }, modifier = Modifier.testTag("clear_search")) {
             Icon(Icons.Default.Close, contentDescription = "清除搜索")
         } },
-        enabled = enabled, singleLine = true, shape = MaterialTheme.shapes.medium,
+        enabled = enabled, singleLine = true, shape = MaterialTheme.shapes.small,
+        colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant),
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
         keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
         modifier = Modifier.fillMaxWidth().testTag("library_search"))
@@ -1405,12 +1416,15 @@ private fun FilterRow(
 
 @Composable
 private fun FilterTab(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(shape = MaterialTheme.shapes.small,
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+    Surface(
+        color = Color.Transparent,
         contentColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = modifier.selectable(selected = selected, enabled = enabled, role = Role.Tab, onClick = onClick)) {
-        Box(Modifier.heightIn(min = 48.dp).padding(horizontal = 12.dp, vertical = 12.dp), contentAlignment = Alignment.Center) {
-            Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+        val accent = MaterialTheme.colorScheme.primary
+        Box(Modifier.heightIn(min = 48.dp).drawBehind {
+            if (selected) drawLine(accent, Offset(size.width * 0.4f, size.height - 1.dp.toPx()), Offset(size.width * 0.6f, size.height - 1.dp.toPx()), 2.dp.toPx())
+        }.padding(horizontal = 12.dp, vertical = 12.dp), contentAlignment = Alignment.Center) {
+            Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
         }
     }
 }
@@ -1419,16 +1433,16 @@ private fun FilterTab(label: String, selected: Boolean, enabled: Boolean, onClic
 internal fun StatusText(status: String, tag: String = "status") {
     if (status.isBlank()) return
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Text(
             status,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             modifier = Modifier
-                .padding(horizontal = 14.dp, vertical = 12.dp)
+                .padding(horizontal = 12.dp, vertical = 10.dp)
                 .testTag(tag),
         )
     }
@@ -1453,7 +1467,7 @@ private fun ColumnScope.LinkList(
         modifier = Modifier
             .fillMaxWidth()
             .weight(1f, fill = true),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
         contentPadding = PaddingValues(bottom = 92.dp),
     ) {
         if (header != null) item(key = "list_header", contentType = "header") { header() }
@@ -1509,9 +1523,10 @@ private fun LinkRow(link: SavedLink, fifo: Boolean, taxonomy: com.alpenl.cairn.s
     val title = remember(link.url, link.enrichment?.aiTitle) { link.displayTitle() }
     val preview = link.searchExcerpt.takeIf { it.isNotBlank() } ?: link.enrichment?.summary?.takeIf { it.isNotBlank() }
         ?: link.note.ifBlank { link.enrichment?.why.orEmpty() }
-    Surface(onClick = onClick, shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface,
+    Surface(onClick = onClick, color = MaterialTheme.colorScheme.surface,
         modifier = Modifier.fillMaxWidth().testTag("link_${link.id}")) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column {
+        Column(Modifier.padding(vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StateDot(link.learned)
                 Text(link.hostLabel(), style = MaterialTheme.typography.labelMedium,
@@ -1519,7 +1534,7 @@ private fun LinkRow(link: SavedLink, fifo: Boolean, taxonomy: com.alpenl.cairn.s
                 Text((if (fifo) "收藏于 " else "") + link.createdAt.shortDateTime(), style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (preview.isNotBlank()) Text(preview, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1530,6 +1545,8 @@ private fun LinkRow(link: SavedLink, fifo: Boolean, taxonomy: com.alpenl.cairn.s
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("link_tags_${link.id}"))
             }
         }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        }
     }
 }
 
@@ -1538,7 +1555,7 @@ private fun LinkDetailContent(link: SavedLink) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
         Text("${link.hostLabel()} · ${link.createdAt.shortDateTime()}",
             style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(link.displayTitle(), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text(link.displayTitle(), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -1643,11 +1660,12 @@ private fun InfoBlock(text: String) {
 
 @Composable
 private fun InfoBlock(title: String?, text: String) {
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            title?.let { Text(it, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }
+    val lineColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).drawBehind {
+        drawLine(lineColor, Offset.Zero, Offset(0f, size.height), 2.dp.toPx())
+    }.padding(start = 14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            title?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
     }
 }
 
@@ -1667,30 +1685,22 @@ private fun ConsoleBlock(text: String) {
 
 @Composable
 private fun LoadingState(text: String) {
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.padding(18.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-            Text(text, style = MaterialTheme.typography.bodyMedium)
-        }
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(strokeWidth = 1.5.dp, modifier = Modifier.size(16.dp))
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
 private fun EmptyState(text: String) {
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.padding(horizontal = 28.dp, vertical = 38.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 38.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(56.dp)) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.outline)
-                }
-            }
-            Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(CairnIcons.Library, contentDescription = null, tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(24.dp))
+            Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-    }
 }
 
 @Composable
@@ -1709,7 +1719,7 @@ private fun StateDot(learned: Boolean) {
 @Composable
 private fun BadgedIcon(icon: ImageVector, contentDescription: String, badge: Int?) {
     Box {
-        Icon(icon, contentDescription = contentDescription)
+        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(20.dp))
         if (badge != null) {
             Surface(
                 shape = CircleShape,

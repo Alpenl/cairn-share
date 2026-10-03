@@ -2,6 +2,7 @@ package com.alpenl.cairn.share
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.os.SystemClock
 import android.view.KeyEvent
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -148,33 +149,45 @@ class AndroidUiRedesignInstrumentedTest {
     }
 
     private fun systemBack() {
-        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        instrumentation.uiAutomation.waitForIdle(250, 5_000)
         compose.waitForIdle()
     }
 
-    private fun screenshot(name: String) {
+    private fun screenshot(name: String, target: SemanticsNodeInteraction) {
         val arguments = InstrumentationRegistry.getArguments()
         if (arguments.getString("screenshots") != "true") return
         val prefix = arguments.getString("screenshotPrefix") ?: "ui"
         check(Regex("[A-Za-z0-9_-]{1,60}").matches(prefix))
+        target.assertIsDisplayed()
         compose.waitForIdle()
-        val bitmap = checkNotNull(InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot())
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        automation.waitForIdle(200, 5_000)
+        // Compose idle precedes SurfaceFlinger/IME animation completion on API 26.
+        SystemClock.sleep(800)
+        target.assertIsDisplayed()
+        val bitmap = checkNotNull(automation.takeScreenshot())
         try {
             val directory = File(checkNotNull(context.getExternalFilesDir(null)), "ui-proof").apply { mkdirs() }
-            File(directory, "$prefix-$name.png").outputStream().use { output ->
+            val destination = File(directory, "$prefix-$name.png")
+            val pending = File(directory, "$prefix-$name.partial")
+            pending.outputStream().use { output ->
                 check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
             }
+            check(pending.renameTo(destination))
+            println("UI_SCREENSHOT ${destination.name} captured_at_ms=${System.currentTimeMillis()}")
         } finally { bitmap.recycle() }
     }
 
     @Test fun navigationUsesRealScreensAndSourceActionRemainsVisibleWhileReading() {
         launch().use {
             waitTag("link_49")
-            screenshot("library")
+            screenshot("library", compose.onNodeWithTag("bookmark_filters"))
             compose.onNodeWithTag("bookmark_filters").performScrollTo().performClick()
             waitTag("filter_topics_image_creation")
             compose.onNodeWithTag("filter_topics_image_creation").performScrollTo().performClick()
-            screenshot("filters")
+            screenshot("filters", compose.onNodeWithTag("view_filter_results"))
             compose.onNodeWithTag("view_filter_results").assertIsDisplayed().performClick()
             waitTag("link_49")
             compose.onNodeWithTag("link_49").performScrollTo().performClick()
@@ -184,11 +197,11 @@ class AndroidUiRedesignInstrumentedTest {
             compose.onNodeWithTag("open_original").assertIsDisplayed().assertIsEnabled()
                 .assertHeightIsAtLeast(48.dp).assertWidthIsAtLeast(48.dp)
             compose.onNodeWithTag("reader_more").assertIsDisplayed().assertHeightIsAtLeast(48.dp).assertWidthIsAtLeast(48.dp)
-            screenshot("reader")
+            screenshot("reader", compose.onNodeWithTag("open_original"))
             repeat(3) { compose.onNodeWithTag("detail_content").performTouchInput { swipeUp() } }
             compose.onNodeWithTag("open_original").assertIsDisplayed().assertIsEnabled()
             compose.onNodeWithTag("reader_more").assertIsDisplayed()
-            screenshot("reader-scrolled")
+            screenshot("reader-scrolled", compose.onNodeWithTag("open_original"))
             compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("reader_tag_overview"))
             compose.onNodeWithTag("tag_filter_system/topics/portrait_photography", useUnmergedTree = true).performClick()
             waitTag("nav_library")
@@ -200,12 +213,12 @@ class AndroidUiRedesignInstrumentedTest {
             systemBack()
             waitTag("nav_settings")
             compose.onNodeWithTag("nav_settings").performClick()
-            screenshot("settings")
+            screenshot("settings", compose.onNodeWithTag("settings_token"))
             compose.onNodeWithTag("nav_library").performClick()
             waitTag("add_link")
             compose.onNodeWithTag("add_link").performClick()
             waitTag("manual_url")
-            screenshot("save-link")
+            screenshot("save-link", compose.onNodeWithTag("manual_url"))
             assertTrue("Read-only navigation must not write or invoke a source URL", writes.isEmpty())
         }
     }
@@ -217,6 +230,7 @@ class AndroidUiRedesignInstrumentedTest {
             compose.onNodeWithText("编辑链接").performClick()
             waitTag("edit_note")
             compose.onNodeWithTag("edit_note").performScrollTo().performTextReplacement("未提交的本地草稿")
+            screenshot("edit-keyboard", compose.onNodeWithTag("edit_note"))
             compose.onNodeWithContentDescription("返回").assertIsDisplayed().performClick()
             waitTag("discard_edit")
             compose.onNodeWithText("继续编辑").performClick()
@@ -225,7 +239,7 @@ class AndroidUiRedesignInstrumentedTest {
             // A first back may dismiss the IME; the next navigational back must still protect the draft.
             if (compose.onAllNodesWithTag("discard_edit").fetchSemanticsNodes().isEmpty()) systemBack()
             waitTag("discard_edit")
-            screenshot("edit-discard")
+            screenshot("edit-discard", compose.onNodeWithTag("discard_edit"))
             compose.onNodeWithTag("discard_edit").performClick()
             waitTag("reader_more"); compose.onNodeWithTag("reader_more").performClick()
             compose.onNodeWithText("编辑链接").performClick()
@@ -235,7 +249,7 @@ class AndroidUiRedesignInstrumentedTest {
             waitTag("reader_more"); compose.onNodeWithTag("reader_more").performClick()
             compose.onNodeWithText("删除收藏").performClick()
             waitTag("confirm_delete")
-            screenshot("delete-confirmation")
+            screenshot("delete-confirmation", compose.onNodeWithTag("confirm_delete"))
             assertTrue("Opening delete confirmation must not delete", writes.isEmpty())
             compose.onNodeWithText("取消").performClick()
             compose.onNodeWithTag("open_original").assertIsDisplayed()
