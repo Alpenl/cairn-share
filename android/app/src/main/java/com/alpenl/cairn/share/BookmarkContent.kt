@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -20,6 +21,9 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -293,7 +297,8 @@ private val entityFilterLabels = linkedMapOf("not_run" to "未运行", "failed" 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTaxonomy?, onChange: (BookmarkFilters) -> Unit,
-    baseUrl: String = "", apiToken: String = "", query: String = "", learned: String = "all") {
+    baseUrl: String = "", apiToken: String = "", query: String = "", learned: String = "all",
+    leadingContent: (@Composable RowScope.() -> Unit)? = null) {
     val account = accountKeyFor(baseUrl, apiToken)
     var expanded by rememberSaveable(account) { mutableStateOf(false) }
     var advanced by rememberSaveable(account) { mutableStateOf(false) }
@@ -309,20 +314,42 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
     }
     val labels = bookmarkFilterLabels(filters, taxonomy, customCatalog)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = { expanded = true }, shape = RoundedCornerShape(6.dp),
-            contentPadding = PaddingValues(horizontal = 2.dp),
-            colors = ButtonDefaults.textButtonColors(contentColor = if (labels.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary),
-            modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("bookmark_filters")
-            .semantics { contentDescription = if (labels.isEmpty()) "筛选收藏" else "筛选收藏，已选：${labels.joinToString("，")}" }) {
-            Icon(CairnIcons.Filter, contentDescription = null, modifier = Modifier.size(17.dp))
-            Text(if (labels.isEmpty()) "筛选" else labels.take(2).joinToString(" · ") + if (labels.size > 2) " +${labels.size - 2}" else "",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.weight(1f).padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Icon(CairnIcons.Down, contentDescription = null, modifier = Modifier.size(14.dp))
+        leadingContent?.invoke(this)
+        if (leadingContent != null) {
+            IconButton(onClick = { expanded = true }, modifier = Modifier.size(48.dp).testTag("bookmark_filters")
+                .semantics { contentDescription = if (labels.isEmpty()) "筛选收藏" else "筛选收藏，已选：${labels.joinToString("，")}" }) {
+                BadgedBox(badge = { if (labels.isNotEmpty()) Badge(containerColor = MaterialTheme.colorScheme.primary) }) {
+                    Icon(CairnIcons.Filter, contentDescription = null, modifier = Modifier.size(20.dp),
+                        tint = if (labels.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary)
+                }
+            }
+        } else {
+            TextButton(onClick = { expanded = true }, shape = RoundedCornerShape(6.dp),
+                contentPadding = PaddingValues(horizontal = 2.dp),
+                colors = ButtonDefaults.textButtonColors(contentColor = if (labels.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary),
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("bookmark_filters")
+                .semantics { contentDescription = if (labels.isEmpty()) "筛选收藏" else "筛选收藏，已选：${labels.joinToString("，")}" }) {
+                Icon(CairnIcons.Filter, contentDescription = null, modifier = Modifier.size(17.dp))
+                Text(if (labels.isEmpty()) "筛选" else labels.take(2).joinToString(" · ") + if (labels.size > 2) " +${labels.size - 2}" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f).padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Icon(CairnIcons.Down, contentDescription = null, modifier = Modifier.size(14.dp))
+            }
+            if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) },
+                modifier = Modifier.heightIn(min = 48.dp).testTag("clear_bookmark_filters")) {
+                Text("清除筛选", style = MaterialTheme.typography.labelMedium)
+            }
         }
-        if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) },
-            modifier = Modifier.heightIn(min = 48.dp).testTag("clear_bookmark_filters")) {
-            Text("清除筛选", style = MaterialTheme.typography.labelMedium)
+    }
+    if (leadingContent != null && labels.isNotEmpty()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(labels.joinToString(" · "), style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).testTag("active_filter_summary"))
+            TextButton(onClick = { onChange(BookmarkFilters()) },
+                modifier = Modifier.heightIn(min = 48.dp).testTag("clear_bookmark_filters")) {
+                Text("清除", style = MaterialTheme.typography.labelMedium)
+            }
         }
     }
     if (expanded) ModalBottomSheet(onDismissRequest = { expanded = false },

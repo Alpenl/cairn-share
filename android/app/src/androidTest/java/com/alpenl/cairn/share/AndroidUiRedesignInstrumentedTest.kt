@@ -183,6 +183,14 @@ class AndroidUiRedesignInstrumentedTest {
     @Test fun navigationUsesRealScreensAndSourceActionRemainsVisibleWhileReading() {
         launch().use {
             waitTag("link_49")
+            if (context.resources.configuration.fontScale <= 1.05f) {
+                compose.onNodeWithTag("library_header").assertHeightIsAtMost(112.dp)
+            }
+            compose.onNodeWithTag("open_search").assertIsDisplayed().assertHeightIsAtLeast(48.dp)
+            compose.onNodeWithTag("bookmark_filters").assertIsDisplayed().assertHeightIsAtLeast(48.dp)
+            val tabs = compose.onNodeWithTag("filter_all").fetchSemanticsNode().boundsInRoot
+            val filter = compose.onNodeWithTag("bookmark_filters").fetchSemanticsNode().boundsInRoot
+            assertTrue("Reading state and filters share one row", kotlin.math.abs(tabs.center.y - filter.center.y) < 2f)
             screenshot("library", compose.onNodeWithTag("bookmark_filters"))
             compose.onNodeWithTag("bookmark_filters").performScrollTo().performClick()
             waitTag("filter_topics_image_creation")
