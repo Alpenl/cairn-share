@@ -1,17 +1,22 @@
 package com.alpenl.cairn.share
 
 import android.content.Context
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -25,8 +30,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.alpenl.cairn.share.network.BookmarkFilters
 import com.alpenl.cairn.share.network.TaxonomyTerm
@@ -76,11 +83,32 @@ internal fun BookmarkFilters.withTag(tag: ReaderTag): BookmarkFilters {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun ReaderTagChips(tags: List<ReaderTag>, onFilter: (ReaderTag) -> Unit, modifier: Modifier = Modifier) {
-    FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        for (tag in tags.take(5)) AssistChip(onClick = { onFilter(tag) }, label = { Text(tag.label, style = MaterialTheme.typography.labelSmall) },
-            modifier = Modifier.testTag("tag_filter_${tag.ref}"))
-        if (tags.size > 5) Text("+${tags.size - 5}", style = MaterialTheme.typography.labelSmall)
+internal fun ReaderTagChips(tags: List<ReaderTag>, onFilter: (ReaderTag) -> Unit, modifier: Modifier = Modifier, compact: Boolean = false) {
+    var expanded by remember(tags) { mutableStateOf(false) }
+    FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (tag in if (expanded) tags else tags.take(5)) ReaderTagPill(
+            label = tag.label, description = "按“${tag.label}”筛选收藏", compact = compact,
+            modifier = Modifier.testTag("tag_filter_${tag.ref}"), onClick = { onFilter(tag) },
+        )
+        if (tags.size > 5) ReaderTagPill(
+            label = if (expanded) "收起" else "+${tags.size - 5}",
+            description = if (expanded) "收起更多标签" else "展开其余 ${tags.size - 5} 个标签", compact = compact,
+            onClick = { expanded = !expanded },
+        )
+    }
+}
+
+@Composable
+private fun ReaderTagPill(label: String, description: String, compact: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    // The visual pill stays quiet; its entire 48 dp cell remains touchable.
+    Box(modifier.heightIn(min = 48.dp).widthIn(min = 48.dp)
+        .clickable(role = Role.Button, onClickLabel = description, onClick = onClick)
+        .semantics(mergeDescendants = true) { contentDescription = description }, contentAlignment = Alignment.Center) {
+        Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant) {
+            Text(label, style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = if (compact) 8.dp else 10.dp, vertical = 5.dp))
+        }
     }
 }
 
@@ -94,6 +122,7 @@ internal fun TopicNavigation(filters: BookmarkFilters, terms: List<TaxonomyTerm>
     var pinned by remember(account) { mutableStateOf(preferences.getStringSet("pins:$account", emptySet()).orEmpty().toSet()) }
     var search by rememberSaveable(account) { mutableStateOf("") }
     var all by rememberSaveable(account) { mutableStateOf(false) }
+    var managingPins by rememberSaveable(account) { mutableStateOf(false) }
     var counts by remember(account, filters, query, learned) { mutableStateOf(emptyMap<String, Int>()) }
     var countsError by remember(account, filters, query, learned) { mutableStateOf(false) }
     val cache = remember(account) { linkedMapOf<String, Pair<Long, Map<String, Int>>>() }
@@ -124,26 +153,38 @@ internal fun TopicNavigation(filters: BookmarkFilters, terms: List<TaxonomyTerm>
         }
     }
     Column(Modifier.fillMaxWidth().testTag("topic_navigation")) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("主题", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            TextButton(onClick = { managingPins = !managingPins }, modifier = Modifier.testTag("manage_topic_pins")
+                .semantics { stateDescription = if (managingPins) "正在管理常用主题" else "管理已关闭" }) {
+                Text(if (managingPins) "完成管理" else "管理常用")
+            }
+        }
+        if (managingPins) Text("点选要固定的主题。常用主题只改变入口，不改变筛选条件。", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         OutlinedTextField(search, { search = it }, label = { Text("查找全部主题") }, singleLine = true,
+            shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth().testTag("topic_search"))
-        val sections = topicSections(terms, current, pinned, counts, search, all)
+        val sections = topicSections(terms, current, pinned, counts, search, all || managingPins)
         for (section in sections) {
             Text(section.label, style = MaterialTheme.typography.labelMedium)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (term in section.terms) {
                     val refine = term.id in refinements || current.isNotEmpty() && term.granularity == "specific" && term.id !in selected
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (managingPins) {
+                        FilterChip(selected = term.id in pinned, onClick = {
+                            pinned = if (term.id in pinned) pinned - term.id else pinned + term.id
+                            preferences.edit().putStringSet("pins:$account", pinned).apply()
+                        }, enabled = term.active && !term.deprecated || term.id in pinned,
+                            label = { Text(term.label) }, modifier = Modifier.testTag("pin_topic_${term.id}").semantics {
+                                contentDescription = (if (term.id in pinned) "取消固定" else "固定") + term.label
+                            })
+                    } else {
                         FilterChip(selected = term.id in current, onClick = {
                             if (refine) onChange(filters.copy(topicRefinements = if (term.id in refinements) filters.topicRefinements - term.id else filters.topicRefinements + term.id))
                             else onChange(filters.copy(topic = "", topics = if (term.id in selected) selected.toList() - term.id else selected.toList() + term.id))
-                        }, label = { Text(term.label + (counts[term.id]?.let { " $it" } ?: "")) },
+                        }, label = { Text(term.label + (if (!term.active || term.deprecated) "（已停用）" else "") + (counts[term.id]?.let { " $it" } ?: "")) },
                             modifier = Modifier.testTag("filter_${if (refine) "topic_refinements" else "topics"}_${term.id}"))
-                        TextButton(onClick = {
-                            pinned = if (term.id in pinned) pinned - term.id else pinned + term.id
-                            preferences.edit().putStringSet("pins:$account", pinned).apply()
-                        }, modifier = Modifier.size(36.dp).testTag("pin_topic_${term.id}").semantics {
-                            contentDescription = (if (term.id in pinned) "取消固定" else "固定") + term.label
-                        }) { Text(if (term.id in pinned) "★" else "☆") }
                     }
                 }
             }
@@ -154,6 +195,6 @@ internal fun TopicNavigation(filters: BookmarkFilters, terms: List<TaxonomyTerm>
         }, label = { Text("$id（词表不可用）") })
         if (sections.all { it.terms.isEmpty() }) Text("没有匹配的主题", style = MaterialTheme.typography.bodySmall)
         if (countsError) Text("具体主题暂时无法读取，仍可查找全部主题。", style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = { all = !all }) { Text(if (all) "收起全部主题" else "浏览全部主题") }
+        if (!managingPins) TextButton(onClick = { all = !all }) { Text(if (all) "收起全部主题" else "浏览全部主题") }
     }
 }

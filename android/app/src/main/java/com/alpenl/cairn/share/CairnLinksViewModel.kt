@@ -1164,12 +1164,12 @@ internal class CairnLinksViewModel(
                 is LinkMutationResult.Updated -> {
                     val message = if (undoLearned != null) {
                         nextMessage(
-                            text = if (learned) "已标记为已学习。" else "已改回待学习。",
+                            text = if (learned) "已标记为已读。" else "已改回未读。",
                             actionLabel = "撤销",
                             undo = UndoLearned(linkId, undoLearned),
                         )
                     } else {
-                        nextMessage(if (learned) "已标记为已学习。" else "已改回待学习。")
+                        nextMessage(if (learned) "已标记为已读。" else "已改回未读。")
                     }
                     uiState = uiState.copy(
                         links = uiState.links.upsert(result.link),
@@ -1183,7 +1183,7 @@ internal class CairnLinksViewModel(
                 is LinkMutationResult.Failed -> {
                     uiState = uiState.copy(
                         busyIds = uiState.busyIds - linkId,
-                        message = nextMessage(failureText(result.kind, "学习状态保存失败。")),
+                        message = nextMessage(failureText(result.kind, "阅读状态保存失败。")),
                     )
                 }
             }

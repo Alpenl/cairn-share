@@ -4,6 +4,8 @@ import android.content.Intent
 import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityManager
+import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -77,7 +79,7 @@ class ShareActivity : ComponentActivity() {
                     onSelectCandidate = ::selectCandidate,
                     onNoteChange = ::changeNote,
                     onSave = ::submitSelected,
-                    onCancel = ::finish,
+                    onCancel = { if (!submitting || accepted) finish() },
                 )
             }
         }
@@ -244,7 +246,11 @@ class ShareActivity : ComponentActivity() {
 
     private suspend fun closeAfterAccepted(generation: Int) {
         if (!preferences.closeAfterSave) return
-        delay(300)
+        val accessibility = getSystemService(AccessibilityManager::class.java)
+        val timeout = if (Build.VERSION.SDK_INT >= 29) {
+            accessibility.getRecommendedTimeoutMillis(1200, AccessibilityManager.FLAG_CONTENT_TEXT)
+        } else if (accessibility.isTouchExplorationEnabled) 4000 else 1200
+        delay(timeout.toLong())
         if (generation == submitGeneration) finish()
     }
 
@@ -256,7 +262,8 @@ class ShareActivity : ComponentActivity() {
         }
 
     private fun makeWindowTranslucent() {
-        setFinishOnTouchOutside(true)
+        // The sheet owns dismissal and protects a save still being persisted.
+        setFinishOnTouchOutside(false)
         window.setBackgroundDrawable(ColorDrawable(Color.Transparent.toArgb()))
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         window.attributes = window.attributes.apply { dimAmount = 0.38f }
