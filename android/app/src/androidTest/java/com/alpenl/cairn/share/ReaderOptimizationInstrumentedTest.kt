@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -79,7 +80,8 @@ class ReaderOptimizationInstrumentedTest {
                 waitTag("personal_tag_name")
                 scroll("personal_tag_name"); compose.onNodeWithTag("personal_tag_name").performTextInput("保留未提交名称")
                 scroll("reader_curation_toggle"); compose.onNodeWithTag("reader_curation_toggle").performSemanticsAction(SemanticsActions.OnClick) { it() }
-                compose.onNodeWithTag("reader_curation_toggle").assertTextContains("标签与备注")
+                compose.onNodeWithTag("reader_curation_toggle").assertContentDescriptionEquals("编辑标签与备注")
+                    .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "已折叠"))
                 compose.onNodeWithTag("reader_curation_toggle").performSemanticsAction(SemanticsActions.OnClick) { it() }
                 compose.onNodeWithTag("reader_curation_toggle").assertTextContains("收起标签与备注")
                 scroll("personal_tag_name"); compose.onNodeWithTag("personal_tag_name").assertTextContains("保留未提交名称")
