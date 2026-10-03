@@ -18,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
@@ -68,6 +69,13 @@ class CurationWorkerRecoveryTest {
 
     private suspend fun waitFor(predicate: suspend () -> Boolean) = withTimeout(20_000) {
         while (!predicate()) delay(30)
+    }
+
+    private suspend fun awaitStartupOfflineAttempt(model: CairnLinksViewModel) {
+        // A restored draft can load before startup's automatic queue attempt finishes.
+        // v2Busy describes edits, so an empty set is not a queue-idle signal.
+        waitFor { withContext(Dispatchers.Main) { model.uiState.message?.text?.contains("网络不可用") == true } }
+        withContext(Dispatchers.Main) { store.syncMutex.withLock { } }
     }
 
     @Test fun readEntityProvenanceAndHumanOverridesFromRealWorker() = runBlocking<Unit> {
@@ -393,6 +401,7 @@ class CurationWorkerRecoveryTest {
         withContext(Dispatchers.Main) { model.loadV2Selection(id) }
         waitFor { withContext(Dispatchers.Main) { model.uiState.v2Drafts[id]?.topics == listOf("llm") && model.uiState.v2Busy.isEmpty() } }
         assertEquals(1L, remote(id).getLong("revision"))
+        awaitStartupOfflineAttempt(model)
         control("online")
         withContext(Dispatchers.Main) { model.flushV2Queue() }
         waitFor { store.snapshot().isEmpty() && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() } }
@@ -501,6 +510,7 @@ class CurationWorkerRecoveryTest {
         withContext(Dispatchers.Main) { model.loadV2Selection(id) }
         waitFor { withContext(Dispatchers.Main) { model.uiState.v2Drafts[id]?.topics == listOf("llm") && model.uiState.v2Busy.isEmpty() } }
         assertEquals(2L, remote(id).getLong("revision"))
+        awaitStartupOfflineAttempt(model)
         control("online")
         withContext(Dispatchers.Main) { model.flushV2Queue() }
         waitFor { store.snapshot().isEmpty() }
