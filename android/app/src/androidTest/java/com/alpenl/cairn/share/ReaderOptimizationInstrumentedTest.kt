@@ -89,9 +89,9 @@ class ReaderOptimizationInstrumentedTest {
                 scroll("edit_curation")
                 compose.onNodeWithTag("edit_curation").assertIsEnabled()
                     .performSemanticsAction(SemanticsActions.OnClick) { it() }
-                waitTag("curation_why"); scroll("curation_why")
-                compose.onNodeWithTag("curation_why").assertIsDisplayed().performTextReplacement("已编辑的收藏原因")
-                scroll("save_curation"); compose.onNodeWithTag("save_curation").assertIsDisplayed().performClick()
+                waitTag("curation_why")
+                compose.onNodeWithTag("curation_why").performScrollTo().assertIsDisplayed().performTextReplacement("已编辑的收藏原因")
+                compose.onNodeWithTag("save_curation").assertIsDisplayed().performClick()
                 compose.waitUntil(10_000) { changed.get() == 1 }
                 scroll("reader_curation_toggle"); compose.onNodeWithTag("reader_curation_toggle").assertTextContains("收起标签与备注")
                 compose.onNodeWithContentDescription("返回").performClick()
