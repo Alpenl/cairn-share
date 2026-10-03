@@ -95,8 +95,15 @@ class ReaderOptimizationInstrumentedTest {
                 compose.waitUntil(10_000) { changed.get() == 1 }
                 scroll("reader_curation_toggle"); compose.onNodeWithTag("reader_curation_toggle").assertTextContains("收起标签与备注")
                 compose.onNodeWithContentDescription("返回").performClick()
-                waitTag("link_27"); compose.onNodeWithTag("link_27").performScrollTo().assertIsDisplayed().performClick()
-                waitTag("reader_tag_overview"); compose.onNodeWithTag("v2_section").assertDoesNotExist()
+                // Lazy rows outside the large-text viewport are not composed yet.
+                compose.onNode(SemanticsMatcher.keyIsDefined(SemanticsActions.ScrollToIndex))
+                    .performScrollToNode(hasTestTag("link_27"))
+                // A large row's center can land on its independently clickable tags.
+                compose.onNodeWithText("本地阅读测试 27", useUnmergedTree = true)
+                    .performScrollTo().assertIsDisplayed().performClick()
+                waitTag("detail_content"); scroll("reader_tag_overview")
+                compose.onNodeWithTag("reader_tag_overview").assertIsDisplayed()
+                compose.onNodeWithTag("v2_section").assertDoesNotExist()
             }
         } finally { runBlocking { OfflineReadStore(context).clear(account); PersonalTagOutbox(context).discard(account, 28) }; server.shutdown() }
     }
