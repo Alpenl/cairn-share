@@ -8,24 +8,34 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +48,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.alpenl.cairn.share.network.BookmarkClassification
 import com.alpenl.cairn.share.network.BookmarkFilters
@@ -254,109 +268,156 @@ internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String) 
     }
 }
 
-private fun filterPanelLabel(filters: BookmarkFilters): String {
-    if (filters == BookmarkFilters()) return "筛选"
-    val parts = mutableListOf<String>()
-    CurationStatus.entries.firstOrNull { it.apiValue == filters.curationStatus }?.let { parts += it.label }
-    when (filters.source) {
-        "x" -> parts += "X"
-        "wechat" -> parts += "公众号"
-        "other" -> parts += "其他来源"
+internal fun bookmarkFilterLabels(filters: BookmarkFilters, taxonomy: BookmarkTaxonomy?, customTags: List<PersonalTagDefinition> = emptyList()): List<String> {
+    fun label(id: String, terms: List<TaxonomyTerm>?) = terms.orEmpty().firstOrNull { it.id == id }?.label ?: id
+    return buildList {
+        if (filters.curationStatus.isNotBlank()) add(CurationStatus.entries.firstOrNull { it.apiValue == filters.curationStatus }?.label ?: filters.curationStatus)
+        for (id in (filters.topics + listOf(filters.topic).filter { it.isNotBlank() }).distinct()) add(label(id, taxonomy?.topics))
+        for (id in filters.topicRefinements) add("进一步：${label(id, taxonomy?.topics)}")
+        for (id in filters.resourceKinds) add(label(id, taxonomy?.resourceKinds))
+        for (id in filters.customTags) add(customTags.firstOrNull { it.id == id }?.label ?: "自定义：$id")
+        for (id in filters.contentFunctions) add(label(id, taxonomy?.contentFunctions))
+        for (id in filters.carriers) add(label(id, taxonomy?.carriers))
+        for (id in filters.affordances) add(label(id, taxonomy?.affordances))
+        if (filters.form.isNotBlank()) add(label(filters.form, taxonomy?.forms))
+        if (filters.use.isNotBlank()) add(label(filters.use, taxonomy?.uses))
+        if (filters.source.isNotBlank()) add(mapOf("x" to "X", "wechat" to "公众号", "other" to "其他来源")[filters.source] ?: filters.source)
+        if (filters.uncertain) add("分类待确认")
+        if (filters.recentDays > 0) add("近 ${filters.recentDays} 天")
+        for (id in filters.entityState.split(',').filter { it.isNotBlank() }) add(entityFilterLabels[id] ?: id)
     }
-    if (filters.uncertain) parts += "待确认"
-    if (filters.recentDays > 0) parts += "近 ${filters.recentDays} 天"
-    if (filters.topic.isNotBlank() || filters.topics.isNotEmpty()) parts += "主题"
-    if (filters.topicRefinements.isNotEmpty()) parts += "进一步筛选"
-    if (filters.resourceKinds.isNotEmpty()) parts += "资源类型"
-    if (filters.customTags.isNotEmpty()) parts += "自定义标记"
-    if (filters.contentFunctions.isNotEmpty()) parts += "内容功能"
-    if (filters.carriers.isNotEmpty()) parts += "载体"
-    if (filters.affordances.isNotEmpty()) parts += "潜在用途"
-    if (filters.entityState.isNotEmpty()) parts += "实体状态"
-    if (filters.form.isNotBlank()) parts += "形态"
-    if (filters.use.isNotBlank()) parts += "用途"
-    return "筛选 · " + parts.joinToString(" · ")
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+private val entityFilterLabels = linkedMapOf("not_run" to "未运行", "failed" to "失败", "completed_empty" to "完成，无实体", "completed_nonempty" to "完成，有实体", "stale" to "来源已变化")
+
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTaxonomy?, onChange: (BookmarkFilters) -> Unit,
     baseUrl: String = "", apiToken: String = "", query: String = "", learned: String = "all") {
-    // 已激活筛选时保持展开，让用户随时看到当前筛选条件；默认收起，
-    // 避免一堆标签把真正的链接列表挤到首屏之外。
-    var expanded by rememberSaveable { mutableStateOf(filters != BookmarkFilters()) }
     val account = accountKeyFor(baseUrl, apiToken)
+    var expanded by rememberSaveable(account) { mutableStateOf(false) }
+    var advanced by rememberSaveable(account) { mutableStateOf(false) }
     var customCatalog by remember(account) { mutableStateOf(emptyList<PersonalTagDefinition>()) }
     var catalogError by remember(account) { mutableStateOf(false) }
-    var advanced by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(expanded, account, taxonomy?.resourceKinds?.isNotEmpty()) {
+    var catalogRetry by remember(account) { mutableStateOf(0) }
+    LaunchedEffect(expanded, account, taxonomy?.resourceKinds?.isNotEmpty(), catalogRetry) {
         if (expanded && baseUrl.isNotBlank() && apiToken.isNotBlank() && taxonomy?.resourceKinds?.isNotEmpty() == true) {
             val result = cancellableRead { V2CurationClient(baseUrl).tagRequest("/api/custom-tags", "GET", apiToken, cancellation = it) }
             if (result is V2Result.Loaded) { customCatalog = parsePersonalTags(result.value.optJSONArray("tags")); catalogError = false }
             else catalogError = true
         }
     }
-    Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { expanded = !expanded }, modifier = Modifier.testTag("bookmark_filters")) {
-                Text(if (expanded) "收起筛选" else filterPanelLabel(filters))
-            }
-            if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) }) { Text("清除筛选") }
+    val labels = bookmarkFilterLabels(filters, taxonomy, customCatalog)
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = { expanded = true }, shape = RoundedCornerShape(6.dp),
+            contentPadding = PaddingValues(horizontal = 2.dp),
+            colors = ButtonDefaults.textButtonColors(contentColor = if (labels.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary),
+            modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("bookmark_filters")
+            .semantics { contentDescription = if (labels.isEmpty()) "筛选收藏" else "筛选收藏，已选：${labels.joinToString("，")}" }) {
+            Icon(CairnIcons.Filter, contentDescription = null, modifier = Modifier.size(17.dp))
+            Text(if (labels.isEmpty()) "筛选" else labels.take(2).joinToString(" · ") + if (labels.size > 2) " +${labels.size - 2}" else "",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f).padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Icon(CairnIcons.Down, contentDescription = null, modifier = Modifier.size(14.dp))
         }
-        if (expanded) Column(Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-            Text("不同组需同时满足；每组可选择匹配任一或全部。", style = MaterialTheme.typography.bodySmall)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (status in CurationStatus.entries) FilterChip(
-                    selected = filters.curationStatus == status.apiValue,
-                    onClick = { onChange(filters.copy(curationStatus = if (filters.curationStatus == status.apiValue) "" else status.apiValue)) },
-                    label = { Text(status.label) }, modifier = Modifier.testTag("filter_curation_${status.apiValue}"),
-                )
+        if (filters != BookmarkFilters()) TextButton(onClick = { onChange(BookmarkFilters()) },
+            modifier = Modifier.heightIn(min = 48.dp).testTag("clear_bookmark_filters")) {
+            Text("清除筛选", style = MaterialTheme.typography.labelMedium)
+        }
+    }
+    if (expanded) ModalBottomSheet(onDismissRequest = { expanded = false },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp,
+        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)) {
+        Column(Modifier.fillMaxWidth().fillMaxHeight(0.9f).testTag("bookmark_filter_sheet")) {
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("筛选收藏", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                TextButton(onClick = { onChange(BookmarkFilters()) }, enabled = filters != BookmarkFilters(),
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("reset_filter_sheet")) {
+                    Text("重置", style = MaterialTheme.typography.labelMedium)
+                }
             }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                for ((value, label) in listOf("x" to "X", "wechat" to "公众号", "other" to "其他来源")) FilterChip(
-                    selected = filters.source == value, onClick = { onChange(filters.copy(source = if (filters.source == value) "" else value)) }, label = { Text(label) },
-                )
-                FilterChip(selected = filters.uncertain, onClick = { onChange(filters.copy(uncertain = !filters.uncertain)) }, label = { Text("分类待确认") })
-                for (days in listOf(7, 30)) FilterChip(selected = filters.recentDays == days, onClick = { onChange(filters.copy(recentDays = if (filters.recentDays == days) 0 else days)) }, label = { Text("近 $days 天") })
-            }
-            if (taxonomy != null) {
-                TopicNavigation(filters, taxonomy.topics, baseUrl, apiToken, query, learned, onChange)
-                if (taxonomy.resourceKinds.isNotEmpty()) {
-                    TagFilterMode(filters.topicsMode) { onChange(filters.copy(topicsMode = it)) }
-                    FilterDimension("资源类型", "resource_kinds", filters.resourceKinds, taxonomy.resourceKinds) { onChange(filters.copy(resourceKinds = it)) }
-                    TagFilterMode(filters.resourceMode) { onChange(filters.copy(resourceMode = it)) }
+            Text("点选即生效 · 分组间同时满足", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 8.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Column(Modifier.padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                TopicNavigation(filters, taxonomy?.topics.orEmpty(), baseUrl, apiToken, query, learned, onChange)
+                if (taxonomy == null) Text("标签词表暂未加载；已选条件保留，也可清除后重试。", style = MaterialTheme.typography.bodySmall)
+                if (!taxonomy?.resourceKinds.isNullOrEmpty() || filters.resourceKinds.isNotEmpty()) {
+                    if ((filters.topics + filters.topic).filter { it.isNotBlank() }.distinct().size >= 2) {
+                        TagFilterMode("主题匹配", filters.topicsMode) { onChange(filters.copy(topicsMode = it)) }
+                    }
+                    FilterDimension("资源类型", "resource_kinds", filters.resourceKinds, taxonomy?.resourceKinds.orEmpty()) { onChange(filters.copy(resourceKinds = it)) }
+                    if (filters.resourceKinds.filter { it.isNotBlank() }.distinct().size >= 2) {
+                        TagFilterMode("资源类型匹配", filters.resourceMode) { onChange(filters.copy(resourceMode = it)) }
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.padding(top = 8.dp))
+                TextButton(onClick = { advanced = !advanced }, contentPadding = PaddingValues(horizontal = 0.dp),
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("advanced_bookmark_filters")
+                    .semantics { stateDescription = if (advanced) "已展开" else "已折叠" }) {
+                    Text(if (advanced) "收起更多条件" else "更多筛选条件", style = MaterialTheme.typography.labelMedium)
+                    Icon(if (advanced) CairnIcons.Down else CairnIcons.Chevron, contentDescription = null,
+                        modifier = Modifier.padding(start = 6.dp).size(14.dp))
+                }
+                if (advanced) {
+                    Text("整理状态", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for (status in CurationStatus.entries) QuietFilterTag(label = status.label,
+                            selected = filters.curationStatus == status.apiValue,
+                            onClick = { onChange(filters.copy(curationStatus = if (filters.curationStatus == status.apiValue) "" else status.apiValue)) },
+                            modifier = Modifier.testTag("filter_curation_${status.apiValue}"),
+                        )
+                    }
+                    Text("来源与时间", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for ((value, label) in listOf("x" to "X", "wechat" to "公众号", "other" to "其他来源")) QuietFilterTag(label = label,
+                            selected = filters.source == value, onClick = { onChange(filters.copy(source = if (filters.source == value) "" else value)) },
+                        )
+                        QuietFilterTag(label = "分类待确认", selected = filters.uncertain, onClick = { onChange(filters.copy(uncertain = !filters.uncertain)) })
+                        for (days in listOf(7, 30)) QuietFilterTag(label = "近 $days 天", selected = filters.recentDays == days, onClick = { onChange(filters.copy(recentDays = if (filters.recentDays == days) 0 else days)) })
+                    }
                     if (customCatalog.isNotEmpty() || filters.customTags.isNotEmpty()) {
                         FilterDimension("自定义标记", "custom_tags", filters.customTags, customCatalog.map { TaxonomyTerm(it.id, it.label, it.active) }) { onChange(filters.copy(customTags = it)) }
-                        TagFilterMode(filters.customMode) { onChange(filters.copy(customMode = it)) }
+                        if (filters.customTags.filter { it.isNotBlank() }.distinct().size >= 2) {
+                            TagFilterMode("自定义标记匹配", filters.customMode) { onChange(filters.copy(customMode = it)) }
+                        }
                     }
-                    if (catalogError) Text("自定义标记暂时无法读取；已选条件保留。", style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "收起其他条件" else "其他条件") }
-                }
-                if (taxonomy.multiDimensional) {
-                    FilterDimension("内容功能", "content_functions", filters.contentFunctions, taxonomy.contentFunctions) { onChange(filters.copy(contentFunctions = it)) }
-                    if (taxonomy.resourceKinds.isNotEmpty()) TagFilterMode(filters.functionsMode) { onChange(filters.copy(functionsMode = it)) }
-                }
-                if (taxonomy.resourceKinds.isEmpty() || advanced) {
-                if (taxonomy.multiDimensional) {
-                    FilterDimension("载体（任一）", "carriers", filters.carriers, taxonomy.carriers) { onChange(filters.copy(carriers = it)) }
-                    FilterDimension("潜在用途", "affordances", filters.affordances, taxonomy.affordances) { onChange(filters.copy(affordances = it)) }
-                } else Text("多维词表暂不可用；已选条件仍保留。", style = MaterialTheme.typography.bodySmall)
-                FlowRow {
-                    TermSelector("形态", filters.form, taxonomy.forms) { onChange(filters.copy(form = it)) }
-                    TermSelector("用途", filters.use, taxonomy.uses) { onChange(filters.copy(use = it)) }
-                }
+                    if (catalogError) {
+                        Text("自定义标记暂时无法读取，已选条件保留。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = { catalogRetry++ }) { Text("重试读取自定义标记") }
+                    }
+                    if (taxonomy?.multiDimensional == true || filters.contentFunctions.isNotEmpty()) {
+                        FilterDimension("内容功能", "content_functions", filters.contentFunctions, taxonomy?.contentFunctions.orEmpty()) { onChange(filters.copy(contentFunctions = it)) }
+                        if (!taxonomy?.resourceKinds.isNullOrEmpty() && filters.contentFunctions.filter { it.isNotBlank() }.distinct().size >= 2) {
+                            TagFilterMode("内容功能匹配", filters.functionsMode) { onChange(filters.copy(functionsMode = it)) }
+                        }
+                    }
+                    if (taxonomy?.multiDimensional == true || filters.carriers.isNotEmpty() || filters.affordances.isNotEmpty()) {
+                        FilterDimension("载体（任一）", "carriers", filters.carriers, taxonomy?.carriers.orEmpty()) { onChange(filters.copy(carriers = it)) }
+                        FilterDimension("潜在用途", "affordances", filters.affordances, taxonomy?.affordances.orEmpty()) { onChange(filters.copy(affordances = it)) }
+                    }
+                    FlowRow {
+                        TermSelector("形态", filters.form, taxonomy?.forms.orEmpty()) { onChange(filters.copy(form = it)) }
+                        TermSelector("用途", filters.use, taxonomy?.uses.orEmpty()) { onChange(filters.copy(use = it)) }
+                    }
+                    Text("实体处理状态（任一）", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val selected = filters.entityState.split(',').filter { it.isNotEmpty() }
+                        for ((value, label) in entityFilterLabels) QuietFilterTag(label = label, selected = value in selected,
+                            onClick = { onChange(filters.copy(entityState = (if (value in selected) selected - value else selected + value).joinToString(","))) },
+                            modifier = Modifier.testTag("filter_entity_state_$value"))
+                    }
                 }
             }
-            if (taxonomy?.resourceKinds.isNullOrEmpty() || advanced) {
-            Text("实体处理状态（任一）", style = MaterialTheme.typography.labelLarge)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                val selected = filters.entityState.split(',').filter { it.isNotEmpty() }
-                for ((value, label) in listOf("not_run" to "未运行", "failed" to "失败", "completed_empty" to "完成，无实体", "completed_nonempty" to "完成，有实体", "stale" to "来源已变化")) {
-                    FilterChip(selected = value in selected,
-                        onClick = { onChange(filters.copy(entityState = (if (value in selected) selected - value else selected + value).joinToString(","))) },
-                        label = { Text(label) }, modifier = Modifier.testTag("filter_entity_state_$value"))
-                }
             }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Button(onClick = { expanded = false }, shape = RoundedCornerShape(8.dp), elevation = null,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)
+                    .heightIn(min = 48.dp).testTag("view_filter_results")) {
+                Text("查看结果", style = MaterialTheme.typography.labelLarge)
             }
         }
     }
@@ -365,20 +426,24 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FilterDimension(label: String, key: String, selected: List<String>, terms: List<TaxonomyTerm>, onChange: (List<String>) -> Unit) {
-    Text(label, style = MaterialTheme.typography.labelLarge)
+    Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 8.dp))
     val choices = terms.filter { it.active || it.id in selected }.map { it.id to (it.label + if (it.active) "" else "（已停用）") } +
         selected.filter { id -> terms.none { it.id == id } }.map { it to "$it（词表不可用）" }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        for ((id, text) in choices) FilterChip(selected = id in selected,
+        for ((id, text) in choices) QuietFilterTag(label = text, selected = id in selected,
             onClick = { onChange(if (id in selected) selected - id else selected + id) },
-            label = { Text(text) }, modifier = Modifier.testTag("filter_${key}_$id"))
+            modifier = Modifier.testTag("filter_${key}_$id"))
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TagFilterMode(mode: String, onChange: (String) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        for ((value, label) in listOf("any" to "任一", "all" to "全部")) FilterChip(
-            selected = mode == value, onClick = { onChange(value) }, label = { Text(label) })
+private fun TagFilterMode(label: String, mode: String, onChange: (String) -> Unit) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.align(Alignment.CenterVertically))
+        for ((value, label) in listOf("any" to "任一", "all" to "全部")) QuietFilterTag(label = label,
+            selected = mode == value, onClick = { onChange(value) })
     }
 }

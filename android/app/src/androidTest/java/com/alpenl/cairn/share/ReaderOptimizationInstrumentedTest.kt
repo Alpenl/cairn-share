@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -65,7 +66,7 @@ class ReaderOptimizationInstrumentedTest {
         }
         try {
             ActivityScenario.launch<LauncherActivity>(intent(server)).use {
-                waitTag("link_28"); compose.onNodeWithTag("link_28").performClick()
+                waitTag("link_28"); compose.onNodeWithTag("link_28").performScrollTo().assertIsDisplayed().performClick()
                 waitTag("reader_tag_overview")
                 compose.onNodeWithTag("reader_tag_overview").onChildren().filter(hasText("LLM")).assertCountEquals(1)
                 compose.onNodeWithTag("reader_tag_overview").onChildren().filter(hasText("提示词")).assertCountEquals(1)
@@ -79,20 +80,30 @@ class ReaderOptimizationInstrumentedTest {
                 waitTag("personal_tag_name")
                 scroll("personal_tag_name"); compose.onNodeWithTag("personal_tag_name").performTextInput("保留未提交名称")
                 scroll("reader_curation_toggle"); compose.onNodeWithTag("reader_curation_toggle").performSemanticsAction(SemanticsActions.OnClick) { it() }
-                compose.onNodeWithTag("reader_curation_toggle").assertTextContains("标签与备注")
+                compose.onNodeWithTag("reader_curation_toggle").assertContentDescriptionEquals("编辑标签与备注")
+                    .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "已折叠"))
                 compose.onNodeWithTag("reader_curation_toggle").performSemanticsAction(SemanticsActions.OnClick) { it() }
+                scroll("reader_curation_toggle")
                 compose.onNodeWithTag("reader_curation_toggle").assertTextContains("收起标签与备注")
                 scroll("personal_tag_name"); compose.onNodeWithTag("personal_tag_name").assertTextContains("保留未提交名称")
                 scroll("edit_curation")
                 compose.onNodeWithTag("edit_curation").assertIsEnabled()
                     .performSemanticsAction(SemanticsActions.OnClick) { it() }
-                waitTag("curation_why"); compose.onNodeWithTag("curation_why").performTextReplacement("已编辑的收藏原因")
-                compose.onNodeWithTag("save_curation").performClick()
+                waitTag("curation_why")
+                compose.onNodeWithTag("curation_why").performScrollTo().assertIsDisplayed().performTextReplacement("已编辑的收藏原因")
+                compose.onNodeWithTag("save_curation").assertIsDisplayed().performClick()
                 compose.waitUntil(10_000) { changed.get() == 1 }
                 scroll("reader_curation_toggle"); compose.onNodeWithTag("reader_curation_toggle").assertTextContains("收起标签与备注")
                 compose.onNodeWithContentDescription("返回").performClick()
-                waitTag("link_27"); compose.onNodeWithTag("link_27").performClick()
-                waitTag("reader_tag_overview"); compose.onNodeWithTag("v2_section").assertDoesNotExist()
+                // Lazy rows outside the large-text viewport are not composed yet.
+                compose.onNode(SemanticsMatcher.keyIsDefined(SemanticsActions.ScrollToIndex))
+                    .performScrollToNode(hasTestTag("link_27"))
+                // A large row's center can land on its independently clickable tags.
+                compose.onNodeWithText("本地阅读测试 27", useUnmergedTree = true)
+                    .performScrollTo().assertIsDisplayed().performClick()
+                waitTag("detail_content"); scroll("reader_tag_overview")
+                compose.onNodeWithTag("reader_tag_overview").assertIsDisplayed()
+                compose.onNodeWithTag("v2_section").assertDoesNotExist()
             }
         } finally { runBlocking { OfflineReadStore(context).clear(account); PersonalTagOutbox(context).discard(account, 28) }; server.shutdown() }
     }

@@ -1,6 +1,16 @@
 package com.alpenl.cairn.share
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -48,7 +58,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -57,8 +67,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetProperties
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -74,11 +87,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -130,17 +146,9 @@ private data class TopDestination(
 )
 
 private val TopDestinations = listOf(
-    TopDestination(Routes.Library, "链接库", Icons.Default.Search),
-    TopDestination(Routes.Queue, "待学习", Icons.Default.Check),
-    TopDestination(Routes.Settings, "设置", Icons.Default.Settings),
-)
-
-private val AvatarPalette = listOf(
-    AvatarTone(Color(0xFFE1E8D8), Color(0xFF344C19)),
-    AvatarTone(Color(0xFFD8E7EA), Color(0xFF174A53)),
-    AvatarTone(Color(0xFFE8DEEF), Color(0xFF4C315D)),
-    AvatarTone(Color(0xFFF0E1D3), Color(0xFF65411D)),
-    AvatarTone(Color(0xFFDDE5F4), Color(0xFF29476C)),
+    TopDestination(Routes.Library, "收藏", CairnIcons.Library),
+    TopDestination(Routes.Queue, "待读", CairnIcons.Reading),
+    TopDestination(Routes.Settings, "设置", CairnIcons.Settings),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -173,7 +181,6 @@ internal fun CairnLinksApp(
     val onTagFilter: (ReaderTag) -> Unit = { tag ->
         viewModel.setBookmarkFilters(state.bookmarkFilters.withTag(tag))
         if (currentRoute != Routes.Library && currentRoute != Routes.Search) navController.navigate(Routes.Library) {
-            popUpTo(navController.graph.startDestinationId)
             launchSingleTop = true
         }
     }
@@ -203,7 +210,6 @@ internal fun CairnLinksApp(
             if (showBottomBar) {
                 CairnBottomBar(
                     currentRoute = currentRoute,
-                    pendingCount = state.stats().pending,
                     uploadCount = state.pendingUploads.size,
                     onNavigate = { route -> navController.navigateTop(route) },
                 )
@@ -211,13 +217,14 @@ internal fun CairnLinksApp(
         },
         floatingActionButton = {
             if (currentRoute == Routes.Library) {
-                ExtendedFloatingActionButton(
-                    text = { Text("添加链接") },
-                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                FloatingActionButton(
                     onClick = viewModel::openManualAdd,
-                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 4.dp),
-                    modifier = Modifier.testTag("add_link"),
-                )
+                    shape = CircleShape,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.primary,
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 1.dp),
+                    modifier = Modifier.size(52.dp).testTag("add_link"),
+                ) { Icon(Icons.Default.Add, contentDescription = "收藏链接", modifier = Modifier.size(22.dp)) }
             }
         },
         containerColor = MaterialTheme.colorScheme.background,
@@ -229,7 +236,8 @@ internal fun CairnLinksApp(
             startDestination = startDestination,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding),
+                .padding(padding)
+                .then(if (!showBottomBar) Modifier.navigationBarsPadding() else Modifier),
         ) {
             composable(Routes.Library) {
                 LibraryScreen(
@@ -239,6 +247,8 @@ internal fun CairnLinksApp(
                     onTagFilter = onTagFilter,
                     onLoadMore = viewModel::loadMoreLibraryResults,
                     onRetryFilters = viewModel::retryLibraryFilters,
+                    onRefresh = viewModel::refreshLinks,
+                    onOpenSettings = { navController.navigateTop(Routes.Settings) },
                     onOpenSearch = { navController.navigate(Routes.Search) },
                     onOpenOffline = { navController.navigate(Routes.Offline) },
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
@@ -388,14 +398,17 @@ internal fun CairnLinksApp(
     }
 
     if (state.manualAdd.visible) {
+        val savingNow by rememberUpdatedState(state.manualAdd.submitting)
         ModalBottomSheet(
             onDismissRequest = viewModel::closeManualAdd,
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true,
+                confirmValueChange = { it != SheetValue.Hidden || !savingNow }),
+            properties = ModalBottomSheetProperties(shouldDismissOnBackPress = !state.manualAdd.submitting),
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
             SaveLinkSheetContent(
-                title = "保存到链接库",
-                subtitle = "手动添加一条 HTTP 或 HTTPS 链接。",
+                title = "收藏链接",
+                subtitle = "把值得留住的内容，放进你的收藏。",
                 candidates = emptyList(),
                 selectedIndex = -1,
                 selectedLabel = null,
@@ -418,99 +431,30 @@ internal fun CairnLinksApp(
 }
 
 @Composable
-private fun CairnBottomBar(
-    currentRoute: String?,
-    pendingCount: Int,
-    uploadCount: Int,
-    onNavigate: (String) -> Unit,
-) {
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .height(52.dp)
-                .padding(horizontal = 18.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TopDestinations.forEach { destination ->
-                CompactNavItem(
-                    destination = destination,
-                    selected = currentRoute == destination.route,
-                    badge = when (destination.route) {
-                        Routes.Queue -> pendingCount.takeIf { it > 0 }
-                        Routes.Settings -> uploadCount.takeIf { it > 0 }
-                        else -> null
-                    },
-                    onClick = { onNavigate(destination.route) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("nav_${destination.route}"),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun CompactNavItem(
-    destination: TopDestination,
-    selected: Boolean,
-    badge: Int?,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val contentColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(18.dp))
-            .clickable(role = Role.Tab, onClick = onClick)
-            .padding(vertical = 2.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(1.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .height(24.dp)
-                .width(46.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                destination.icon,
-                contentDescription = destination.label,
-                tint = contentColor,
-                modifier = Modifier.size(19.dp),
-            )
-            if (badge != null) {
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.tertiary,
-                    contentColor = MaterialTheme.colorScheme.onTertiary,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .sizeIn(minWidth = 16.dp, minHeight = 16.dp),
-                ) {
-                    Text(
-                        badge.coerceAtMost(99).toString(),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 4.dp),
-                    )
+private fun CairnBottomBar(currentRoute: String?, uploadCount: Int, onNavigate: (String) -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.navigationBarsPadding()) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(Modifier.fillMaxWidth()) {
+                TopDestinations.forEach { destination ->
+                    val selected = currentRoute == destination.route
+                    val tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    Surface(color = Color.Transparent, contentColor = tint,
+                        modifier = Modifier.weight(1f).selectable(selected, role = Role.Tab,
+                            onClick = { onNavigate(destination.route) }).testTag("nav_${destination.route}")) {
+                        Column(Modifier.heightIn(min = 64.dp).padding(vertical = 9.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)) {
+                            BadgedIcon(destination.icon, destination.label, when (destination.route) {
+                                Routes.Settings -> uploadCount.takeIf { it > 0 }
+                                else -> null
+                            })
+                            Text(destination.label, style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
+                        }
+                    }
                 }
             }
         }
-        Text(
-            destination.label,
-            style = MaterialTheme.typography.labelSmall,
-            color = contentColor,
-            maxLines = 1,
-        )
     }
 }
 
@@ -541,6 +485,8 @@ private fun LibraryScreen(
     onTagFilter: (ReaderTag) -> Unit,
     onLoadMore: () -> Unit,
     onRetryFilters: () -> Unit,
+    onRefresh: () -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenSearch: () -> Unit,
     onOpenOffline: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
@@ -550,33 +496,48 @@ private fun LibraryScreen(
     val querying = state.usesLibraryQuery()
     val loading = if (querying) state.libraryLoading else state.loading
     ScreenColumn {
-        AppHeader(
-            title = "链接库",
-            subtitle = "已加载 ${stats.total} 条收藏 · ${stats.pending} 条待读",
-            actions = {
-                HeaderIconButton(
-                    icon = Icons.Default.Search,
-                    contentDescription = "搜索",
-                    onClick = onOpenSearch,
-                    modifier = Modifier.testTag("open_search"),
-                )
-            },
-        )
-        if (state.offlineReads.isNotEmpty()) TextButton(onClick = onOpenOffline, modifier = Modifier.testTag("open_offline_reading")) {
-            Text("离线已存 ${state.offlineReads.size} 条正文")
-        }
-        FilterRow(
-            selected = state.filter,
-            stats = stats,
-            enabled = true,
-            onFilterChange = onFilterChange,
-        )
-        BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken, learned = state.filter.apiValue)
-        if (querying) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text((if (state.libraryStale) "上一次条件的结果 · " else "") + state.libraryStatusText, Modifier.weight(1f).testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onRetryFilters, enabled = !state.libraryLoading, modifier = Modifier.testTag("retry_library_filters")) { Text("重新筛选") }
-        }
         LinkList(
+            header = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                AppHeader(
+                    title = "收藏",
+                    subtitle = if (querying && !state.libraryStale && !loading) "${items.size} 条筛选结果" else "已加载 ${stats.total} 条 · ${stats.pending} 条未读",
+                    actions = {
+                        if (state.offlineReads.isNotEmpty()) HeaderIconButton(CairnIcons.Offline, "离线阅读", onOpenOffline, Modifier.testTag("open_offline_reading"))
+                        HeaderIconButton(Icons.Default.Refresh, if (querying) "重新筛选" else "刷新收藏", if (querying) onRetryFilters else onRefresh,
+                            Modifier.testTag(if (querying) "retry_library_filters" else "refresh_library"), enabled = !loading)
+                    },
+                )
+                Surface(onClick = onOpenSearch, shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().testTag("open_search")) {
+                    Row(Modifier.padding(horizontal = 14.dp).heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                        Text("搜索标题、正文或备注", style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                if (state.preferences.apiToken.isBlank()) {
+                    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.primaryContainer) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("连接你的收藏库", style = MaterialTheme.typography.titleMedium)
+                            Text("填入访问 Token，即可同步和阅读已收藏的内容。", style = MaterialTheme.typography.bodySmall)
+                            Button(onClick = onOpenSettings, modifier = Modifier.testTag("connect_library")) { Text("前往设置") }
+                        }
+                    }
+                }
+                FilterRow(
+                    selected = state.filter,
+                    enabled = true,
+                    onFilterChange = onFilterChange,
+                )
+                BookmarkFilterPanel(state.bookmarkFilters, state.v2Taxonomy ?: state.taxonomy, onBookmarkFiltersChange, state.apiBaseUrl, state.preferences.apiToken, learned = state.filter.apiValue)
+                if (!querying && !state.loading && state.statusText.isNotBlank() && !state.statusText.startsWith("已同步") && !state.statusText.startsWith("已加载")) StatusText(state.statusText)
+                if (querying && !state.libraryStatusText.startsWith("已显示")) {
+                    Text((if (state.libraryStale) "上一次条件的结果 · " else "") + state.libraryStatusText, Modifier.fillMaxWidth().testTag("library_filter_status"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                }
+            },
             items = items,
             onTagFilter = onTagFilter,
             taxonomy = state.v2Taxonomy ?: state.taxonomy,
@@ -642,26 +603,33 @@ private fun QueueScreen(
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
     val queue = state.queueResults
+    var menuExpanded by remember { mutableStateOf(false) }
     var confirmLoaded by rememberSaveable(state.accountGeneration) { mutableStateOf(false) }
     LaunchedEffect(state.accountGeneration) { onRefresh() }
     ScreenColumn {
         AppHeader(
-            title = "待学习",
-            subtitle = state.queueTotal?.let { "全库 $it 条待读 · 已显示 ${queue.size} 条" } ?: "按收藏先后排队，先进先读",
+            title = "稍后阅读",
+            subtitle = state.queueTotal?.let { "$it 条待读 · 从最早的收藏开始" } ?: "按收藏先后排队，先进先读",
             actions = {
-                TextButton(onClick = { confirmLoaded = true }, enabled = state.queueAvailable == true && !state.queueLoading && queue.isNotEmpty() && state.busyIds.isEmpty(), modifier = Modifier.testTag("mark_all_learned")) { Text("标记已显示") }
+                HeaderIconButton(Icons.Default.Refresh, "刷新待读", onRefresh, enabled = !state.queueLoading)
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) { Icon(CairnIcons.More, contentDescription = "待读操作") }
+                    DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        DropdownMenuItem(text = { Text("将已加载的收藏标为已读") }, onClick = { menuExpanded = false; confirmLoaded = true },
+                            enabled = state.queueAvailable == true && !state.queueLoading && queue.isNotEmpty() && state.busyIds.isEmpty(),
+                            modifier = Modifier.testTag("mark_all_learned"))
+                    }
+                }
             },
         )
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(state.queueStatusText, Modifier.weight(1f).testTag("queue_status"), style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onRefresh, enabled = !state.queueLoading) { Text("刷新队列") }
-        }
+        if (state.queueStatusText.isNotBlank()) Text(state.queueStatusText, Modifier.testTag("queue_status"),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         LinkList(
             items = queue,
             onTagFilter = onTagFilter,
             taxonomy = state.v2Taxonomy ?: state.taxonomy,
             loading = state.queueLoading && queue.isEmpty(),
-            emptyText = state.queueStatusText.ifBlank { "正在读取待学习队列…" },
+            emptyText = state.queueStatusText.ifBlank { "正在读取待读列表…" },
             onOpenLinkDetail = onOpenLinkDetail,
             fifo = true,
             hasMore = state.queueNextCursor != null,
@@ -671,151 +639,9 @@ private fun QueueScreen(
     }
     if (confirmLoaded) AlertDialog(onDismissRequest = { confirmLoaded = false },
         title = { Text("标记已显示的 ${queue.size} 条？") },
-        text = { Text("仅将当前加载的收藏标记为已学习；全库其余未加载收藏会继续排队。") },
+        text = { Text("仅将当前加载的收藏标记为已读；全库其余未加载收藏会继续排队。") },
         confirmButton = { TextButton(onClick = { confirmLoaded = false; onMarkAll() }, enabled = !state.queueLoading && state.queueAvailable == true) { Text("标记这 ${queue.size} 条") } },
         dismissButton = { TextButton(onClick = { confirmLoaded = false }) { Text("取消") } })
-}
-
-@Composable
-private fun SettingsScreen(
-    state: CairnLinksUiState,
-    onCloseAfterSaveChange: (Boolean) -> Unit,
-    onPreserveCompleteUrlChange: (Boolean) -> Unit,
-    onApiTokenChange: (String) -> Unit,
-    onOpenUploads: () -> Unit,
-    onOpenConsole: () -> Unit,
-    onOpenUpdate: () -> Unit,
-    onOpenAbout: () -> Unit,
-    onClearOffline: () -> Unit,
-    onFlushPersonal: () -> Unit,
-    onOpenOffline: () -> Unit,
-) {
-    var tokenDialogOpen by rememberSaveable { mutableStateOf(false) }
-    var tokenDraft by rememberSaveable { mutableStateOf("") }
-    var confirmClearCache by rememberSaveable { mutableStateOf(false) }
-
-    ScreenColumn(scroll = true) {
-        AppHeader(title = "设置", subtitle = "云端、分享与应用")
-        SectionLabel("云端")
-        SettingsRow(
-            icon = Icons.Default.Settings,
-            title = "服务器地址",
-            subtitle = state.apiBaseUrl.removePrefix("https://").removePrefix("http://"),
-            onClick = null,
-        )
-        SettingsRow(
-            icon = Icons.Default.Check,
-            title = "访问 Token",
-            subtitle = state.apiTokenSaveError.ifBlank { apiTokenSubtitle(state.preferences.apiToken) },
-            onClick = {
-                tokenDraft = state.preferences.apiToken
-                tokenDialogOpen = true
-            },
-        )
-        SettingsRow(
-            icon = Icons.Default.Refresh,
-            title = "待上传队列",
-            subtitle = when {
-                !state.pendingUploadsLoaded -> "正在读取本地队列"
-                state.pendingUploads.isEmpty() -> "本地队列为空"
-                state.retryingUploads -> "正在重试 · ${state.pendingUploads.size} 条仍在本地"
-                else -> "${state.pendingUploads.size} 条保存在本地 · 点按查看或重试"
-            },
-            onClick = onOpenUploads,
-        )
-        SettingsRow(
-            icon = Icons.Default.Refresh,
-            title = "个人标签待同步",
-            subtitle = "当前账号 ${state.personalTagPendingCount} 条待确认操作 · 点击重试",
-            onClick = onFlushPersonal,
-        )
-        SettingsRow(
-            icon = Icons.Default.Info,
-            title = "最近阅读与固定正文",
-            subtitle = "${state.offlineReads.size} 条离线已存 · 点击阅读",
-            onClick = onOpenOffline,
-        )
-        SettingsRow(
-            icon = Icons.Default.Info,
-            title = "离线阅读缓存",
-            subtitle = "最近 30 条正文 + 最多 20 条固定 · 当前账号 ${state.offlineReads.size} 条 · 16 MB 总上限",
-            onClick = { confirmClearCache = true },
-        )
-        SettingsRow(
-            icon = Icons.Default.Info,
-            title = "API 调试台",
-            subtitle = "直接对 /api/links 发请求并查看原始响应",
-            onClick = onOpenConsole,
-        )
-        SectionLabel("分享")
-        SettingsSwitchRow(
-            icon = Icons.Default.Share,
-            title = "保存后立即关闭",
-            subtitle = "保存成功就退出分享弹窗，不停留",
-            checked = state.preferences.closeAfterSave,
-            onCheckedChange = onCloseAfterSaveChange,
-        )
-        SettingsSwitchRow(
-            icon = Icons.Default.Share,
-            title = "保留完整链接",
-            subtitle = "不删除 query 与 fragment",
-            checked = state.preferences.preserveCompleteUrl,
-            onCheckedChange = onPreserveCompleteUrlChange,
-        )
-        SectionLabel("应用")
-        SettingsRow(
-            icon = Icons.Default.Check,
-            title = "检查更新",
-            subtitle = updateSettingSubtitle(state),
-            onClick = onOpenUpdate,
-        )
-        SettingsRow(
-            icon = Icons.Default.Info,
-            title = "关于",
-            subtitle = "版本、开源许可与数据说明",
-            onClick = onOpenAbout,
-        )
-        Spacer(Modifier.height(20.dp))
-    }
-
-    if (confirmClearCache) AlertDialog(
-        onDismissRequest = { confirmClearCache = false },
-        title = { Text("清除离线阅读缓存？") },
-        text = { Text("仅清除当前账号在本机保存的正文与固定记录，云端收藏和待同步修改会保留。") },
-        confirmButton = { TextButton(onClick = { confirmClearCache = false; onClearOffline() }) { Text("清除本机缓存") } },
-        dismissButton = { TextButton(onClick = { confirmClearCache = false }) { Text("取消") } },
-    )
-
-    if (tokenDialogOpen) {
-        AlertDialog(
-            onDismissRequest = { tokenDialogOpen = false },
-            title = { Text("访问 Token") },
-            text = {
-                OutlinedTextField(
-                    value = tokenDraft,
-                    onValueChange = { tokenDraft = it },
-                    label = { Text("Bearer Token") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        onApiTokenChange(tokenDraft)
-                        tokenDialogOpen = false
-                    },
-                ) {
-                    Text("保存")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { tokenDialogOpen = false }) { Text("取消") }
-            },
-        )
-    }
 }
 
 @Composable
@@ -977,6 +803,7 @@ private fun PendingUploadRow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DetailScreen(
     id: Int,
@@ -1004,6 +831,7 @@ private fun DetailScreen(
     val link = state.links.firstOrNull { it.id == id }
     val loadState = state.detailLoads[id]
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
     var showOriginal by rememberSaveable(id, state.accountGeneration) { mutableStateOf(false) }
     var curateExpanded by rememberSaveable(id, state.accountGeneration) { mutableStateOf(false) }
     val editorState = rememberSaveableStateHolder()
@@ -1019,18 +847,27 @@ private fun DetailScreen(
     }
 
     ScreenColumn {
-        DetailTopBar(
-            title = "链接 #$id",
-            onBack = onBack,
-            actions = {
-                IconButton(onClick = onEdit, enabled = link != null) {
-                    Icon(Icons.Default.Edit, contentDescription = "编辑")
+        DetailTopBar(title = "阅读", onBack = onBack, actions = {
+            Box {
+                IconButton(onClick = { showMenu = true }, enabled = link != null, modifier = Modifier.size(48.dp).testTag("reader_more")) {
+                    Icon(CairnIcons.More, contentDescription = "更多操作")
                 }
-                IconButton(onClick = { confirmDelete = true }, enabled = link != null && id !in state.busyIds) {
-                    Icon(Icons.Default.Delete, contentDescription = "删除", tint = MaterialTheme.colorScheme.error)
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    DropdownMenuItem(text = { Text("编辑链接") }, leadingIcon = { Icon(Icons.Default.Edit, contentDescription = "编辑") },
+                        onClick = { showMenu = false; onEdit() })
+                    DropdownMenuItem(text = { Text("复制链接") }, onClick = { showMenu = false; link?.let { onCopy(it.url) } })
+                    state.offlineReads[id]?.let { cached ->
+                        DropdownMenuItem(text = { Text(if (cached.pinned) "取消离线固定" else "固定离线正文") },
+                            leadingIcon = { Icon(CairnIcons.Offline, contentDescription = null) },
+                            onClick = { showMenu = false; onOfflinePin(!cached.pinned) }, modifier = Modifier.testTag("offline_read_pin"))
+                    }
+                    HorizontalDivider()
+                    DropdownMenuItem(text = { Text("删除收藏", color = MaterialTheme.colorScheme.error) },
+                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = "删除", tint = MaterialTheme.colorScheme.error) },
+                        enabled = id !in state.busyIds, onClick = { showMenu = false; confirmDelete = true })
                 }
-            },
-        )
+            }
+        })
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f).testTag("detail_content"),
             verticalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(bottom = 32.dp),
@@ -1040,7 +877,7 @@ private fun DetailScreen(
                 // 整理、备注、元信息等次要内容全部沉到正文之后。
                 item(key = "link") {
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                        LinkDetailContent(link, id in state.busyIds, onOpenExternal, onCopy, onToggleLearned)
+                        LinkDetailContent(link)
                     }
                 }
                 item(key = "curation_overview") {
@@ -1049,15 +886,21 @@ private fun DetailScreen(
                         val vocabulary = state.v2Taxonomy ?: state.taxonomy
                         val offlineLabels = state.offlineReads[id]?.tagLabels.orEmpty()
                         val tags = if (effective == null && vocabulary == null && offlineLabels.isNotEmpty()) offlineLabels else readerTags(link, effective, vocabulary)
-                        TextButton(onClick = { curateExpanded = !curateExpanded }, modifier = Modifier.testTag("reader_curation_toggle").semantics { stateDescription = if (curateExpanded) "已展开" else "已折叠" }) {
-                            Text(if (curateExpanded) "收起标签与备注" else "标签与备注")
-                        }
                         if (!curateExpanded) {
-                            if (tags.isNotEmpty()) ReaderTagChips(tags, onTagFilter, Modifier.testTag("reader_tag_overview"))
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                if (tags.isNotEmpty()) ReaderTagChips(tags, onTagFilter, Modifier.weight(1f).testTag("reader_tag_overview"))
+                                else Text("标签与备注", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                IconButton(onClick = { curateExpanded = true }, modifier = Modifier.size(48.dp).testTag("reader_curation_toggle").semantics { stateDescription = "已折叠" }) {
+                                    Icon(CairnIcons.Chevron, contentDescription = "编辑标签与备注", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
                             if (enrichment?.why?.isNotBlank() == true) Text(enrichment.why, maxLines = 1,
                                 overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                             if ((state.v2Queued[id] ?: 0) > 0 || state.v2Conflicts.containsKey(id) || (state.personalTagQueued[id] ?: 0) > 0) Text("有待同步或冲突的标签修改，展开后处理。", style = MaterialTheme.typography.bodySmall)
                         } else {
+                            TextButton(onClick = { curateExpanded = false }, modifier = Modifier.testTag("reader_curation_toggle").semantics { stateDescription = "已展开" }) {
+                                Text("收起标签与备注", style = MaterialTheme.typography.labelMedium)
+                            }
                             editorState.SaveableStateProvider("$id:${state.accountGeneration}") {
                             MultidimensionalCurationSection(
                                 linkId = id, taxonomy = state.v2Taxonomy ?: state.taxonomy,
@@ -1079,16 +922,13 @@ private fun DetailScreen(
                         }
                     }
                 }
-                state.offlineReads[id]?.let { cached -> item(key = "offline_state") {
-                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        val label = if (cached.verified && loadState != DetailLoadState.Failed) "离线正文已更新" else "本地缓存；云端版本尚未确认"
-                        Text("$label · ${java.time.Instant.ofEpochMilli(cached.savedAt).toString().shortDateTime()}${if (cached.expired()) " · 超过 7 天，请联网刷新" else ""}",
-                            style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("offline_read_status"))
-                        TextButton(onClick = { onOfflinePin(!cached.pinned) }, modifier = Modifier.testTag("offline_read_pin")) {
-                            Text(if (cached.pinned) "取消离线固定" else "固定离线正文")
-                        }
+                state.offlineReads[id]?.takeIf { !it.verified || loadState == DetailLoadState.Failed || it.expired() }?.let { cached ->
+                    item(key = "offline_state") {
+                        Text("本地缓存；云端版本尚未确认 · ${java.time.Instant.ofEpochMilli(cached.savedAt).toString().shortDateTime()}${if (cached.expired()) " · 超过 7 天，请联网刷新" else ""}",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("offline_read_status"))
                     }
-                } }
+                }
                 if (loadState == DetailLoadState.Loading) item(key = "loading") { LoadingState("正在加载归档内容...") }
                 if (loadState == DetailLoadState.Failed) item(key = "retry") {
                     TextButton(onClick = { onEnsureLink(id) }) { Text("读取归档内容失败，点击重试") }
@@ -1099,12 +939,12 @@ private fun DetailScreen(
                     }
                     if (readingText.isNotBlank()) {
                         item(key = "reading_controls") {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(if (showOriginal || enrichment.translatedText.isBlank()) "原文 ${enrichment.originalLanguage}" else "中文译文", style = MaterialTheme.typography.titleMedium)
+                            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(if (showOriginal || enrichment.translatedText.isBlank()) "原文 ${enrichment.originalLanguage}" else "中文译文", modifier = Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 if (enrichment.originalText.isNotBlank() && enrichment.translatedText.isNotBlank()) TextButton(
                                     onClick = { showOriginal = !showOriginal }, modifier = Modifier.testTag("toggle_original"),
                                 ) { Text(if (showOriginal) "查看译文" else "查看原文") }
-                                TextButton(onClick = { onCopy(readingText) }) { Text("复制全文") }
+                                TextButton(onClick = { onCopy(readingText) }) { Text("复制全文", style = MaterialTheme.typography.labelMedium) }
                             }
                         }
                         items(paragraphs.size, key = { "paragraph_$it" }, contentType = { "paragraph" }) { index ->
@@ -1137,6 +977,24 @@ private fun DetailScreen(
                 }
             }
         }
+        if (link != null) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { onToggleLearned(link) }, enabled = id !in state.busyIds,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                    shape = MaterialTheme.shapes.small, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("toggle_${link.id}")) {
+                    if (id in state.busyIds) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp)); Text(if (link.learned) "改为未读" else "标为已读")
+                }
+                Button(onClick = { onOpenExternal(link.url) }, shape = MaterialTheme.shapes.small,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("open_original")) {
+                    Text("打开原帖"); Spacer(Modifier.width(6.dp))
+                    Icon(CairnIcons.External, contentDescription = null, modifier = Modifier.size(18.dp))
+                }
+            }
+        }
     }
 
     if (confirmDelete) {
@@ -1165,21 +1023,31 @@ private fun EditScreen(
     val link = state.links.firstOrNull { it.id == id }
     val draft = state.editDraft?.takeIf { it.id == id }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
+    var confirmLeave by rememberSaveable(id, state.accountGeneration) { mutableStateOf(false) }
+    val dirty = draft != null && link != null && (draft.url != link.url || draft.note != link.note)
+    val requestBack = {
+        if (draft?.saving != true) {
+            if (dirty) confirmLeave = true else onBack()
+        }
+    }
+    BackHandler(enabled = dirty || draft?.saving == true) { requestBack() }
     LaunchedEffect(id) { onEnsureLink(id) }
     LaunchedEffect(link?.id) {
         if (link != null) onBeginEdit(link)
     }
 
-    ScreenColumn(scroll = true) {
+    ScreenColumn {
         DetailTopBar(
             title = "编辑链接",
-            onBack = onBack,
+            onBack = requestBack,
             actions = {
                 TextButton(onClick = onSave, enabled = draft != null && !draft.saving, modifier = Modifier.testTag("save_edit")) {
                     Text("保存")
                 }
             },
         )
+        Column(Modifier.fillMaxWidth().weight(1f).imePadding().verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(14.dp)) {
         if (draft == null) {
             LoadingState("正在准备编辑表单...")
         } else {
@@ -1208,11 +1076,11 @@ private fun EditScreen(
                     .testTag("edit_note"),
             )
             StatusText(draft.error, "edit_status")
-            Button(
+            OutlinedButton(
                 onClick = { confirmDelete = true },
                 enabled = !draft.saving,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                shape = RoundedCornerShape(24.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                shape = MaterialTheme.shapes.small,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("delete_editing"),
@@ -1222,7 +1090,20 @@ private fun EditScreen(
                 Text("删除这条链接")
             }
         }
+        }
     }
+
+    if (confirmLeave) AlertDialog(
+        onDismissRequest = { confirmLeave = false },
+        title = { Text("放弃尚未保存的修改？") },
+        text = { Text("返回后，这次对链接和备注的修改将不会保存。") },
+        confirmButton = { TextButton(onClick = {
+            confirmLeave = false
+            link?.let { onUrlChange(it.url); onNoteChange(it.note) }
+            onBack()
+        }, modifier = Modifier.testTag("discard_edit")) { Text("放弃修改") } },
+        dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text("继续编辑") } },
+    )
 
     if (confirmDelete) {
         ConfirmDeleteDialog(
@@ -1415,39 +1296,31 @@ private fun AboutScreen(
 }
 
 @Composable
-private fun ScreenColumn(
-    scroll: Boolean = false,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    val base = Modifier
-        .fillMaxSize()
-        .statusBarsPadding()
-        .padding(horizontal = 16.dp)
-        .padding(top = 0.dp, bottom = 8.dp)
-    Column(
-        modifier = if (scroll) base.verticalScroll(rememberScrollState()) else base,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        content = content,
-    )
+internal fun ScreenColumn(scroll: Boolean = false, content: @Composable ColumnScope.() -> Unit) {
+    Box(Modifier.fillMaxSize().statusBarsPadding(), contentAlignment = Alignment.TopCenter) {
+        val base = Modifier.widthIn(max = 720.dp).fillMaxSize().padding(horizontal = 20.dp).padding(bottom = 8.dp)
+        Column(modifier = if (scroll) base.verticalScroll(rememberScrollState()) else base,
+            verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    }
 }
 
 @Composable
-private fun AppHeader(
+internal fun AppHeader(
     title: String,
     subtitle: String,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
                 title,
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
@@ -1477,13 +1350,13 @@ private fun DetailTopBar(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+        IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", modifier = Modifier.size(20.dp))
         }
         Text(
             title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Normal,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1503,7 +1376,7 @@ private fun HeaderIconButton(
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
-            .size(40.dp)
+            .size(48.dp)
             .clip(CircleShape)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
     ) {
@@ -1512,79 +1385,64 @@ private fun HeaderIconButton(
 }
 
 @Composable
-private fun SearchField(
-    value: String,
-    onValueChange: (String) -> Unit,
-    enabled: Boolean,
-) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = onValueChange,
-        label = { Text("搜索") },
-        placeholder = { Text("搜索链接、备注或站点") },
+private fun SearchField(value: String, onValueChange: (String) -> Unit, enabled: Boolean) {
+    val focus = LocalFocusManager.current
+    OutlinedTextField(value = value, onValueChange = onValueChange,
+        placeholder = { Text("搜索标题、正文或备注") },
         leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-        enabled = enabled,
-        singleLine = true,
-        shape = RoundedCornerShape(26.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("library_search"),
-    )
+        trailingIcon = { if (value.isNotEmpty()) IconButton(onClick = { onValueChange("") }, modifier = Modifier.testTag("clear_search")) {
+            Icon(Icons.Default.Close, contentDescription = "清除搜索")
+        } },
+        enabled = enabled, singleLine = true, shape = MaterialTheme.shapes.small,
+        colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
+        modifier = Modifier.fillMaxWidth().testTag("library_search"))
 }
 
 @Composable
 private fun FilterRow(
     selected: LinkFilter,
-    stats: LinkStats,
     enabled: Boolean,
     onFilterChange: (LinkFilter) -> Unit,
 ) {
     // 用轻量的文本切换代替一排 Chip，降低视觉噪声，让链接列表成为主角。
-    Row(horizontalArrangement = Arrangement.spacedBy(18.dp), modifier = Modifier.fillMaxWidth()) {
-        FilterTab("全部 ${stats.total}", selected == LinkFilter.All, enabled, { onFilterChange(LinkFilter.All) }, Modifier.testTag("filter_all"))
-        FilterTab("待学习 ${stats.pending}", selected == LinkFilter.Unlearned, enabled, { onFilterChange(LinkFilter.Unlearned) }, Modifier.testTag("filter_unlearned"))
-        FilterTab("已学习 ${stats.learned}", selected == LinkFilter.Learned, enabled, { onFilterChange(LinkFilter.Learned) }, Modifier.testTag("filter_learned"))
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+        FilterTab("全部", selected == LinkFilter.All, enabled, { onFilterChange(LinkFilter.All) }, Modifier.weight(1f).testTag("filter_all"))
+        FilterTab("未读", selected == LinkFilter.Unlearned, enabled, { onFilterChange(LinkFilter.Unlearned) }, Modifier.weight(1f).testTag("filter_unlearned"))
+        FilterTab("已读", selected == LinkFilter.Learned, enabled, { onFilterChange(LinkFilter.Learned) }, Modifier.weight(1f).testTag("filter_learned"))
     }
 }
 
 @Composable
-private fun FilterTab(
-    label: String,
-    selected: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Text(
-        text = label,
-        style = MaterialTheme.typography.bodyMedium,
-        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-        color = when {
-            !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            selected -> MaterialTheme.colorScheme.primary
-            else -> MaterialTheme.colorScheme.onSurfaceVariant
-        },
-        modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(enabled = enabled, role = Role.Tab, onClick = onClick)
-            .padding(horizontal = 2.dp, vertical = 6.dp),
-    )
+private fun FilterTab(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        color = Color.Transparent,
+        contentColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier.selectable(selected = selected, enabled = enabled, role = Role.Tab, onClick = onClick)) {
+        val accent = MaterialTheme.colorScheme.primary
+        Box(Modifier.heightIn(min = 48.dp).drawBehind {
+            if (selected) drawLine(accent, Offset(size.width * 0.4f, size.height - 1.dp.toPx()), Offset(size.width * 0.6f, size.height - 1.dp.toPx()), 2.dp.toPx())
+        }.padding(horizontal = 12.dp, vertical = 12.dp), contentAlignment = Alignment.Center) {
+            Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
+        }
+    }
 }
 
 @Composable
-private fun StatusText(status: String, tag: String = "status") {
+internal fun StatusText(status: String, tag: String = "status") {
     if (status.isBlank()) return
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Text(
             status,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             modifier = Modifier
-                .padding(horizontal = 14.dp, vertical = 12.dp)
+                .padding(horizontal = 12.dp, vertical = 10.dp)
                 .testTag(tag),
         )
     }
@@ -1603,14 +1461,16 @@ private fun ColumnScope.LinkList(
     loadingMore: Boolean = false,
     onLoadMore: (() -> Unit)? = null,
     taxonomy: com.alpenl.cairn.share.network.BookmarkTaxonomy? = null,
+    header: (@Composable () -> Unit)? = null,
 ) {
     LazyColumn(
         modifier = Modifier
             .fillMaxWidth()
             .weight(1f, fill = true),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
         contentPadding = PaddingValues(bottom = 92.dp),
     ) {
+        if (header != null) item(key = "list_header", contentType = "header") { header() }
         if (refreshing) {
             item {
                 LinearProgressIndicator(
@@ -1658,144 +1518,52 @@ private fun ColumnScope.LinkList(
 }
 
 @Composable
-private fun LinkRow(
-    link: SavedLink,
-    fifo: Boolean,
-    taxonomy: com.alpenl.cairn.share.network.BookmarkTaxonomy?,
-    onTagFilter: ((ReaderTag) -> Unit)?,
-    onClick: () -> Unit,
-) {
+private fun LinkRow(link: SavedLink, fifo: Boolean, taxonomy: com.alpenl.cairn.share.network.BookmarkTaxonomy?,
+    onTagFilter: ((ReaderTag) -> Unit)?, onClick: () -> Unit) {
     val title = remember(link.url, link.enrichment?.aiTitle) { link.displayTitle() }
-    val metadata = remember(link.url, link.createdAt, fifo) { "${if (fifo) "入队" else link.hostLabel()} · ${link.createdAt.shortDateTime()}" }
-    // 列表行以内容预览为主：优先摘要，其次是个人备注，不展示整理状态等标签。
     val preview = link.searchExcerpt.takeIf { it.isNotBlank() } ?: link.enrichment?.summary?.takeIf { it.isNotBlank() }
         ?: link.note.ifBlank { link.enrichment?.why.orEmpty() }
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(
-            1.dp,
-            if (link.learned) MaterialTheme.colorScheme.outlineVariant else MaterialTheme.colorScheme.primaryContainer,
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("link_${link.id}")
-            .clickable(role = Role.Button, onClick = onClick),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            HostAvatar(link.url)
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text(
-                    text = title,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = metadata,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontFamily = FontFamily.Monospace,
-                )
-                if (preview.isNotBlank()) {
-                    Text(
-                        text = preview,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                val tags = readerTags(link, null, taxonomy)
-                if (tags.isNotEmpty()) {
-                    if (onTagFilter != null) ReaderTagChips(tags, onTagFilter, Modifier.testTag("link_tags_${link.id}"))
-                    else Text(tags.take(5).joinToString(" · ") { it.label } + if (tags.size > 5) " +${tags.size - 5}" else "",
-                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.testTag("link_tags_${link.id}"))
-                }
+    Surface(onClick = onClick, color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth().testTag("link_${link.id}")) {
+        Column {
+        Column(Modifier.padding(vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StateDot(link.learned)
+                Text(link.hostLabel(), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text((if (fifo) "收藏于 " else "") + link.createdAt.shortDateTime(), style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            StateDot(learned = link.learned)
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (preview.isNotBlank()) Text(preview, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val tags = readerTags(link, null, taxonomy)
+            if (tags.isNotEmpty()) {
+                if (onTagFilter != null) ReaderTagChips(tags, onTagFilter, Modifier.testTag("link_tags_${link.id}"), compact = true)
+                else Text(tags.take(5).joinToString(" · ") { it.label }, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("link_tags_${link.id}"))
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
 }
 
 @Composable
-private fun LinkDetailContent(
-    link: SavedLink,
-    busy: Boolean,
-    onOpenExternal: (String) -> Unit,
-    onCopy: (String) -> Unit,
-    onToggleLearned: (SavedLink) -> Unit,
-) {
-    // 标题与状态直接呈现，不再包裹大色块卡片，让内容第一眼可见。
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        StatePill(learned = link.learned)
-        Text(link.displayTitle(), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-    }
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        HostAvatar(link.url)
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(link.hostLabel(), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(
-                link.url,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.clickable(role = Role.Button) { onCopy(link.url) },
-            )
-        }
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-        Button(
-            onClick = { onOpenExternal(link.url) },
-            shape = RoundedCornerShape(24.dp),
-            modifier = Modifier.weight(1f),
-        ) {
-            Icon(Icons.Default.Share, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("打开链接")
-        }
-        OutlinedButton(
-            onClick = { onToggleLearned(link) },
-            enabled = !busy,
-            shape = RoundedCornerShape(24.dp),
-            modifier = Modifier.testTag("toggle_${link.id}"),
-        ) {
-            if (busy) {
-                CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-            } else {
-                Icon(Icons.Default.Check, contentDescription = null)
-            }
-            Spacer(Modifier.width(8.dp))
-            Text(if (link.learned) "改回待学习" else "标为已学习")
-        }
+private fun LinkDetailContent(link: SavedLink) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+        Text("${link.hostLabel()} · ${link.createdAt.shortDateTime()}",
+            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(link.displayTitle(), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
     }
 }
 
 @Composable
 private fun LinkDetailSecondary(link: SavedLink) {
-    if (link.note.isNotBlank()) InfoBlock(title = "备注", text = link.note)
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            MetaRow("收藏于", link.createdAt.shortDateTime())
-            MetaRow("学习于", link.learnedAt?.shortDateTime() ?: "未学习")
-            MetaRow("记录 ID", "#${link.id}")
-            MetaRow("来源", "公开链接库")
-        }
-    }
+    if (link.note.isNotBlank()) InfoBlock(title = "我的备注", text = link.note)
+    Text("收藏于 ${link.createdAt.shortDateTime()}" + (link.learnedAt?.let { " · 已读于 ${it.shortDateTime()}" } ?: ""),
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
@@ -1871,65 +1639,14 @@ private fun UpdatePanel(
 }
 
 @Composable
-private fun SettingsRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    onClick: (() -> Unit)?,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.large)
-            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        if (onClick != null) Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun SettingsSwitchRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(MaterialTheme.shapes.large)
-            .clickable(role = Role.Switch) { onCheckedChange(!checked) }
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
-@Composable
-private fun SectionLabel(title: String, trailing: String? = null) {
+internal fun SectionLabel(title: String, trailing: String? = null) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.padding(top = 4.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-        HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.outlineVariant)
+        Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.weight(1f))
         trailing?.let {
             Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
         }
@@ -1943,11 +1660,12 @@ private fun InfoBlock(text: String) {
 
 @Composable
 private fun InfoBlock(title: String?, text: String) {
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            title?.let { Text(it, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }
+    val lineColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).drawBehind {
+        drawLine(lineColor, Offset.Zero, Offset(0f, size.height), 2.dp.toPx())
+    }.padding(start = 14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            title?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
     }
 }
 
@@ -1966,88 +1684,42 @@ private fun ConsoleBlock(text: String) {
 }
 
 @Composable
-private fun MetaRow(label: String, value: String) {
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(72.dp))
-        Text(value, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-    }
-}
-
-@Composable
 private fun LoadingState(text: String) {
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.padding(18.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-            Text(text, style = MaterialTheme.typography.bodyMedium)
-        }
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(strokeWidth = 1.5.dp, modifier = Modifier.size(16.dp))
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
 private fun EmptyState(text: String) {
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.padding(horizontal = 28.dp, vertical = 38.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 38.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(56.dp)) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.outline)
-                }
-            }
-            Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(CairnIcons.Library, contentDescription = null, tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(24.dp))
+            Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-    }
-}
-
-@Composable
-private fun HostAvatar(url: String) {
-    val host = url.hostLabel()
-    val tone = avatarTone(host)
-    Surface(shape = RoundedCornerShape(14.dp), color = tone.container, contentColor = tone.content, modifier = Modifier.size(42.dp)) {
-        Box(contentAlignment = Alignment.Center) {
-            Text(
-                text = host.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                fontFamily = FontFamily.Monospace,
-            )
-        }
-    }
 }
 
 @Composable
 private fun StateDot(learned: Boolean) {
     Box(
         modifier = Modifier
-            .padding(top = 8.dp)
-            .size(10.dp)
+            .semantics { stateDescription = if (learned) "已读" else "未读" }
+            .size(6.dp)
             .background(
-                color = if (learned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
+                color = if (learned) MaterialTheme.colorScheme.outlineVariant else MaterialTheme.colorScheme.primary,
                 shape = CircleShape,
             ),
     )
 }
 
 @Composable
-private fun StatePill(learned: Boolean) {
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = if (learned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
-        contentColor = if (learned) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onTertiary,
-    ) {
-        Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(6.dp).background(MaterialTheme.colorScheme.onPrimary, CircleShape))
-            Text(if (learned) "已学习" else "待学习", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
-        }
-    }
-}
-
-@Composable
 private fun BadgedIcon(icon: ImageVector, contentDescription: String, badge: Int?) {
     Box {
-        Icon(icon, contentDescription = contentDescription)
+        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(20.dp))
         if (badge != null) {
             Surface(
                 shape = CircleShape,
@@ -2091,212 +1763,11 @@ private fun ConfirmDeleteDialog(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun ShareBottomSheetScreen(
-    title: String,
-    subtitle: String,
-    candidates: List<UrlCandidate>,
-    selectedIndex: Int,
-    note: String,
-    statusText: String,
-    submitting: Boolean,
-    completed: Boolean = false,
-    settingsLoaded: Boolean = true,
-    preserveCompleteUrl: Boolean,
-    onSelectCandidate: (Int) -> Unit,
-    onNoteChange: (String) -> Unit,
-    onSave: () -> Unit,
-    onCancel: () -> Unit,
-) {
-    val selected = candidates.getOrNull(selectedIndex)
-    ModalBottomSheet(
-        onDismissRequest = onCancel,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.surface,
-    ) {
-        SaveLinkSheetContent(
-            title = title,
-            subtitle = subtitle,
-            candidates = candidates,
-            selectedIndex = selectedIndex,
-            selectedLabel = selected?.displayLabel,
-            onSelectCandidate = onSelectCandidate,
-            manualUrl = null,
-            onManualUrlChange = {},
-            note = note,
-            onNoteChange = onNoteChange,
-            statusText = statusText,
-            submitting = submitting,
-            completed = completed,
-            submitEnabled = selected != null && settingsLoaded && !submitting && !completed,
-            preserveCompleteUrl = preserveCompleteUrl,
-            onCancel = onCancel,
-            onSave = onSave,
-            modifier = Modifier.navigationBarsPadding(),
-        )
-    }
-}
-
-@Composable
-private fun SaveLinkSheetContent(
-    title: String,
-    subtitle: String,
-    candidates: List<UrlCandidate>,
-    selectedIndex: Int,
-    selectedLabel: String?,
-    onSelectCandidate: (Int) -> Unit,
-    manualUrl: String?,
-    onManualUrlChange: (String) -> Unit,
-    note: String,
-    onNoteChange: (String) -> Unit,
-    statusText: String,
-    submitting: Boolean,
-    completed: Boolean,
-    submitEnabled: Boolean,
-    preserveCompleteUrl: Boolean,
-    onCancel: () -> Unit,
-    onSave: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .imePadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 22.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (manualUrl != null) {
-            OutlinedTextField(
-                value = manualUrl,
-                onValueChange = onManualUrlChange,
-                label = { Text("链接") },
-                placeholder = { Text("https://example.com/article") },
-                minLines = 2,
-                enabled = !submitting && !completed,
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("manual_url"),
-            )
-            if (!preserveCompleteUrl && manualUrl.isNotBlank()) {
-                Text(
-                    "将保存：${removeQueryAndFragment(manualUrl)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        } else if (candidates.size > 1) {
-            LazyColumn(
-                modifier = Modifier.sizeIn(maxHeight = 220.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(candidates.indices.toList()) { index ->
-                    CandidatePickRow(
-                        label = candidates[index].displayLabel,
-                        selected = selectedIndex == index,
-                        onClick = { onSelectCandidate(index) },
-                        modifier = Modifier.testTag("candidate_$index"),
-                    )
-                }
-            }
-        }
-        selectedLabel?.let {
-            Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("已选择", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                    Text(
-                        it,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.testTag("selected_label"),
-                    )
-                }
-            }
-        }
-        OutlinedTextField(
-            value = note,
-            onValueChange = onNoteChange,
-            label = { Text("备注") },
-            placeholder = { Text("稍后阅读、项目资料") },
-            supportingText = { Text("${note.length} / $MAX_NOTE_LENGTH") },
-            enabled = !submitting && !completed,
-            minLines = 2,
-            shape = RoundedCornerShape(18.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("note"),
-        )
-        StatusText(statusText)
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = onCancel, enabled = !submitting, shape = RoundedCornerShape(24.dp), modifier = Modifier.weight(1f)) {
-                Icon(Icons.Default.Close, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text(stringResource(R.string.share_cancel))
-            }
-            Button(onClick = onSave, enabled = submitEnabled, shape = RoundedCornerShape(24.dp), modifier = Modifier.weight(1.4f).testTag("save")) {
-                if (submitting) {
-                    CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                } else {
-                    Icon(Icons.Default.Check, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(stringResource(R.string.share_save))
-            }
-        }
-    }
-}
-
-@Composable
-private fun CandidatePickRow(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(role = Role.RadioButton, onClick = onClick),
-    ) {
-        Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-            Box(
-                modifier = Modifier
-                    .padding(top = 3.dp)
-                    .size(18.dp)
-                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent, CircleShape),
-            )
-            Text(label, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-        }
-    }
-}
-
-private data class AvatarTone(
-    val container: Color,
-    val content: Color,
-)
-
-private fun avatarTone(host: String): AvatarTone {
-    val hash = host.fold(0) { acc, char -> (acc * 31 + char.code) and Int.MAX_VALUE }
-    return AvatarPalette[hash % AvatarPalette.size]
-}
-
 private fun libraryEmptyText(state: CairnLinksUiState): String =
     when (state.filter) {
         LinkFilter.All -> "还没有收藏链接。"
-        LinkFilter.Unlearned -> "没有待学习链接。分享新链接后会出现在这里。"
-        LinkFilter.Learned -> "没有已学习链接。"
+        LinkFilter.Unlearned -> "没有未读收藏。新收藏的内容会出现在这里。"
+        LinkFilter.Learned -> "还没有已读收藏。"
     }
 
 private fun pendingUploadStatus(upload: PendingUpload, busy: Boolean, tokenConfigured: Boolean): String =
@@ -2310,7 +1781,7 @@ private fun pendingUploadStatus(upload: PendingUpload, busy: Boolean, tokenConfi
         else -> "等待服务恢复"
     }
 
-private fun apiTokenSubtitle(token: String): String {
+internal fun apiTokenSubtitle(token: String): String {
     val trimmed = token.trim()
     return if (trimmed.isBlank()) {
         "未配置 · 新链接只保存在本地"
@@ -2326,7 +1797,7 @@ private fun maskedToken(token: String): String =
         "${token.take(4)}••••${token.takeLast(4)}"
     }
 
-private fun updateSettingSubtitle(state: CairnLinksUiState): String =
+internal fun updateSettingSubtitle(state: CairnLinksUiState): String =
     when (val update = state.updateState) {
         is AppUpdateState.Available -> "发现 ${update.update.versionName} · 当前 ${state.currentVersionName}"
         AppUpdateState.Checking -> "正在检查 GitHub Release"

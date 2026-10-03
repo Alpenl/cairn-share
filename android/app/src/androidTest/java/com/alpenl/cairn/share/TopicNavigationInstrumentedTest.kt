@@ -3,6 +3,7 @@ package com.alpenl.cairn.share
 import android.content.Intent
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -93,20 +94,27 @@ class TopicNavigationInstrumentedTest {
                 compose.onNodeWithText("清除筛选").performClick()
                 compose.onNodeWithTag("bookmark_filters").performClick()
                 waitTag("topic_search")
+                compose.onNodeWithTag("bookmark_filter_sheet").assertIsDisplayed()
+                compose.onNodeWithTag("pin_topic_portrait").assertDoesNotExist()
+                compose.onNodeWithTag("manage_topic_pins").performScrollTo().performClick()
                 compose.onNodeWithTag("topic_search").performScrollTo().performTextInput("个人写真")
                 compose.onNodeWithTag("pin_topic_portrait").performScrollTo().performClick()
                 compose.waitUntil(5_000) { "portrait" in pins.getStringSet("pins:$account", emptySet()).orEmpty() }
                 assertTrue(pins.getStringSet("pins:${accountKeyFor(base, "another-account")}", emptySet()).orEmpty().isEmpty())
+                compose.onNodeWithTag("manage_topic_pins").performScrollTo().performClick()
                 compose.onNodeWithTag("topic_search").performScrollTo().performTextClearance()
                 compose.onNodeWithTag("filter_topics_image_creation").performScrollTo().performClick()
                 compose.onNodeWithTag("filter_topics_design").performScrollTo().performClick()
                 compose.onNodeWithTag("filter_topic_refinements_portrait").performScrollTo().performClick()
                 compose.waitUntil(15_000) { requests.any { it.startsWith("/api/links?") && it.contains("topics=image_creation%2Cdesign") && it.contains("topic_refinements=portrait") } }
                 assertFalse(requests.last { it.startsWith("/api/links?") }.contains("topics_mode=all"))
-                compose.onNodeWithTag("bookmark_filters").performClick()
+                compose.onNodeWithTag("view_filter_results").assertIsDisplayed().performClick()
+                compose.onNodeWithTag("bookmark_filter_sheet").assertDoesNotExist()
                 compose.onNodeWithTag("link_9").assertExists()
                 compose.onNodeWithTag("link_8").assertExists()
                 compose.onNodeWithTag("link_7").assertDoesNotExist()
+                compose.onNodeWithTag("link_tags_9", useUnmergedTree = true).onChildren().onFirst()
+                    .assertHeightIsAtLeast(48.dp).assertWidthIsAtLeast(48.dp)
                 assertTrue(writes.isEmpty())
             }
         } finally { server.shutdown() }

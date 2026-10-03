@@ -3,15 +3,16 @@ package com.alpenl.cairn.share
 import android.content.ClipData
 import android.content.Intent
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performScrollTo
@@ -193,7 +194,7 @@ class ShareActivityInstrumentedTest {
                     }.getOrDefault(false)
                 }
             } catch (failure: Throwable) {
-                throw AssertionError(compose.onRoot().printToString(), failure)
+                throw AssertionError(hierarchyDump(), failure)
             }
             compose.onNodeWithTag("download_update").assertIsEnabled()
             compose.onNodeWithText("- 新增离线上传队列").assertExists()
@@ -213,6 +214,7 @@ class ShareActivityInstrumentedTest {
             val toggleRequest = takeRequest("PATCH", "/api/links/1")
             assertEquals(true, JSONObject(toggleRequest.body.readUtf8()).getBoolean("learned"))
 
+            compose.onNodeWithTag("reader_more").performClick()
             compose.onNodeWithContentDescription("编辑").performClick()
             compose.onNodeWithTag("edit_note").performTextInput(" / 更新")
             compose.onNodeWithTag("save_edit").performClick()
@@ -223,10 +225,11 @@ class ShareActivityInstrumentedTest {
 
             compose.waitUntil(5_000) {
                 runCatching {
-                    compose.onNodeWithContentDescription("编辑").assertIsEnabled()
+                    compose.onNodeWithTag("reader_more").assertIsEnabled()
                     true
                 }.getOrDefault(false)
             }
+            compose.onNodeWithTag("reader_more").performClick()
             compose.onNodeWithContentDescription("编辑").performClick()
             compose.onNodeWithTag("delete_editing").performClick()
             compose.onNodeWithTag("confirm_delete").performClick()
@@ -282,9 +285,14 @@ class ShareActivityInstrumentedTest {
             compose.waitUntil(5_000) {
                 runCatching { compose.onAllNodesWithTag("filter_topics_design").assertCountEquals(1); true }.getOrDefault(false)
             }
-            for (tag in listOf("filter_topics_design", "filter_topics_llm", "filter_content_functions_method", "filter_content_functions_data", "filter_carriers_single", "filter_affordances_practice", "filter_entity_state_failed", "filter_entity_state_stale")) {
+            for (tag in listOf("filter_topics_design", "filter_topics_llm")) {
                 compose.onNodeWithTag(tag).performScrollTo().performClick()
             }
+            compose.onNodeWithTag("advanced_bookmark_filters").performScrollTo().performClick()
+            for (tag in listOf("filter_content_functions_method", "filter_content_functions_data", "filter_carriers_single", "filter_affordances_practice", "filter_entity_state_failed", "filter_entity_state_stale")) {
+                compose.onNodeWithTag(tag).performScrollTo().performClick()
+            }
+            compose.onNodeWithTag("view_filter_results").assertIsDisplayed().performClick()
             compose.waitUntil(5_000) { latest.get()?.requestUrl?.queryParameter("entity_state") == "failed,stale" }
             val query = latest.get()!!.requestUrl!!
             assertEquals("design,llm", query.queryParameter("topics"))
@@ -512,7 +520,7 @@ class ShareActivityInstrumentedTest {
                 request != null
             }
         } catch (failure: Throwable) {
-            throw AssertionError(compose.onRoot().printToString(), failure)
+            throw AssertionError(hierarchyDump(), failure)
         }
         assertNotNull(request)
         assertTrue(server!!.requestCount >= 1)
@@ -532,14 +540,23 @@ class ShareActivityInstrumentedTest {
     }
 
     private fun waitForSaveEnabled() {
-        compose.onNodeWithTag("save").performScrollTo()
+        compose.onNodeWithTag("save").assertIsDisplayed()
         compose.waitUntil(5_000) {
             runCatching {
                 compose.onNodeWithTag("save").assertIsEnabled()
                 true
             }.getOrDefault(false)
         }
+        // Compose idleness does not include the platform IME moving the sheet.
+        // Wait for native layout events, then resolve the real touch target again.
+        InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(250, 5_000)
+        compose.waitForIdle()
+        compose.onNodeWithTag("save").assertIsDisplayed().assertIsEnabled()
     }
+
+    private fun hierarchyDump(): String = runCatching {
+        compose.onAllNodes(isRoot()).printToString()
+    }.getOrElse { "Could not capture hierarchy: ${it.message}" }
 
     private fun assertAuthorizedApiRequest(request: RecordedRequest) {
         if (request.path.orEmpty().startsWith("/api/links")) {
