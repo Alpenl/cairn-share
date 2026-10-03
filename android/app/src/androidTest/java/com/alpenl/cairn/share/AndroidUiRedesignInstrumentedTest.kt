@@ -150,8 +150,12 @@ class AndroidUiRedesignInstrumentedTest {
 
     private fun systemBack() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        // A dismissed dialog can still own the native window while Compose is already idle.
+        instrumentation.uiAutomation.waitForIdle(250, 5_000)
+        SystemClock.sleep(800)
         instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
+        SystemClock.sleep(800)
         compose.waitForIdle()
     }
 

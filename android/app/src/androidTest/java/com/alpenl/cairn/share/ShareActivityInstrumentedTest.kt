@@ -550,6 +550,9 @@ class ShareActivityInstrumentedTest {
         // Compose idleness does not include the platform IME moving the sheet.
         // Wait for native layout events, then resolve the real touch target again.
         InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(250, 5_000)
+        // Native IME/sheet animations can outlive accessibility idleness after recreation.
+        // Keep the real touch event, but resolve its coordinates after the window settles.
+        android.os.SystemClock.sleep(800)
         compose.waitForIdle()
         compose.onNodeWithTag("save").assertIsDisplayed().assertIsEnabled()
     }
