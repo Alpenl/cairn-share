@@ -8,11 +8,11 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performScrollTo
@@ -194,7 +194,7 @@ class ShareActivityInstrumentedTest {
                     }.getOrDefault(false)
                 }
             } catch (failure: Throwable) {
-                throw AssertionError(compose.onRoot().printToString(), failure)
+                throw AssertionError(hierarchyDump(), failure)
             }
             compose.onNodeWithTag("download_update").assertIsEnabled()
             compose.onNodeWithText("- 新增离线上传队列").assertExists()
@@ -520,7 +520,7 @@ class ShareActivityInstrumentedTest {
                 request != null
             }
         } catch (failure: Throwable) {
-            throw AssertionError(compose.onRoot().printToString(), failure)
+            throw AssertionError(hierarchyDump(), failure)
         }
         assertNotNull(request)
         assertTrue(server!!.requestCount >= 1)
@@ -547,7 +547,16 @@ class ShareActivityInstrumentedTest {
                 true
             }.getOrDefault(false)
         }
+        // Compose idleness does not include the platform IME moving the sheet.
+        // Wait for native layout events, then resolve the real touch target again.
+        InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(250, 5_000)
+        compose.waitForIdle()
+        compose.onNodeWithTag("save").assertIsDisplayed().assertIsEnabled()
     }
+
+    private fun hierarchyDump(): String = runCatching {
+        compose.onAllNodes(isRoot()).printToString()
+    }.getOrElse { "Could not capture hierarchy: ${it.message}" }
 
     private fun assertAuthorizedApiRequest(request: RecordedRequest) {
         if (request.path.orEmpty().startsWith("/api/links")) {
