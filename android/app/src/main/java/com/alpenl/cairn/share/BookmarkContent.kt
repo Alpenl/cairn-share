@@ -348,7 +348,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                 modifier = Modifier.weight(1f).testTag("active_filter_summary"))
             TextButton(onClick = { onChange(BookmarkFilters()) },
                 modifier = Modifier.heightIn(min = 48.dp).testTag("clear_bookmark_filters")) {
-                Text("清除", style = MaterialTheme.typography.labelMedium)
+                Text("清除筛选", style = MaterialTheme.typography.labelMedium)
             }
         }
     }
