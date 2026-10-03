@@ -3,7 +3,6 @@ package com.alpenl.cairn.share
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.SystemClock
-import android.view.KeyEvent
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.unit.dp
@@ -153,7 +152,11 @@ class AndroidUiRedesignInstrumentedTest {
         // A dismissed dialog can still own the native window while Compose is already idle.
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
         SystemClock.sleep(800)
-        instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        // Inject through the system input dispatcher, including IME/dialog windows.
+        // Instrumentation's app-scoped key injection is unreliable across windows on API 35.
+        instrumentation.uiAutomation.executeShellCommand("input keyevent 4").use { output ->
+            java.io.FileInputStream(output.fileDescriptor).use { it.readBytes() }
+        }
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
         SystemClock.sleep(800)
         compose.waitForIdle()
