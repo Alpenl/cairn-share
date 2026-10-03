@@ -184,7 +184,10 @@ class AndroidUiRedesignInstrumentedTest {
         launch().use {
             waitTag("link_49")
             if (context.resources.configuration.fontScale <= 1.05f) {
-                compose.onNodeWithTag("library_header").assertHeightIsAtMost(112.dp)
+                val heightDp = compose.onNodeWithTag("library_header").fetchSemanticsNode().boundsInRoot.height /
+                    context.resources.displayMetrics.density
+                println("LIBRARY_HEADER_HEIGHT_DP=$heightDp")
+                assertTrue("Compact library header is at most 112 dp (was $heightDp)", heightDp <= 112f)
             }
             compose.onNodeWithTag("open_search").assertIsDisplayed().assertHeightIsAtLeast(48.dp)
             compose.onNodeWithTag("bookmark_filters").assertIsDisplayed().assertHeightIsAtLeast(48.dp)
