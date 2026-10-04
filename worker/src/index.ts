@@ -1,3 +1,4 @@
+import { librarySyncRoute, maintainLibrarySync } from "./library-sync";
 import { readBoundedJSON, readJSONObject } from "./json-body";
 import { ReadProfile, profileBindings } from "./read-profiling";
 import { indexedSearchCandidate } from "./search-index";
@@ -158,8 +159,8 @@ type ErrorCode =
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage, If-None-Match",
-  "Access-Control-Expose-Headers": "X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage, X-Cairn-Sync, If-Match, If-None-Match",
+  "Access-Control-Expose-Headers": "X-Cairn-Sync, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -309,6 +310,7 @@ class TimingCollector {
 export default {
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     await maintainPrivacy(env);
+    await maintainLibrarySync(env);
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const timing = new TimingCollector();
@@ -326,6 +328,7 @@ export default {
       response = await handleRequest(request, env, timing);
       const policy = await policyRead;
       response = withServerTiming(response, timing);
+      if (response.ok) response.headers.set("X-Cairn-Sync", "1");
       if (contentFunctionsAware(request)) response.headers.set("X-Cairn-Content-Functions", "1");
       if (request.headers.get("X-Cairn-Search-Summary") === "1") response.headers.set("X-Cairn-Search-Summary", "1");
       if (request.headers.get("X-Cairn-Tag-System") === "1") response.headers.set("X-Cairn-Tag-System", "1");
@@ -429,6 +432,22 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   if (path === "/health") {
     return routeMethod(request, ["GET"], () => json({ ok: true }));
+  }
+
+  if (path === "/api/sync") {
+    const authError = requireApiToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => librarySyncRoute(request, env, async (ids) => {
+      if (!ids.length) return [];
+      const rows = await env.DB.prepare(`SELECT ${LINK_COLUMNS},${ENRICHMENT_COLUMNS},${contentColumns(false)}${cacheIdentityColumns(true)},${tagSummaryColumns()},
+        COALESCE((SELECT CASE WHEN e.content_revision<>links.content_revision THEN 'stale' ELSE e.state END FROM entity_states e WHERE e.link_id=links.id),'not_run') AS entity_state
+        FROM links WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id DESC`).bind(JSON.stringify(ids)).all<LinkRow & EnrichmentListRow & TagSummaryRow & {entity_state:string}>();
+      return projectTagSummaryRows(rows.results.map(row => {
+        const item = mapAppLink(row, true, true);
+        item.enrichment.entity_state = row.entity_state;
+        return item as unknown as Record<string, unknown>;
+      }), rows.results, false, true);
+    }));
   }
 
   if (path === "/api/links") {
@@ -2076,6 +2095,7 @@ async function fetchAndStoreImage(
       customMetadata: { source_url: imageUrl }
     })
   );
+  await env.DB.prepare("INSERT INTO library_sync_changes(link_id,kind) SELECT id,'upsert' FROM links WHERE id=?").bind(id).run();
   return { key, content_type: contentType };
 }
 
@@ -2128,6 +2148,10 @@ async function getEnrichmentImage(request: Request, env: Env, key: string): Prom
   if (object === null) return error("not_found", 404);
 
   const etag = object.httpEtag;
+  if (request.headers.has("if-match") && request.headers.get("if-match") !== etag) {
+    if ("body" in object) await object.body.cancel();
+    return new Response(null, { status: 412, headers: { ETag: etag, "Cache-Control": "private, no-store", ...CORS_HEADERS } });
+  }
   if (!("body" in object) || conditional === etag) {
     if ("body" in object) await object.body.cancel();
     return new Response(null, {

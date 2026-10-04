@@ -157,7 +157,7 @@ async function generateProposals(env: Env): Promise<Response> {
 // taxonomyWithDisplayOverrides returns the executable vocabulary with approved
 // display-only renames applied to labels. Definitions, ids and relations are
 // unchanged, so the model input and every stored decision stay valid.
-async function taxonomyWithDisplayOverrides(env: Env, tags = false, granularity = false): Promise<Record<string, unknown>> {
+export async function taxonomyWithDisplayOverrides(env: Env, tags = false, granularity = false): Promise<Record<string, unknown>> {
   const vocabulary = (tags ? taxonomyV2() : legacyTaxonomyV2()) as unknown as Record<string, unknown>;
   const rows = await env.DB.prepare(`SELECT term_id, dimension, label,display_revision FROM taxonomy_display_overrides`).all<{ term_id: string; dimension: string; label: string; display_revision: number }>();
   const overlays = new Map(rows.results.map((row) => [`${row.dimension}:${row.term_id}`, row]));

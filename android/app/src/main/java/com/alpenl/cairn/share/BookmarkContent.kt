@@ -244,7 +244,7 @@ internal object BookmarkImageCache {
 }
 
 @Composable
-internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String, version: String = "") {
+internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String, version: String = "", expectedVersion: String? = null) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val media = remember(context) { LocalMediaStore(context) }
     val account = accountKeyFor(baseUrl, apiToken)
@@ -257,7 +257,7 @@ internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String, 
     LaunchedEffect(cacheKey, cacheRevision, retry) {
         loading = true
         bitmap = BookmarkImageCache.get(account, imageKey, version) ?: withContext(Dispatchers.IO) {
-            val bytes = try { media.load(account, imageKey, version) { LinksApiClient(baseUrl).image(imageKey, apiToken) } }
+            val bytes = try { media.load(account, imageKey, version) { LinksApiClient(baseUrl).image(imageKey, apiToken, expectedVersion) } }
                 catch (_: java.io.IOException) { null } ?: return@withContext null
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)

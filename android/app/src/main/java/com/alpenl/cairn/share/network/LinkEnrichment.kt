@@ -93,6 +93,7 @@ internal data class LinkEnrichment(
     val translatedText: String = "",
     val relatedLinks: List<String> = emptyList(),
     val imageKeys: List<String> = emptyList(),
+    val imageVersions: Map<String, String> = emptyMap(),
     val classification: BookmarkClassification? = null,
     val classificationReviewed: Boolean = false,
     val why: String = "",
@@ -163,6 +164,12 @@ internal fun decodeEnrichment(json: JSONObject): LinkEnrichment = LinkEnrichment
     originalText = json.text("original_text"),
     translatedText = json.text("translated_text"),
     relatedLinks = json.optJSONArray("related_links").strings(),
+    imageVersions = json.optJSONArray("images")?.let { images ->
+        buildMap { for (i in 0 until images.length()) images.optJSONObject(i)?.let { row ->
+            val version = row.optString("version", "")
+            if (version.isNotBlank() && version != "null") put(row.optString("key"), version)
+        } }
+    }.orEmpty(),
     imageKeys = json.optJSONArray("images")?.let { images ->
         List(images.length()) { images.optJSONObject(it)?.text("key").orEmpty() }.filter { it.isNotBlank() }
     }.orEmpty(),
@@ -207,7 +214,7 @@ internal fun SavedLink.retainLoadedContent(previous: SavedLink?): SavedLink {
         fresh.updatedAt != loaded.updatedAt || fresh.status != loaded.status) return this
     return copy(enrichment = fresh.copy(
         originalText = loaded.originalText, translatedText = loaded.translatedText,
-        relatedLinks = loaded.relatedLinks, imageKeys = loaded.imageKeys, contentLoaded = true,
+        relatedLinks = loaded.relatedLinks, imageKeys = loaded.imageKeys, imageVersions = loaded.imageVersions, contentLoaded = true,
     ))
 }
 

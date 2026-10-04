@@ -86,6 +86,7 @@ internal data class CairnLinksUiState(
     val offlineLinks: List<SavedLink> = emptyList(),
     val downloadingLibrary: Boolean = false,
     val downloadStatus: String = "",
+    val localStorageText: String = "",
     val personalTagPendingCount: Int = 0,
     val personalTagQueued: Map<Int, Int> = emptyMap(),
     val busyIds: Set<Int> = emptySet(),
@@ -243,7 +244,56 @@ internal class CairnLinksViewModel(
         observeDeletionRecords()
         observePersonalTags()
         checkForUpdates()
+        viewModelScope.launch {
+            LibrarySync.updates.collect { account ->
+                if (account == curationAccountKey()) reloadLocalLibrary(account)
+            }
+        }
     }
+
+    private suspend fun reloadLocalLibrary(account: String) {
+        val generation = uiState.accountGeneration
+        val links = offlineReads.catalog(account)
+        val rows = offlineReads.snapshot(account)
+        val taxonomy = offlineReads.taxonomy(account)
+        val info = offlineReads.storageInfo(account)
+        val sync = offlineReads.syncState(account)
+        val error = offlineReads.syncError(account)
+        val size = (info.textBytes + localMedia.diskBytes(account)) / (1024.0 * 1024.0)
+        if (!isCurrentAccount(generation) || account != curationAccountKey()) return
+        val present = links.map { it.id }.toSet()
+        queryPages.clear()
+        verifiedDetails.retainAll(present)
+        uiState = uiState.copy(links = links.filterNot { it.id in deletedLinks },
+            offlineLinks = rows.map { it.link },
+            offlineReads = rows.associate { it.link.id to OfflineReadInfo(it.savedAt, it.pinned, true, it.tagLabels) },
+            taxonomy = taxonomy ?: uiState.taxonomy, v2Taxonomy = taxonomy ?: uiState.v2Taxonomy,
+            searchResults = uiState.searchResults.mapNotNull { old -> links.find { it.id == old.id } },
+            libraryResults = uiState.libraryResults.mapNotNull { old -> links.find { it.id == old.id } },
+            queueResults = uiState.queueResults.mapNotNull { old -> links.find { it.id == old.id } },
+            localStorageText = "%.1f MB · %d 条正文 · %d 张图片待下载".format(size, info.bodies, info.pendingImages) +
+                (if (sync.lastSuccess > 0) " · 更新于 " + java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(sync.lastSuccess)) else "") +
+                if (error.isNotBlank()) " · $error" else "")
+    }
+
+    fun resumeLibrarySync() {
+        if (!uiState.preferencesLoaded || currentApiToken().isBlank()) return
+        val account = curationAccountKey()
+        viewModelScope.launch {
+            if (offlineReads.syncState(account).cursor != null && account == curationAccountKey()) {
+                reloadLocalLibrary(account)
+                LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, currentApiToken(), uiState.preferences.automaticSync)
+            }
+        }
+    }
+
+    fun setAutomaticSync(value: Boolean) { viewModelScope.launch {
+        settingsStore.setAutomaticSync(value)
+        LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, currentApiToken(), value)
+    } }
+    fun setImagesWifiOnly(value: Boolean) { viewModelScope.launch { settingsStore.setImagesWifiOnly(value); resumeLibrarySync() } }
+    fun setStorageLimitMb(value: Long) { viewModelScope.launch { settingsStore.setStorageLimitMb(value); resumeLibrarySync() } }
+
 
     private fun observePersonalTags() {
         viewModelScope.launch {
@@ -334,6 +384,7 @@ internal class CairnLinksViewModel(
     private fun activateAccount(token: String) {
         if (activeAccountToken == token) return
         activeAccountToken?.let { previous ->
+            if (previous.isNotBlank()) LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, previous, false)
             val key = accountKeyFor(uiState.apiBaseUrl, previous)
             uiState.editDraft?.let { accountEditDrafts[key] = it.copy(saving = false) }
             if (uiState.manualAdd.visible) accountAddDrafts[key] = uiState.manualAdd.copy(submitting = false)
@@ -356,7 +407,7 @@ internal class CairnLinksViewModel(
         val key = accountKeyFor(uiState.apiBaseUrl, token)
         clearV2AccountState()
         uiState = uiState.copy(accountGeneration = uiState.accountGeneration + 1,
-            links = emptyList(), loading = false, downloadingLibrary = false, downloadStatus = "", taxonomy = null, taxonomyLoading = false,
+            links = emptyList(), loading = false, downloadingLibrary = false, downloadStatus = "", localStorageText = "", taxonomy = null, taxonomyLoading = false,
             statusText = "", searchQuery = "", searchResults = emptyList(), searchLoading = false,
             searchNextBeforeId = null, searchStatusText = "", bookmarkFilters = BookmarkFilters(),
             libraryResults = emptyList(), libraryLoading = false, libraryNextBeforeId = null, libraryStatusText = "",
@@ -637,6 +688,11 @@ internal class CairnLinksViewModel(
             statusText = if (hadLinks) "正在刷新链接..." else "正在同步云端链接...",
         )
         refreshJob = viewModelScope.launch {
+            if (offlineReads.syncState(accountKey).cursor != null) {
+                uiState = uiState.copy(loading = false)
+                downloadLibrary(useSync = true)
+                return@launch
+            }
             val collected = linkedMapOf<Int, SavedLink>()
             var published = uiState.links.associateBy { it.id }
             val edited = mutableMapOf<Int, SavedLink>()
@@ -647,6 +703,11 @@ internal class CairnLinksViewModel(
                 if (!isCurrentAccount(generation) || apiToken != currentApiToken()) return@launch
                 when (result) {
                     is LinkPageResult.Loaded -> {
+                        if (repository.supportsSync) {
+                            uiState = uiState.copy(loading = false)
+                            downloadLibrary(useSync = true)
+                            return@launch
+                        }
                         val current = uiState.links.associateBy { it.id }
                         for ((id, link) in current) if (published[id] != link) edited[id] = link
                         deleted += published.keys - current.keys
@@ -838,7 +899,9 @@ internal class CairnLinksViewModel(
     }
 
     /** Foreground snapshot fallback until the server exposes a transactional change feed. */
-    fun downloadLibrary() {
+    fun downloadLibrary() = downloadLibrary(useSync = repository.supportsSync)
+
+    private fun downloadLibrary(useSync: Boolean) {
         if (uiState.downloadingLibrary) return
         val token = currentApiToken()
         if (token.isBlank()) return
@@ -855,6 +918,15 @@ internal class CairnLinksViewModel(
             var failures = 0
             fun active() = run == downloadRun && isCurrentAccount(generation) && cacheGeneration == localCacheGeneration
             try {
+                if (useSync || offlineReads.syncState(account).cursor != null) {
+                    val supported = LibrarySync.run(curationActionStore.context, uiState.apiBaseUrl, token) { text ->
+                        if (active()) uiState = uiState.copy(downloadStatus = text)
+                    }
+                    if (supported) {
+                        if (active()) { reloadLocalLibrary(account); LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, token, uiState.preferences.automaticSync, immediate = false) }
+                        return@launch
+                    }
+                }
                 val summaries = linkedMapOf<Int, SavedLink>()
                 var before: Int? = null
                 do {
@@ -946,10 +1018,14 @@ internal class CairnLinksViewModel(
         val generation = uiState.accountGeneration
         viewModelScope.launch {
             try {
-                offlineReads.clear(account)
-                localMedia.clear(account)
-                BookmarkImageCache.clear(account)
-                if (isCurrentAccount(generation)) uiState = uiState.copy(loading = false, offlineReads = emptyMap(), offlineLinks = emptyList(), downloadStatus = "", message = nextMessage("已清除当前账号的离线阅读缓存。"))
+                settingsStore.setAutomaticSync(false)
+                LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, currentApiToken(), false)
+                LibrarySync.exclusive(account) {
+                    offlineReads.clear(account)
+                    localMedia.clear(account)
+                    BookmarkImageCache.clear(account)
+                }
+                if (isCurrentAccount(generation)) uiState = uiState.copy(loading = false, offlineReads = emptyMap(), offlineLinks = emptyList(), downloadStatus = "", localStorageText = "", message = nextMessage("已清除当前账号的本地资料，自动更新已暂停。"))
             } catch (_: java.io.IOException) { if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("缓存未能清除，请重试。")) }
         }
     }

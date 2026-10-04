@@ -9,11 +9,13 @@ import java.io.IOException
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 
 /** Files survive process death and are never part of the system's disposable cache. */
 internal class LocalMediaStore(context: Context) {
-    private val root = File(context.applicationContext.filesDir, "library-images")
+    private val app = context.applicationContext
+    private val root = File(app.filesDir, "library-images")
 
     suspend fun load(account: String, key: String, version: String, fetch: () -> ByteArray?): ByteArray? = withContext(Dispatchers.IO) {
         if (!VALID_KEY.matches(key) || version.isBlank()) return@withContext fetch()
@@ -30,15 +32,32 @@ internal class LocalMediaStore(context: Context) {
             }
         }
         val bytes = fetch() ?: return@withContext null
+        val limit = SharePreferencesStore(app).preferences.first().storageLimitMb * 1024 * 1024
+        val textBytes = OfflineReadStore(app).storageInfo(account).textBytes
         ensureActive()
         if (!validImage(bytes)) return@withContext null
         synchronized(LOCK) {
             if (epoch != (epochs[account] ?: 0L) || File(directory, ".deleted").exists() || BookmarkImageCache.isDeleted(account, key)) return@withContext null
+            if (android.os.StatFs(app.filesDir.path).availableBytes < bytes.size + 16L * 1024 * 1024 || diskBytes(account) + textBytes + bytes.size > limit)
+                throw IOException("本地空间不足或已达到存储上限，可在设置中调整。")
             val output = file.startWrite()
             try { output.write(bytes); file.finishWrite(output) }
             catch (error: IOException) { file.failWrite(output); throw error }
         }
         bytes
+    }
+
+    fun diskBytes(account: String): Long = synchronized(LOCK) { File(root, digest(account)).walkTopDown().filter { it.isFile }.sumOf { it.length() } }
+    suspend fun prune(account: String, keep: Map<Int, Set<Pair<String, String>>>) = withContext(Dispatchers.IO) {
+        synchronized(LOCK) {
+            val directory = File(root, digest(account))
+            for (link in directory.listFiles().orEmpty()) {
+                val wanted = keep[link.name.toIntOrNull()]
+                if (wanted == null) { link.deleteRecursively(); continue }
+                val names = wanted.map { digest("${it.first}|${it.second}") }.toSet()
+                for (file in link.listFiles().orEmpty()) if (file.name != ".deleted" && file.name !in names) file.delete()
+            }
+        }
     }
 
     suspend fun remove(account: String, id: Int) = withContext(Dispatchers.IO) {

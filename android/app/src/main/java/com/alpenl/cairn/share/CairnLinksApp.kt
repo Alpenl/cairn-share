@@ -276,6 +276,9 @@ internal fun CairnLinksApp(
                     onOpenAbout = { navController.navigate(Routes.About) },
                     onClearOffline = viewModel::clearOfflineReading,
                     onDownloadLibrary = viewModel::downloadLibrary,
+                    onAutomaticSync = viewModel::setAutomaticSync,
+                    onImagesWifiOnly = viewModel::setImagesWifiOnly,
+                    onStorageLimit = viewModel::setStorageLimitMb,
                     onCancelDownload = viewModel::cancelLibraryDownload,
                     onFlushPersonal = viewModel::flushPersonalTags,
                     onOpenOffline = { navController.navigate(Routes.Offline) },
@@ -946,7 +949,7 @@ private fun DetailScreen(
                         }
                     }
                     items(enrichment.imageKeys, key = { "image_$it" }, contentType = { "image" }) { key ->
-                        BookmarkImage(state.apiBaseUrl, state.preferences.apiToken, key, link.mediaVersion())
+                        BookmarkImage(state.apiBaseUrl, state.preferences.apiToken, key, enrichment.imageVersions[key] ?: link.mediaVersion(), enrichment.imageVersions[key])
                     }
                     if (enrichment.relatedLinks.isNotEmpty()) item(key = "links_title") { SectionLabel("相关链接") }
                     items(enrichment.relatedLinks, key = { "related_$it" }, contentType = { "related" }) { url ->

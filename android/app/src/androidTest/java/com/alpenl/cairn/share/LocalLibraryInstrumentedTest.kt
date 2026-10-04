@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import okhttp3.mockwebserver.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -45,6 +46,128 @@ class LocalLibraryInstrumentedTest {
             SQLiteDatabase.openOrCreateDatabase(getDatabasePath(name), factory)
         override fun openOrCreateDatabase(name: String, mode: Int, factory: SQLiteDatabase.CursorFactory?, errorHandler: DatabaseErrorHandler?): SQLiteDatabase =
             SQLiteDatabase.openOrCreateDatabase(getDatabasePath(name).path, factory, errorHandler)
+    }
+
+    @Test fun syncCursorContentAndMediaCommitTogetherRejectLateResponsesAndResumeReset() = runBlocking<Unit> {
+        val isolated = PrivateContext(context)
+        val store = OfflineReadStore(isolated)
+        val account = accountKeyFor("https://sync.invalid", "one")
+        val full = LinkJson.decodeLink(archive(28))
+        val taxonomy = BookmarkTaxonomy(listOf(TaxonomyTerm("llm", "语言模型", true)), emptyList(), emptyList())
+        val media = SyncMedia(28, imageKey, "etag-one", 12, true)
+        fun page(cursor: String, snapshot: Boolean, more: Boolean, items: List<SavedLink> = listOf(full), deleted: List<Int> = emptyList()) =
+            LibrarySyncPage(cursor, "epoch", snapshot, more, items, deleted, if(items.isEmpty()) emptyList() else listOf(media), taxonomy)
+        val empty = store.syncState(account)
+        assertTrue(store.applySyncPage(account, empty, page("baseline", true, true)))
+        assertEquals("baseline", OfflineReadStore(isolated).syncState(account).cursor)
+        assertEquals(listOf(media), OfflineReadStore(isolated).pendingMedia(account))
+        assertEquals(taxonomy, store.taxonomy(account))
+        assertFalse(store.applySyncPage(account, empty, page("late", true, true)))
+        val old = store.syncState(account)
+        store.saveCatalog(account, listOf(full.copy(note = "刚确认的编辑")))
+        assertFalse(store.applySyncPage(account, old, page("stale", false, false)))
+        assertEquals("刚确认的编辑", store.get(account, 28)!!.note)
+        assertTrue(store.applySyncPage(account, store.syncState(account), page("done", false, false)))
+        store.mediaSaved(account, media.copy(version = "wrong"))
+        assertEquals(1, store.pendingMedia(account).size)
+        store.mediaSaved(account, media)
+        assertTrue(store.pendingMedia(account).isEmpty())
+        val beforeDelete = store.syncState(account)
+        assertTrue(store.applySyncPage(account, beforeDelete, page("deleted", false, false, emptyList(), listOf(28))))
+        assertTrue(store.catalog(account).isEmpty())
+        assertFalse(store.applySyncPage(account, beforeDelete, page("late-delete", false, false)))
+        assertNull(store.saveDownloaded(account, full, null, emptyList()))
+        // Expired cursors retain the old catalog until baseline AND replay finish.
+        store.saveCatalog(account, listOf(full.copy(id = 29)))
+        store.resetSync(account)
+        assertTrue(store.applySyncPage(account, store.syncState(account), page("reset-start", true, true, emptyList())))
+        assertNotNull(store.get(account, 29))
+        assertTrue(store.applySyncPage(account, store.syncState(account), page("reset-done", false, false, emptyList())))
+        assertTrue(store.catalog(account).isEmpty())
+        assertTrue(store.pendingMedia(account).isEmpty())
+        assertNull(store.syncState(accountKeyFor("https://sync.invalid", "other")).cursor)
+    }
+
+    @Test fun quotaFailureKeepsCursorAndPreviouslyCommittedContent() = runBlocking<Unit> {
+        val isolated = PrivateContext(context)
+        val store = OfflineReadStore(isolated)
+        val account = accountKeyFor("https://quota.invalid", "one")
+        val full = LinkJson.decodeLink(archive(28))
+        store.save(account, full)
+        val before = store.syncState(account)
+        val accountDir = java.security.MessageDigest.getInstance("SHA-256").digest(account.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 255) }
+        val big = File(isolated.filesDir, "library-images/$accountDir/28/space-test").apply { parentFile!!.mkdirs() }
+        try {
+            java.io.RandomAccessFile(big, "rw").use { it.setLength(3L * 1024 * 1024 * 1024) }
+            try {
+                store.applySyncPage(account, before, LibrarySyncPage("blocked", "epoch", true, true, listOf(full.copy(id=29)), emptyList(), emptyList(), null))
+                fail("quota must stop the page")
+            } catch (_: java.io.IOException) { }
+            assertEquals(before, store.syncState(account))
+            assertEquals(listOf(28), store.catalog(account).map { it.id })
+        } finally { big.delete() }
+    }
+
+    @Test fun incrementalEngineResumesMediaReusesVersionsAndAppliesRemoteDeletes() = runBlocking<Unit> {
+        val isolated = PrivateContext(context)
+        val server = MockWebServer(); server.start()
+        val base = server.url("/").toString()
+        val token = "engine-${UUID.randomUUID()}"
+        val account = accountKeyFor(base, token)
+        val settings = SharePreferencesStore(isolated)
+        val original = settings.preferences.first()
+        settings.setApiToken(token); settings.setImagesWifiOnly(false); settings.setAutomaticSync(false)
+        val stage = AtomicInteger(0); val images = AtomicInteger(0)
+        val bytes = png()
+        val cursors = mutableListOf<String?>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.requestUrl!!.encodedPath.startsWith("/api/images/")) {
+                    images.incrementAndGet()
+                    if (stage.get() == 0) return MockResponse().setResponseCode(503)
+                    assertEquals("\"v${stage.get()}\"", request.getHeader("If-Match"))
+                    return MockResponse().setHeader("Content-Type", "image/png").setBody(okio.Buffer().write(bytes))
+                }
+                if (request.requestUrl!!.encodedPath != "/api/sync") return MockResponse().setResponseCode(404)
+                val cursor = request.requestUrl!!.queryParameter("cursor"); synchronized(cursors) { cursors.add(cursor) }
+                val initial = cursor == null
+                val deleted = stage.get() == 3
+                val version = "v${stage.get().coerceAtLeast(1)}"
+                val json = JSONObject().put("protocol_version", 1).put("epoch", "engine")
+                    .put("cursor", if(initial) "baseline" else "c${stage.get()}").put("mode", if(initial) "snapshot" else "changes")
+                    .put("has_more", initial).put("taxonomy", JSONObject.NULL)
+                    .put("items", JSONArray().apply { if(!deleted) put(archive(28, revision=stage.get()+1)) })
+                    .put("deleted", JSONArray().apply { if(deleted) put(28) })
+                    .put("media", JSONArray().apply { if(!deleted) put(JSONObject().put("link_id",28).put("key",imageKey)
+                        .put("version",version).put("bytes",bytes.size).put("available",true)) })
+                return MockResponse().setHeader("X-Cairn-Sync", "1").setHeader("Content-Type","application/json").setBody(json.toString())
+            }
+        }
+        try {
+            assertTrue(LibrarySync.run(isolated, base, token))
+            val store = OfflineReadStore(isolated)
+            assertEquals(1, store.catalog(account).size)
+            assertEquals(1, store.pendingMedia(account).size)
+            assertEquals("c0", store.syncState(account).cursor)
+            stage.set(1)
+            assertTrue(LibrarySync.run(isolated, base, token))
+            assertTrue(store.pendingMedia(account).isEmpty())
+            val requests = images.get()
+            assertTrue(LibrarySync.run(isolated, base, token))
+            assertEquals(requests, images.get()) // Unchanged media never redownloads.
+            stage.set(2)
+            assertTrue(LibrarySync.run(isolated, base, token))
+            assertEquals(requests + 1, images.get())
+            assertEquals("v2", store.get(account,28)!!.enrichment!!.imageVersions[imageKey])
+            stage.set(3)
+            assertTrue(LibrarySync.run(isolated, base, token))
+            assertTrue(store.catalog(account).isEmpty())
+            assertTrue(store.pendingMedia(account).isEmpty())
+            assertNull(LocalMediaStore(isolated).load(account,imageKey,"v2") { error("Deleted") })
+            assertEquals(listOf(null,"baseline","c0","c1","c1","c2"), synchronized(cursors) { cursors.toList() })
+        } finally {
+            server.shutdown(); settings.setApiToken(original.apiToken); settings.setImagesWifiOnly(original.imagesWifiOnly); settings.setAutomaticSync(original.automaticSync)
+        }
     }
 
     @Test fun jsonMigratesOnceIntoSqliteAndFullLibrarySurvivesRecreation() = runBlocking<Unit> {

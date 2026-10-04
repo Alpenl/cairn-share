@@ -67,7 +67,11 @@ internal fun SettingsScreen(
     onOpenOffline: () -> Unit,
     onDownloadLibrary: () -> Unit = {},
     onCancelDownload: () -> Unit = {},
+    onAutomaticSync: (Boolean) -> Unit = {},
+    onImagesWifiOnly: (Boolean) -> Unit = {},
+    onStorageLimit: (Long) -> Unit = {},
 ) {
+    var storageDialog by rememberSaveable { mutableStateOf(false) }
     var tokenDialogOpen by rememberSaveable { mutableStateOf(false) }
     var tokenDraft by rememberSaveable { mutableStateOf("") }
     var showToken by rememberSaveable { mutableStateOf(false) }
@@ -103,7 +107,7 @@ internal fun SettingsScreen(
             }, modifier = Modifier.testTag("settings_personal_sync"))
             SettingsDivider()
             SettingsRow(CairnIcons.Offline, "本地资料", "已保存 ${state.offlineReads.size} 条正文 · 点按离线阅读", onOpenOffline)
-            Text("正文与图片保存在本机，下载完成后可断网阅读。下载期间请保持 APP 打开。",
+            Text(state.localStorageText.ifBlank { "正文与图片保存在本机，可断网阅读。" },
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 32.dp, end = 4.dp))
             if (state.downloadStatus.isNotBlank()) Text(state.downloadStatus, style = MaterialTheme.typography.bodySmall,
@@ -113,6 +117,11 @@ internal fun SettingsScreen(
                 modifier = Modifier.padding(start = 20.dp).heightIn(min = 48.dp).testTag("download_library")) {
                 Text(if (state.downloadingLibrary) "暂停下载" else "下载 / 更新全部资料", style = MaterialTheme.typography.labelMedium)
             }
+            SettingsSwitchRow(Icons.Default.Refresh, "自动更新", "打开时更新，后台定期检查；联网后继续", state.preferences.automaticSync, onAutomaticSync,
+                Modifier.testTag("settings_auto_sync"))
+            SettingsSwitchRow(CairnIcons.Offline, "仅通过 Wi-Fi 保存图片", "文字资料可通过移动网络更新", state.preferences.imagesWifiOnly, onImagesWifiOnly,
+                Modifier.testTag("settings_wifi_images"))
+            SettingsRow(CairnIcons.Offline, "本地存储上限", "${state.preferences.storageLimitMb} MB · 达到上限后暂停下载", { storageDialog = true })
             TextButton(onClick = { confirmClearCache = true }, enabled = !state.downloadingLibrary,
                 modifier = Modifier.padding(start = 20.dp).heightIn(min = 48.dp).testTag("clear_offline_cache")) {
                 Text("清除当前账号的本地资料", style = MaterialTheme.typography.labelMedium)
@@ -140,10 +149,16 @@ internal fun SettingsScreen(
         }
         Spacer(Modifier.height(12.dp))
     }
+    if (storageDialog) AlertDialog(onDismissRequest = { storageDialog = false }, title = { Text("本地存储上限") },
+        text = { Column { listOf(256L, 512L, 1024L, 2048L).forEach { size ->
+            TextButton(onClick = { onStorageLimit(size); storageDialog = false }, modifier = Modifier.fillMaxWidth()) {
+                Text("$size MB" + if (size == state.preferences.storageLimitMb) " · 当前" else "")
+            }
+        } } }, confirmButton = { TextButton(onClick = { storageDialog = false }) { Text("取消") } })
     if (confirmClearCache) AlertDialog(
         onDismissRequest = { confirmClearCache = false },
         title = { Text("清除离线阅读缓存？") },
-        text = { Text("仅清除当前账号在本机保存的列表、正文、图片与固定记录，云端收藏和待同步修改会保留。") },
+        text = { Text("仅清除当前账号在本机保存的列表、正文、图片与固定记录，云端收藏和待同步修改会保留，自动更新将暂停。") },
         confirmButton = { TextButton(onClick = { confirmClearCache = false; onClearOffline() }) { Text("清除本机缓存") } },
         dismissButton = { TextButton(onClick = { confirmClearCache = false }) { Text("取消") } },
     )

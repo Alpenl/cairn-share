@@ -167,6 +167,10 @@ it("atomically deletes populated private tables, references, budgets and cached 
   const linked:string[]=[];
   for(const {name} of schema.results) {
     const fields=await env.DB.prepare(`PRAGMA table_info(${name})`).all<{name:string}>();
+    if(name === "library_sync_changes") {
+      expect(fields.results.map(f=>f.name)).toEqual(["seq","link_id","kind","created_at"]);
+      continue; // Numeric tombstones only; no URL, note, body, tag or credential.
+    }
     if(name!=="privacy_deletions" && fields.results.some(f=>f.name==="link_id")) linked.push(name);
   }
   expect(linked.sort()).toEqual([...tables].sort());

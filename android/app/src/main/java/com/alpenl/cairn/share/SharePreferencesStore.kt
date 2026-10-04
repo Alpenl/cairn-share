@@ -21,6 +21,9 @@ internal data class SharePreferences(
     val lastRoute: String = "library",
     val lastFilter: String = "all",
     val lastSearchQuery: String = "",
+    val automaticSync: Boolean = true,
+    val imagesWifiOnly: Boolean = true,
+    val storageLimitMb: Long = 1024,
 )
 
 internal class SharePreferencesStore(private val dataStore: DataStore<Preferences>) {
@@ -35,6 +38,9 @@ internal class SharePreferencesStore(private val dataStore: DataStore<Preference
             lastRoute = values[LastRouteKey] ?: "library",
             lastFilter = values[LastFilterKey] ?: "all",
             lastSearchQuery = values[LastSearchQueryKey].orEmpty(),
+            automaticSync = values[AutomaticSyncKey] ?: true,
+            imagesWifiOnly = values[ImagesWifiOnlyKey] ?: true,
+            storageLimitMb = values[StorageLimitMbKey] ?: 1024,
         )
     }
 
@@ -66,7 +72,14 @@ internal class SharePreferencesStore(private val dataStore: DataStore<Preference
         dataStore.edit { it[LastSearchQueryKey] = value }
     }
 
+    suspend fun setAutomaticSync(value: Boolean) { dataStore.edit { it[AutomaticSyncKey] = value } }
+    suspend fun setImagesWifiOnly(value: Boolean) { dataStore.edit { it[ImagesWifiOnlyKey] = value } }
+    suspend fun setStorageLimitMb(value: Long) { require(value in listOf(256L, 512L, 1024L, 2048L)); dataStore.edit { it[StorageLimitMbKey] = value } }
+
     private companion object {
+        val AutomaticSyncKey = booleanPreferencesKey("automatic_library_sync")
+        val ImagesWifiOnlyKey = booleanPreferencesKey("library_images_wifi_only")
+        val StorageLimitMbKey = longPreferencesKey("library_storage_limit_mb")
         val CloseAfterSaveKey = booleanPreferencesKey("close_after_save")
         val PreserveCompleteUrlKey = booleanPreferencesKey("preserve_complete_url")
         val ApiTokenKey = stringPreferencesKey("api_token")

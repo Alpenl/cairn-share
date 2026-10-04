@@ -83,7 +83,7 @@ class LauncherActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::viewModel.isInitialized) { viewModel.flushPersonalTags(); viewModel.flushV2Queue() }
+        if (::viewModel.isInitialized) { viewModel.flushPersonalTags(); viewModel.flushV2Queue(); viewModel.resumeLibrarySync() }
         val file = pendingInstallFile ?: return
         val update = pendingInstallUpdate ?: return
         if (canRequestPackageInstalls()) {
