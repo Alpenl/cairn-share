@@ -31,8 +31,11 @@ internal class LocalMediaStore(context: Context) {
                 file.delete()
             }
         }
+        val preferences = SharePreferencesStore(app).preferences.first()
+        val network = app.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        if (preferences.imagesWifiOnly && network.isActiveNetworkMetered) return@withContext null
         val bytes = fetch() ?: return@withContext null
-        val limit = SharePreferencesStore(app).preferences.first().storageLimitMb * 1024 * 1024
+        val limit = preferences.storageLimitMb * 1024 * 1024
         val textBytes = OfflineReadStore(app).storageInfo(account).textBytes
         ensureActive()
         if (!validImage(bytes)) return@withContext null

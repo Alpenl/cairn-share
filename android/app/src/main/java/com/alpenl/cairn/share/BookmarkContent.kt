@@ -274,7 +274,7 @@ internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String, 
         when {
             bitmap != null -> Image(bitmap!!.asImageBitmap(), contentDescription = "收藏图片", contentScale = ContentScale.FillWidth, modifier = Modifier.fillMaxWidth())
             loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
-            else -> TextButton(onClick = { retry++ }) { Text("图片加载失败，点击重试") }
+            else -> TextButton(onClick = { retry++ }) { Text("图片暂不可用，检查网络或下载设置后重试") }
         }
     }
 }

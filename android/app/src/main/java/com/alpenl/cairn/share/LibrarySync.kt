@@ -66,6 +66,7 @@ internal object LibrarySync {
             mediaStore.prune(account, links.associate { link -> link.id to link.enrichment?.imageVersions.orEmpty().toList().toSet() })
             val pending = store.pendingMedia(account)
             val api = LinksApiClient(base)
+            var savedImages = false
             for ((index, media) in pending.withIndex()) {
                 active()
                 val preferences = settings.preferences.first()
@@ -75,9 +76,10 @@ internal object LibrarySync {
                 // An If-Match response prevents new bytes from being filed under an old version.
                 val bytes = mediaStore.load(account, media.key, media.version) { api.image(media.key, token, media.version) }
                 active()
-                if (bytes != null) store.mediaSaved(account, media)
+                if (bytes != null) { store.mediaSaved(account, media); savedImages = true }
                 progress("资料已更新 · 正在保存图片 ${index + 1} / ${pending.size}")
             }
+            if (savedImages) BookmarkImageCache.clear(account)
             store.syncError(account, "")
             val info = store.storageInfo(account)
             progress("${info.records} 条收藏已更新 · ${info.savedImages} 张图片已保存" +
@@ -118,7 +120,8 @@ class LibrarySyncWorker(context: Context, parameters: WorkerParameters) : Corout
         } catch (error: CancellationException) { throw error }
         catch (error: IOException) {
             val account = accountKeyFor(base, prefs.apiToken)
-            OfflineReadStore(applicationContext).syncError(account, error.message ?: "更新暂未完成")
+            try { OfflineReadStore(applicationContext).syncError(account, error.message ?: "更新暂未完成") }
+            catch (_: IOException) { /* A full disk must still leave the persisted job retryable. */ }
             LibrarySync.updates.tryEmit(account)
             Result.retry()
         }
