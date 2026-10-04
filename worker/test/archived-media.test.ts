@@ -1,0 +1,45 @@
+import {applyD1Migrations,env,reset} from 'cloudflare:test';
+import {beforeEach,expect,it} from 'vitest';
+import worker from '../src/index';
+const bindings={...env,CAIRN_API_TOKEN:'app-test',CAIRN_ENRICHER_TOKEN:'internal-test'};
+const call=(path:string,method='GET',body?:unknown,extra:Record<string,string>={})=>worker.fetch(new Request('https://share.alpenl.com'+path,{method,headers:{Authorization:'Bearer app-test','Content-Type':'application/json',...extra},...(body===undefined?{}:{body:body instanceof Uint8Array?body:JSON.stringify(body)})}),bindings);
+beforeEach(async()=>{await reset();await applyD1Migrations(env.DB,env.TEST_MIGRATIONS);});
+it('persists actual media bytes, resumes idempotently, supports ranges and rejects deleted ownership',async()=>{
+ const saved:any=await (await call('/api/captures','POST',{url:'https://example.com/video',note:'',client_id:crypto.randomUUID(),capture:{title:'Movie',language:'en',text:'Article with a video.',images:[],media:[{kind:'video',title:'Movie',url:'https://cdn.example.com/movie.mp4'}]}})).json();
+ const list:any=await (await call(`/api/links/${saved.id}/media`)).json();expect(list.items).toHaveLength(1);const id=list.items[0].id;
+ const bytes=new TextEncoder().encode('0000ftypisom-sample-media-file');const digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');
+ const init={content_type:'video/mp4',size:bytes.length,digest};
+ expect((await call(`/api/media/uploads/${id}`,'POST',init)).status).toBe(200);
+ expect((await call(`/api/media/uploads/${id}/1`,'PUT',bytes)).status).toBe(200);
+ expect((await call(`/api/media/uploads/${id}/1`,'PUT',bytes)).status).toBe(200);
+ expect((await call(`/api/media/uploads/${id}/complete`,'POST',{})).status).toBe(200);
+ expect((await call(`/api/media/uploads/${id}/complete`,'POST',{})).status).toBe(200);
+ const file=await call(`/api/media/${id}`);expect(file.status).toBe(200);expect(new Uint8Array(await file.arrayBuffer())).toEqual(bytes);
+ const range=await call(`/api/media/${id}`,'GET',undefined,{Range:'bytes=4-7'});expect(range.status).toBe(206);expect(new TextDecoder().decode(await range.arrayBuffer())).toBe('ftyp');expect(range.headers.get('Content-Range')).toBe(`bytes 4-7/${bytes.length}`);
+ for(const bad of ['bytes=999-','bytes=9-4','bytes=-0','bytes=1-2,4-5'])expect((await call(`/api/media/${id}`,'GET',undefined,{Range:bad})).status).toBe(416);
+ const privateRead=await worker.fetch(new Request(`https://share.alpenl.com/api/media/${id}`),bindings);expect(privateRead.status).toBe(401);
+ await env.DB.prepare('DELETE FROM links WHERE id=?').bind(saved.id).run();
+ expect((await call(`/api/media/${id}`)).status).toBe(404);expect((await call(`/api/media/uploads/${id}`,'POST',init)).status).toBe(409);
+});
+
+it('restarts expired multipart sessions and rejects media from a replaced capture',async()=>{
+ const url='https://example.com/resume',client_id=crypto.randomUUID();
+ const body={url,note:'',client_id,capture:{title:'Resume',language:'en',text:'Original video.',images:[],media:[{kind:'video',title:'Movie',url:'https://cdn.example.com/video.mp4'}]}};
+ const saved:any=await (await call('/api/captures','POST',body)).json();
+ const list:any=await (await call(`/api/links/${saved.id}/media`)).json();const id=list.items[0].id;
+ const bytes=new Uint8Array(8*1024*1024+37).fill(7);
+ const digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');
+ const init={content_type:'video/mp4',size:bytes.length,digest};
+ expect((await call(`/api/media/uploads/${id}`,'POST',init)).status).toBe(200);
+ expect((await call(`/api/media/uploads/${id}/1`,'PUT',bytes.slice(0,8*1024*1024))).status).toBe(200);
+ const resumed:any=await (await call(`/api/media/uploads/${id}`,'POST',init)).json();expect(resumed.parts).toHaveLength(1);
+ await env.DB.prepare("UPDATE archived_media SET upload_started_at='2000-01-01' WHERE id=?").bind(id).run();
+ const reset:any=await (await call(`/api/media/uploads/${id}`,'POST',init)).json();expect(reset.parts).toHaveLength(0);
+ expect((await call(`/api/media/uploads/${id}/1`,'PUT',bytes.slice(0,8*1024*1024))).status).toBe(200);
+ expect((await call(`/api/media/uploads/${id}/2`,'PUT',bytes.slice(8*1024*1024))).status).toBe(200);
+ expect((await call(`/api/media/uploads/${id}/complete`,'POST',{})).status).toBe(200);
+ const returned=await (await call(`/api/media/${id}`)).arrayBuffer();expect(returned.byteLength).toBe(bytes.length);
+ expect([...new Uint8Array(await crypto.subtle.digest('SHA-256',returned))].map(b=>b.toString(16).padStart(2,'0')).join('')).toBe(digest);
+ expect((await call('/api/captures','POST',{...body,client_id:crypto.randomUUID(),capture:{...body.capture,text:'New capture.'}})).status).toBe(201);
+ expect((await call(`/api/media/${id}`)).status).toBe(404);expect((await call(`/api/media/uploads/${id}`,'POST',init)).status).toBe(409);
+},30000);

@@ -99,6 +99,45 @@ class AccountCacheInstrumentedTest {
         return json(JSONObject().put("revision", revision).put("selection", value(topic)).put("automatic", value(automatic)))
     }
 
+    @Test fun backgroundCommitRejectsLateDetailBeforeUiNotification() = runBlocking<Unit> { lateDetailAfterBackgroundCommit(false) }
+
+    @Test fun backgroundDeleteCannotBeResurrectedByLateDetail() = runBlocking<Unit> { lateDetailAfterBackgroundCommit(true) }
+
+    @Test fun staleNotFoundCannotDeleteBackgroundUpdate() = runBlocking<Unit> { lateDetailAfterBackgroundCommit(false, true) }
+
+    private suspend fun lateDetailAfterBackgroundCommit(deleted: Boolean, notFound: Boolean = false) {
+        val reading = CountDownLatch(1)
+        fun versioned(note: String, revision: Int, loaded: Boolean): JSONObject = link(1, note, loaded).apply {
+            getJSONObject("enrichment").put("cache_identity", JSONObject()
+                .put("schema_version", 1).put("representation", if(loaded) "enrichment_detail" else "enrichment_summary")
+                .put("content_revision", revision).put("personal_revision", 0).put("body_revision", revision)
+                .put("latest_decision_id", 0).put("latest_entity_revision", 0))
+        }
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when(request.requestUrl!!.encodedPath) {
+                "/api/links" -> json(JSONObject().put("items", JSONArray().put(versioned("old", 1, false))).put("next_before_id", JSONObject.NULL))
+                "/api/links/1" -> { reading.countDown(); release.await(10, TimeUnit.SECONDS); if (notFound) MockResponse().setResponseCode(404) else json(versioned("old", 1, true)) }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val model = start()
+        awaitState(model) { !it.loading && it.links.size == 1 }
+        withContext(Dispatchers.Main) { model.ensureLink(1, force = true) }
+        assertTrue(reading.await(10, TimeUnit.SECONDS))
+        val db = OfflineReadStore(context)
+        val account = accountKeyFor(base, tokenA)
+        val updated = LinkJson.decodeLink(versioned("new from sync", 2, true))
+        assertTrue(db.applySyncPage(account, db.syncState(account), LibrarySyncPage("committed", "test", true, true,
+            if (deleted) emptyList() else listOf(updated), if (deleted) listOf(1) else emptyList(), emptyList(), null)))
+        // No UI notification yet: a database CAS must still reject the old request.
+        release.countDown()
+        awaitState(model) {
+            if (deleted) it.links.isEmpty() && it.detailLoads[1] == DetailLoadState.NotFound
+            else it.links.singleOrNull()?.note == "new from sync" && it.detailLoads[1] != DetailLoadState.Loading
+        }
+        assertEquals(if (deleted) null else updated, db.get(account, 1))
+    }
+
     @Test fun blankKeywordLibraryLoadsServerMembershipBeyondLocalProjection() = runBlocking<Unit> {
         settings.setLastFilter("all")
         val filteredRequest = CountDownLatch(1)

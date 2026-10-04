@@ -76,6 +76,12 @@ automatic AS (
 SELECT field,term FROM effective`;
 
 const dimensions = ["topics", "content_functions", "carriers", "affordances", "resource_kinds"] as const;
+export const entityStateSQL = `COALESCE((SELECT CASE WHEN e.state<>'not_run' AND
+      (e.content_revision<>links.content_revision OR NOT EXISTS (
+        SELECT 1 FROM evidence_snapshots s WHERE s.id=e.evidence_snapshot_id AND s.link_id=e.link_id
+          AND s.content_revision=e.content_revision AND s.content_hash=e.content_hash))
+      THEN 'stale' ELSE e.state END FROM entity_states e WHERE e.link_id=links.id),'not_run')`;
+
 export const SELECTION_FILTER_KEYS = ["filter_contract_version", "topic", "form", "use", ...dimensions, "entity_state", "custom_tags", "topics_mode", "resource_mode", "custom_mode", "functions_mode", "resource_kind", "custom_tag", "topic_mode", "topic_refinements"];
 
 export function selectionFilters(params: URLSearchParams): { clauses: string[]; bindings: string[] } | null {
@@ -139,11 +145,7 @@ export function selectionFilters(params: URLSearchParams): { clauses: string[]; 
     const entries = params.getAll("entity_state");
     const states = entries[0].split(',');
     if (entries.length !== 1 || states.length > 5 || states.some(state => !["not_run","failed","completed_empty","completed_nonempty","stale"].includes(state))) return null;
-    clauses.push(`COALESCE((SELECT CASE WHEN e.state<>'not_run' AND
-      (e.content_revision<>links.content_revision OR NOT EXISTS (
-        SELECT 1 FROM evidence_snapshots s WHERE s.id=e.evidence_snapshot_id AND s.link_id=e.link_id
-          AND s.content_revision=e.content_revision AND s.content_hash=e.content_hash))
-      THEN 'stale' ELSE e.state END FROM entity_states e WHERE e.link_id=links.id),'not_run')
+    clauses.push(`${entityStateSQL}
       IN (SELECT value FROM json_each(?))`);
     bindings.push(JSON.stringify([...new Set(states)]));
   }

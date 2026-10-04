@@ -102,7 +102,7 @@ class V2CurationInstrumentedTest {
                 val path = request.requestUrl!!.encodedPath
                 return when {
                     path == "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
-                    path == "/api/bookmarks/4" -> response(link(4))
+                    path == "/api/links/4" || path == "/api/bookmarks/4" -> response(link(4))
                     path == "/api/bookmarks/4/v2-selection" -> response(selection(3))
                     path == "/api/v2-taxonomy" -> response(taxonomy())
                     path == "/api/bookmarks/4/v2-override" -> {
@@ -139,7 +139,7 @@ class V2CurationInstrumentedTest {
                 paths.add("${request.method} $path")
                 return when (path) {
                     "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
-                    "/api/bookmarks/4" -> response(link(4))
+                    "/api/links/4", "/api/bookmarks/4" -> response(link(4))
                     "/api/bookmarks/4/v2-selection" -> {
                         assertEquals("1", request.requestUrl!!.queryParameter("include_state"))
                         response(fixture)
@@ -197,7 +197,7 @@ class V2CurationInstrumentedTest {
                 paths.add("${request.method} $path")
                 return when (path) {
                     "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
-                    "/api/bookmarks/4" -> response(link(4))
+                    "/api/links/4", "/api/bookmarks/4" -> response(link(4))
                     "/api/bookmarks/4/v2-selection" -> response(fixture)
                     "/api/v2-taxonomy" -> response(taxonomy())
                     else -> MockResponse().setResponseCode(404)
@@ -244,7 +244,7 @@ class V2CurationInstrumentedTest {
                 val path = request.requestUrl!!.encodedPath
                 return when {
                     path == "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
-                    path == "/api/bookmarks/4" -> response(link(4))
+                    path == "/api/links/4" || path == "/api/bookmarks/4" -> response(link(4))
                     path == "/api/bookmarks/4/v2-selection" -> response(selection(if (attempts.get() == 0) 3 else 9))
                     path == "/api/v2-taxonomy" -> response(taxonomy())
                     path == "/api/bookmarks/4/v2-override" -> {
@@ -296,7 +296,7 @@ class V2CurationInstrumentedTest {
                     lastLibraryToken.set(request.getHeader("Authorization"))
                     response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
                 }
-                "/api/bookmarks/4" -> response(link(4))
+                "/api/links/4", "/api/bookmarks/4" -> response(link(4))
                 "/api/bookmarks/4/v2-selection" -> response(selection(3))
                 "/api/v2-taxonomy" -> response(taxonomy())
                 "/api/bookmarks/4/v2-override" -> {
@@ -363,7 +363,7 @@ class V2CurationInstrumentedTest {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
                 "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
-                "/api/bookmarks/4" -> response(link(4))
+                "/api/links/4", "/api/bookmarks/4" -> response(link(4))
                 "/api/bookmarks/4/v2-selection" -> response(selection(3)) // Old contract: no automatic baseline.
                 "/api/v2-taxonomy" -> response(taxonomy())
                 "/api/bookmarks/4/v2-override" -> {

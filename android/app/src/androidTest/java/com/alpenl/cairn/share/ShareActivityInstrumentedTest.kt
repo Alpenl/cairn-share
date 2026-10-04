@@ -71,6 +71,14 @@ class ShareActivityInstrumentedTest {
 
             compose.onNodeWithTag("note").performTextInput("later")
             waitForSaveEnabled()
+            compose.onNodeWithTag("note_count").performScrollTo().assertIsDisplayed().assertTextContains("5 / 2000")
+            compose.onNodeWithTag("save").assertIsDisplayed()
+            if (InstrumentationRegistry.getArguments().getString("screenshots") == "true") {
+                val screenshot = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+                val file = java.io.File(targetContext().getExternalFilesDir(null), "share-local-library.png")
+                file.outputStream().use { screenshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                screenshot.recycle()
+            }
             compose.onNodeWithTag("save").performClick()
 
             val request = takeRequest()

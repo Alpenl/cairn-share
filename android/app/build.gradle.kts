@@ -15,7 +15,7 @@ fun versionCodeFrom(versionName: String): Int {
 }
 
 val releaseVersionName = providers.gradleProperty("cairnShareVersionName")
-    .orElse("0.7.1")
+    .orElse("0.8.0")
     .get()
 val releaseVersionCode = providers.gradleProperty("cairnShareVersionCode")
     .map(String::toInt)
@@ -85,6 +85,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.androidx.work.runtime)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)

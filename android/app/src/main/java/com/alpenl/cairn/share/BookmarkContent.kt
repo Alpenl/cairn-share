@@ -76,7 +76,7 @@ internal fun LinkEnrichment.statusLabel(): String = when (status) {
     "processing" -> "正在整理内容"
     "failed" -> "读取失败，稍后重试"
     "exhausted" -> "暂时无法读取内容"
-    "unsupported" -> "尚未归档正文"
+    "unsupported" -> if (originalText.isNotBlank()) "正文已归档" else "尚未归档正文"
     else -> "等待整理内容"
 }
 
@@ -213,7 +213,7 @@ internal fun TermSelector(label: String, value: String, terms: List<TaxonomyTerm
 
 // Only account fingerprints are retained; raw credentials are never cache keys.
 internal object BookmarkImageCache {
-    private data class Key(val account: String, val image: String)
+    private data class Key(val account: String, val image: String, val version: String)
     private val cache = object : LruCache<Key, Bitmap>(12 * 1024 * 1024) {
         override fun sizeOf(key: Key, value: Bitmap): Int = value.allocationByteCount
     }
@@ -225,12 +225,16 @@ internal object BookmarkImageCache {
         if (it.size == 3 && it[0] == "enrichment") it[1].toIntOrNull() else null
     }
     @Synchronized fun isDeleted(account: String, key: String): Boolean = account to linkId(key) in deleted
-    @Synchronized fun get(account: String, key: String): Bitmap? =
-        if (isDeleted(account, key)) null else cache.get(Key(account, key))
-    @Synchronized fun put(account: String, key: String, bitmap: Bitmap): Bitmap? {
-        if (isDeleted(account, key)) return null
-        cache.put(Key(account, key), bitmap)
+    @Synchronized fun get(account: String, key: String, version: String = ""): Bitmap? =
+        if (isDeleted(account, key)) null else cache.get(Key(account, key, version))
+    @Synchronized fun put(account: String, key: String, bitmap: Bitmap, version: String = "", expectedRevision: Long? = null): Bitmap? {
+        if (isDeleted(account, key) || (expectedRevision != null && expectedRevision != revision)) return null
+        cache.put(Key(account, key, version), bitmap)
         return bitmap
+    }
+    @Synchronized fun clear(account: String) {
+        for (key in cache.snapshot().keys) if (key.account == account) cache.remove(key)
+        revision += 1
     }
     @Synchronized fun forget(account: String, id: Int) {
         if (!deleted.add(account to id)) return
@@ -240,18 +244,21 @@ internal object BookmarkImageCache {
 }
 
 @Composable
-internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String) {
+internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String, version: String = "", expectedVersion: String? = null) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val media = remember(context) { LocalMediaStore(context) }
     val account = accountKeyFor(baseUrl, apiToken)
-    val cacheKey = "$account|$imageKey"
+    val cacheKey = "$account|$imageKey|$version"
     val cacheRevision = BookmarkImageCache.revision
     if (BookmarkImageCache.isDeleted(account, imageKey)) return
     var retry by remember(imageKey) { mutableStateOf(0) }
     var loading by remember(cacheKey) { mutableStateOf(true) }
-    var bitmap by remember(cacheKey, cacheRevision) { mutableStateOf(BookmarkImageCache.get(account, imageKey)) }
+    var bitmap by remember(cacheKey, cacheRevision) { mutableStateOf(BookmarkImageCache.get(account, imageKey, version)) }
     LaunchedEffect(cacheKey, cacheRevision, retry) {
         loading = true
-        bitmap = BookmarkImageCache.get(account, imageKey) ?: withContext(Dispatchers.IO) {
-            val bytes = LinksApiClient(baseUrl).image(imageKey, apiToken) ?: return@withContext null
+        bitmap = BookmarkImageCache.get(account, imageKey, version) ?: withContext(Dispatchers.IO) {
+            val bytes = try { media.load(account, imageKey, version) { LinksApiClient(baseUrl).image(imageKey, apiToken, expectedVersion) } }
+                catch (_: java.io.IOException) { null } ?: return@withContext null
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@withContext null
@@ -259,7 +266,7 @@ internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String) 
             while (maxOf(bounds.outWidth, bounds.outHeight) / options.inSampleSize.coerceAtLeast(1) > 2048) {
                 options.inSampleSize = options.inSampleSize.coerceAtLeast(1) * 2
             }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.let { BookmarkImageCache.put(account, imageKey, it) }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.let { BookmarkImageCache.put(account, imageKey, it, version, cacheRevision) }
         }
         loading = false
     }
@@ -267,7 +274,7 @@ internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String) 
         when {
             bitmap != null -> Image(bitmap!!.asImageBitmap(), contentDescription = "收藏图片", contentScale = ContentScale.FillWidth, modifier = Modifier.fillMaxWidth())
             loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
-            else -> TextButton(onClick = { retry++ }) { Text("图片加载失败，点击重试") }
+            else -> TextButton(onClick = { retry++ }) { Text("图片暂不可用，检查网络或下载设置后重试") }
         }
     }
 }

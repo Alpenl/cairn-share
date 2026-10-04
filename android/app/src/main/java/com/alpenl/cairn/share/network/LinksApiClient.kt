@@ -82,6 +82,20 @@ internal class LinksApiClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
+    @Volatile var supportsSync: Boolean = false
+        private set
+    fun formatBody(id: Int, apiToken: String): Boolean {
+        val connection = URL("${baseUrl.trimEnd('/')}/api/links/$id/presentation").openConnection() as HttpURLConnection
+        return try {
+            configure(connection, apiToken)
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.outputStream.use { it.write("{\"force\":true}".toByteArray()) }
+            connection.responseCode in 200..299
+        } catch (_: IOException) { false } finally { connection.disconnect() }
+    }
+
     fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null, filters: BookmarkFilters = BookmarkFilters(), filterTime: Instant = Instant.now(), cancellation: ReadCancellation? = null): LinkPageResult {
         val endpoint = URL(listUrl(filter, query, beforeId, filters, filterTime))
         val connection = endpoint.openConnection() as HttpURLConnection
@@ -92,6 +106,7 @@ internal class LinksApiClient(
 
             val status = connection.responseCode
             val body = responseBody(connection)
+            if (status == 200) supportsSync = connection.getHeaderField("X-Cairn-Sync") == "1"
             when (status) {
                 HttpURLConnection.HTTP_OK -> if ((filters.needsEffectiveFilterContract() && JSONObject(body).opt("filter_contract_version") != 1) ||
                     (filters.needsTagFilterContract() && connection.getHeaderField("X-Cairn-Tag-System") != "1") ||
@@ -329,12 +344,14 @@ internal class LinksApiClient(
         }
     }
 
-    fun image(key: String, apiToken: String): ByteArray? {
+    fun image(key: String, apiToken: String, version: String? = null): ByteArray? {
         if (!Regex("enrichment/[1-9][0-9]*/[0-9a-f]{64}\\.(jpg|png|webp|gif|avif)").matches(key)) return null
         val connection = URL("${baseUrl.trimEnd('/')}/api/images/$key").openConnection() as HttpURLConnection
         return try {
             configure(connection, apiToken)
             connection.setRequestProperty("Accept", "image/*")
+            version?.let { connection.setRequestProperty("If-Match", "\"$it\"") }
+            connection.setRequestProperty("X-Cairn-Image-Privacy", "1")
             if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
             if (connection.contentType?.substringBefore(';') !in setOf("image/jpeg", "image/png", "image/webp", "image/gif", "image/avif")) return null
             val limit = 15 * 1024 * 1024

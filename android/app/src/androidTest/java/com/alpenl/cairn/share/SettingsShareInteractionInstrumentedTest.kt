@@ -70,9 +70,15 @@ class SettingsShareInteractionInstrumentedTest {
                 },
                 onPreserveCompleteUrlChange = {}, onApiTokenChange = {}, onOpenUploads = {}, onOpenConsole = {},
                 onOpenUpdate = {}, onOpenAbout = {}, onClearOffline = {},
-                onFlushPersonal = { retries.incrementAndGet() }, onOpenOffline = {})
+                onFlushPersonal = { retries.incrementAndGet() }, onOpenOffline = {},
+                onAutomaticSync = { enabled -> state.value = state.value.copy(preferences = state.value.preferences.copy(automaticSync = enabled)) },
+                onImagesWifiOnly = { enabled -> state.value = state.value.copy(preferences = state.value.preferences.copy(imagesWifiOnly = enabled)) })
         }.use {
-            compose.onAllNodes(isToggleable(), useUnmergedTree = true).assertCountEquals(2)
+            compose.onAllNodes(isToggleable(), useUnmergedTree = true).assertCountEquals(4)
+            compose.onNodeWithTag("settings_auto_sync").performScrollTo().assertIsOn().performClick()
+            compose.onNodeWithTag("settings_auto_sync").assertIsOff()
+            compose.onNodeWithTag("settings_wifi_images").performScrollTo().assertIsOn().performClick()
+            compose.onNodeWithTag("settings_wifi_images").assertIsOff()
             compose.onNodeWithTag("settings_close_after_save").performScrollTo().assertIsOn().performClick()
             compose.onNodeWithTag("settings_close_after_save").assertIsOff()
             assertEquals(1, changes.get())

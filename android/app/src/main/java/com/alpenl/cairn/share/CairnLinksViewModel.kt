@@ -23,6 +23,7 @@ import com.alpenl.cairn.share.network.QueuedCurationAction
 import com.alpenl.cairn.share.network.TaxonomyResult
 import com.alpenl.cairn.share.network.V2CurationRepository
 import com.alpenl.cairn.share.network.V2Result
+import com.alpenl.cairn.share.network.withMediaVersionsFrom
 import com.alpenl.cairn.share.network.retainLoadedContent
 import com.alpenl.cairn.share.network.LinkMutationResult
 import com.alpenl.cairn.share.network.LinkPageResult
@@ -84,6 +85,9 @@ internal data class CairnLinksUiState(
     val queueAvailable: Boolean? = null,
     val offlineReads: Map<Int, OfflineReadInfo> = emptyMap(),
     val offlineLinks: List<SavedLink> = emptyList(),
+    val downloadingLibrary: Boolean = false,
+    val downloadStatus: String = "",
+    val localStorageText: String = "",
     val personalTagPendingCount: Int = 0,
     val personalTagQueued: Map<Int, Int> = emptyMap(),
     val busyIds: Set<Int> = emptySet(),
@@ -206,6 +210,10 @@ internal class CairnLinksViewModel(
     private val queryPages = QueryPageCache()
     private val personalTags = PersonalTagOutbox(curationActionStore.context.applicationContext)
     private val offlineReads = OfflineReadStore(curationActionStore.context.applicationContext)
+    private val localMedia = LocalMediaStore(curationActionStore.context.applicationContext)
+    private var downloadJob: Job? = null
+    private var downloadRun = 0L
+    private var localCacheGeneration = 0L
     private var personalTagJob: Job? = null
     private var personalTagRetryRequested = false
     private val verifiedDetails = mutableSetOf<Int>()
@@ -227,6 +235,7 @@ internal class CairnLinksViewModel(
     // The serial curation action queue. A pending action is only removed after
     // the server confirms it (R2-04/R2-05).
     private var v2Pumping = false
+    private var v2PumpRequested = false
     private var deletedLinks = emptySet<Int>()
     private var pendingDeletions = emptySet<Int>()
 
@@ -237,7 +246,59 @@ internal class CairnLinksViewModel(
         observeDeletionRecords()
         observePersonalTags()
         checkForUpdates()
+        viewModelScope.launch {
+            LibrarySync.updates.collect { account ->
+                if (account == curationAccountKey()) reloadLocalLibrary(account, verified = true)
+            }
+        }
     }
+
+    private suspend fun reloadLocalLibrary(account: String, verified: Boolean = false) {
+        val generation = uiState.accountGeneration
+        val links = offlineReads.catalog(account)
+        val rows = offlineReads.snapshot(account)
+        val taxonomy = offlineReads.taxonomy(account)
+        val info = offlineReads.storageInfo(account)
+        val sync = offlineReads.syncState(account)
+        val removed = offlineReads.deletedIds(account).toSet()
+        val error = offlineReads.syncError(account)
+        val size = (info.textBytes + localMedia.diskBytes(account)) / (1024.0 * 1024.0)
+        if (!isCurrentAccount(generation) || account != curationAccountKey()) return
+        val present = links.map { it.id }.toSet()
+        queryPages.clear()
+        verifiedDetails.retainAll(present)
+        if (verified) verifiedDetails += links.filter { it.enrichment?.contentLoaded == true }.map { it.id }
+        uiState = uiState.copy(links = links.filterNot { it.id in deletedLinks },
+            detailLoads = uiState.detailLoads + removed.associateWith { DetailLoadState.NotFound },
+            offlineLinks = rows.map { it.link },
+            offlineReads = rows.associate { it.link.id to OfflineReadInfo(it.savedAt, it.pinned, true, it.tagLabels) },
+            taxonomy = taxonomy ?: uiState.taxonomy, v2Taxonomy = taxonomy ?: uiState.v2Taxonomy,
+            searchResults = uiState.searchResults.mapNotNull { old -> links.find { it.id == old.id } },
+            libraryResults = uiState.libraryResults.mapNotNull { old -> links.find { it.id == old.id } },
+            queueResults = uiState.queueResults.mapNotNull { old -> links.find { it.id == old.id } },
+            localStorageText = "%.1f MB · %d 条正文 · %d 张图片待下载".format(size, info.bodies, info.pendingImages) +
+                (if (sync.lastSuccess > 0) " · 更新于 " + java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(sync.lastSuccess)) else "") +
+                if (error.isNotBlank()) " · $error" else "")
+    }
+
+    fun resumeLibrarySync() {
+        if (!uiState.preferencesLoaded || currentApiToken().isBlank()) return
+        val account = curationAccountKey()
+        viewModelScope.launch {
+            if (offlineReads.syncState(account).cursor != null && account == curationAccountKey()) {
+                reloadLocalLibrary(account)
+                LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, currentApiToken(), uiState.preferences.automaticSync)
+            }
+        }
+    }
+
+    fun setAutomaticSync(value: Boolean) { viewModelScope.launch {
+        settingsStore.setAutomaticSync(value)
+        LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, currentApiToken(), value)
+    } }
+    fun setImagesWifiOnly(value: Boolean) { viewModelScope.launch { settingsStore.setImagesWifiOnly(value); resumeLibrarySync() } }
+    fun setStorageLimitMb(value: Long) { viewModelScope.launch { settingsStore.setStorageLimitMb(value); resumeLibrarySync() } }
+
 
     private fun observePersonalTags() {
         viewModelScope.launch {
@@ -328,6 +389,7 @@ internal class CairnLinksViewModel(
     private fun activateAccount(token: String) {
         if (activeAccountToken == token) return
         activeAccountToken?.let { previous ->
+            if (previous.isNotBlank()) LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, previous, false)
             val key = accountKeyFor(uiState.apiBaseUrl, previous)
             uiState.editDraft?.let { accountEditDrafts[key] = it.copy(saving = false) }
             if (uiState.manualAdd.visible) accountAddDrafts[key] = uiState.manualAdd.copy(submitting = false)
@@ -338,6 +400,8 @@ internal class CairnLinksViewModel(
         searchGeneration += 1
         libraryGeneration += 1
         refreshJob?.cancel()
+        cancelLibraryDownload()
+        localCacheGeneration += 1
         searchJob?.cancel()
         libraryJob?.cancel()
         queueJob?.cancel()
@@ -348,7 +412,7 @@ internal class CairnLinksViewModel(
         val key = accountKeyFor(uiState.apiBaseUrl, token)
         clearV2AccountState()
         uiState = uiState.copy(accountGeneration = uiState.accountGeneration + 1,
-            links = emptyList(), loading = false, taxonomy = null, taxonomyLoading = false,
+            links = emptyList(), loading = false, downloadingLibrary = false, downloadStatus = "", localStorageText = "", taxonomy = null, taxonomyLoading = false,
             statusText = "", searchQuery = "", searchResults = emptyList(), searchLoading = false,
             searchNextBeforeId = null, searchStatusText = "", bookmarkFilters = BookmarkFilters(),
             libraryResults = emptyList(), libraryLoading = false, libraryNextBeforeId = null, libraryStatusText = "",
@@ -380,6 +444,7 @@ internal class CairnLinksViewModel(
             when (result) {
                 is V2Result.Loaded -> {
                     if (result.value.revision < (uiState.v2Selections[id]?.revision ?: 0)) return@launch
+                    val draftBeforeRead = uiState.v2Drafts[id]
                     val pending = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
                     if (id in deletedLinks || account != curationAccountKey() || !isCurrentAccount(generation) || selectionRequests[id] != request) return@launch
                     val draft = pending.fold(result.value) { current, action ->
@@ -387,7 +452,8 @@ internal class CairnLinksViewModel(
                     }
                     uiState = uiState.copy(
                         v2Selections = uiState.v2Selections + (id to result.value),
-                        v2Drafts = if (pending.isEmpty()) uiState.v2Drafts - id else uiState.v2Drafts + (id to draft),
+                        // Enqueue is asynchronous. An empty durable snapshot cannot discard an in-memory edit.
+                        v2Drafts = if (pending.isEmpty() || uiState.v2Drafts[id] != draftBeforeRead) uiState.v2Drafts else uiState.v2Drafts + (id to draft),
                         v2SelectionAvailable = true,
                     )
                 }
@@ -413,7 +479,11 @@ internal class CairnLinksViewModel(
             val result = v2Repository.loadTaxonomyCancellable(token)
             if (account != curationAccountKey() || !isCurrentAccount(generation)) return@launch
             when (result) {
-                is V2Result.Loaded -> uiState = uiState.copy(v2TaxonomyLoading = false, v2Taxonomy = result.value, v2TaxonomyAvailable = true)
+                is V2Result.Loaded -> {
+                    uiState = uiState.copy(v2TaxonomyLoading = false, v2Taxonomy = result.value, v2TaxonomyAvailable = true)
+                    try { offlineReads.saveTaxonomy(account, result.value) }
+                    catch (_: java.io.IOException) { if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("分类已更新，本地保存失败。")) }
+                }
                 V2Result.Unsupported -> uiState = uiState.copy(v2TaxonomyLoading = false, v2TaxonomyAvailable = false)
                 else -> uiState = uiState.copy(v2TaxonomyLoading = false)
             }
@@ -431,6 +501,7 @@ internal class CairnLinksViewModel(
         val queued = QueuedCurationAction(id, UUID.randomUUID().toString(), field, term, action, selection.revision, account,
             expectedDecisionId = selection.decisionId, expectedContentRevision = selection.contentRevision,
             legacyEndpoint = !selection.tagSystem)
+        selectionRequests[id] = (selectionRequests[id] ?: 0) + 1
         uiState = uiState.copy(v2Drafts = uiState.v2Drafts + (id to draft), v2Busy = uiState.v2Busy + id)
         viewModelScope.launch {
             try {
@@ -444,7 +515,8 @@ internal class CairnLinksViewModel(
     }
 
     private fun pumpV2Actions() {
-        if (v2Pumping) return
+        if (v2Pumping) { v2PumpRequested = true; return }
+        v2PumpRequested = false
         val token = uiState.preferences.apiToken
         if (token.isBlank()) return
         val account = curationAccountKey()
@@ -492,7 +564,7 @@ internal class CairnLinksViewModel(
             } finally {
                 v2Pumping = false
                 if (account == curationAccountKey() && isCurrentAccount(generation)) uiState = uiState.copy(v2Busy = emptySet())
-                else pumpV2Actions()
+                if (v2PumpRequested || account != curationAccountKey() || !isCurrentAccount(generation)) pumpV2Actions()
             }
         }
     }
@@ -593,6 +665,9 @@ internal class CairnLinksViewModel(
     }
 
     fun refreshLinks() {
+        if (uiState.downloadingLibrary) return
+        val accountKey = curationAccountKey()
+        val cacheGeneration = localCacheGeneration
         val generation = uiState.accountGeneration
         if (!uiState.preferencesLoaded) return
         if (uiState.loading) return
@@ -622,6 +697,11 @@ internal class CairnLinksViewModel(
             statusText = if (hadLinks) "正在刷新链接..." else "正在同步云端链接...",
         )
         refreshJob = viewModelScope.launch {
+            if (offlineReads.syncState(accountKey).cursor != null) {
+                uiState = uiState.copy(loading = false)
+                downloadLibrary(useSync = true)
+                return@launch
+            }
             val collected = linkedMapOf<Int, SavedLink>()
             var published = uiState.links.associateBy { it.id }
             val edited = mutableMapOf<Int, SavedLink>()
@@ -632,6 +712,11 @@ internal class CairnLinksViewModel(
                 if (!isCurrentAccount(generation) || apiToken != currentApiToken()) return@launch
                 when (result) {
                     is LinkPageResult.Loaded -> {
+                        if (repository.supportsSync) {
+                            uiState = uiState.copy(loading = false)
+                            downloadLibrary(useSync = true)
+                            return@launch
+                        }
                         val current = uiState.links.associateBy { it.id }
                         for ((id, link) in current) if (published[id] != link) edited[id] = link
                         deleted += published.keys - current.keys
@@ -654,6 +739,12 @@ internal class CairnLinksViewModel(
                             statusText = if (next != null) "已加载 ${items.size} 条，正在同步更多..."
                                 else if (items.isEmpty()) "还没有收藏链接。" else "已同步 ${items.size} 条链接。",
                         )
+                        try {
+                            if (cacheGeneration == localCacheGeneration) offlineReads.saveCatalog(accountKey, result.page.items.mapNotNull { incoming -> items.firstOrNull { it.id == incoming.id } } + edited.values)
+                        } catch (_: java.io.IOException) {
+                            if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("列表已更新；本地保存失败，请检查存储空间。"))
+                        }
+                        if (!isCurrentAccount(generation)) return@launch
                         if (next == null) return@launch
                         beforeId = next
                     }
@@ -673,7 +764,7 @@ internal class CairnLinksViewModel(
             }
             uiState = uiState.copy(loading = false, statusText = "已加载 5000 条链接，请通过搜索查找更早的内容。")
         }
-        loadTaxonomy()
+        loadTaxonomy(force = true)
     }
 
     fun setFilter(filter: LinkFilter) {
@@ -706,6 +797,7 @@ internal class CairnLinksViewModel(
         } else {
             uiState.copy(
                 searchQuery = value,
+                searchResults = uiState.searchResults.ifEmpty { localResults(LinkFilter.All, query, uiState.bookmarkFilters) },
                 searchLoading = true,
                 searchNextBeforeId = null,
                 searchStale = uiState.searchResults.isNotEmpty(),
@@ -724,6 +816,13 @@ internal class CairnLinksViewModel(
     // merging stale membership or continuing its cursor. Debounce coalesces a
     // burst of confirmed actions; old requests cannot publish into this search.
     private fun refreshSearchAfterMutation() {
+        val account = curationAccountKey()
+        val generation = uiState.accountGeneration
+        val rows = uiState.links
+        viewModelScope.launch {
+            try { offlineReads.saveCatalog(account, rows) }
+            catch (_: java.io.IOException) { if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("修改已保存到云端；本地更新失败，请重试下载资料。")) }
+        }
         queryPages.clear()
         refreshQueue()
         refreshLibraryFilters()
@@ -736,7 +835,8 @@ internal class CairnLinksViewModel(
         libraryGeneration += 1
         libraryJob?.cancel()
         libraryFilterTime = Instant.now()
-        uiState = uiState.copy(libraryNextBeforeId = null, libraryStale = uiState.usesLibraryQuery() && uiState.libraryResults.isNotEmpty(),
+        uiState = uiState.copy(libraryResults = uiState.libraryResults.ifEmpty { localResults(uiState.filter, "", uiState.bookmarkFilters) },
+            libraryNextBeforeId = null, libraryStale = uiState.usesLibraryQuery() && uiState.libraryResults.isNotEmpty(),
             libraryLoading = uiState.usesLibraryQuery(), libraryStatusText = if (uiState.libraryResults.isNotEmpty()) "正在更新条件，暂时显示上一次结果…" else "")
         if (!uiState.usesLibraryQuery()) return
         libraryJob = viewModelScope.launch {
@@ -793,6 +893,113 @@ internal class CairnLinksViewModel(
         }
     }
 
+    private fun localResults(learned: LinkFilter, query: String, filters: BookmarkFilters): List<SavedLink> =
+        uiState.links.filter { link ->
+            link.id !in deletedLinks && (learned == LinkFilter.All || link.learned == (learned == LinkFilter.Learned)) &&
+                filters.matches(link) && (query.isBlank() || listOf(link.url, link.note, link.enrichment?.aiTitle.orEmpty(),
+                    link.enrichment?.summary.orEmpty(), link.enrichment?.originalText.orEmpty(), link.enrichment?.translatedText.orEmpty())
+                    .any { it.contains(query, ignoreCase = true) })
+        }
+
+    fun cancelLibraryDownload() {
+        downloadRun += 1
+        downloadJob?.cancel()
+        if (uiState.downloadingLibrary) uiState = uiState.copy(downloadingLibrary = false, downloadStatus = "已暂停，已下载资料保留；再次下载会复用已有内容。")
+    }
+
+    /** Foreground snapshot fallback until the server exposes a transactional change feed. */
+    fun downloadLibrary() = downloadLibrary(useSync = repository.supportsSync)
+
+    private fun downloadLibrary(useSync: Boolean) {
+        if (uiState.downloadingLibrary) return
+        val token = currentApiToken()
+        if (token.isBlank()) return
+        val account = curationAccountKey()
+        val generation = uiState.accountGeneration
+        val cacheGeneration = localCacheGeneration
+        refreshJob?.cancel()
+        val run = ++downloadRun
+        val initial = uiState.links.associateBy { it.id }
+        uiState = uiState.copy(loading = false, downloadingLibrary = true, downloadStatus = "正在核对收藏列表…")
+        downloadJob = viewModelScope.launch {
+            var bodies = 0
+            var images = 0
+            var failures = 0
+            fun active() = run == downloadRun && isCurrentAccount(generation) && cacheGeneration == localCacheGeneration
+            try {
+                if (useSync || offlineReads.syncState(account).cursor != null) {
+                    val supported = LibrarySync.run(curationActionStore.context, uiState.apiBaseUrl, token) { text ->
+                        if (active()) uiState = uiState.copy(downloadStatus = text)
+                    }
+                    if (supported) {
+                        if (active()) { reloadLocalLibrary(account); LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, token, uiState.preferences.automaticSync, immediate = false) }
+                        return@launch
+                    }
+                }
+                val summaries = linkedMapOf<Int, SavedLink>()
+                var before: Int? = null
+                do {
+                    val page = cancellableRead { repository.listPage(LinkFilter.All, "", token, before, cancellation = it) }
+                    if (!active()) return@launch
+                    if (page !is LinkPageResult.Loaded || !page.page.validContinuation(before)) throw java.io.IOException("收藏列表未能完整读取，请检查连接后重试。")
+                    for (link in page.page.items) {
+                        if (link.id !in deletedLinks && uiState.links.firstOrNull { it.id == link.id } == initial[link.id]) summaries[link.id] = link.retainLoadedContent(initial[link.id])
+                        else failures++
+                    }
+                    before = page.page.nextBeforeId
+                    uiState = uiState.copy(downloadStatus = "已核对 ${summaries.size} 条收藏…")
+                } while (before != null)
+                // No deletion by absence: existing pagination is not a stable snapshot.
+                for ((index, summary) in summaries.values.withIndex()) {
+                    if (!active()) return@launch
+                    val id = summary.id
+                    val observed = uiState.links.firstOrNull { it.id == id }
+                    if (id in deletedLinks || observed != initial[id]) { failures++; continue }
+                    val expectedLocal = offlineReads.get(account, id)
+                    val result = if (summary.enrichment?.contentLoaded == true && summary.enrichment.cacheIdentity != null) LinkGetResult.Loaded(summary)
+                        else cancellableRead { repository.get(id, token, it) }
+                    if (!active()) return@launch
+                    if (id in deletedLinks || uiState.links.firstOrNull { it.id == id } != observed) { failures++; continue }
+                    when (result) {
+                        is LinkGetResult.Loaded -> {
+                            if (result.link.id != id) { failures++; continue }
+                            val link = result.link
+                            val saved = offlineReads.saveDownloaded(account, link, expectedLocal, readerTags(link, null, uiState.v2Taxonomy ?: uiState.taxonomy))
+                            if (!active()) return@launch
+                            if (id in deletedLinks || uiState.links.firstOrNull { it.id == id } != observed) { failures++; continue }
+                            if (saved == null) { failures++; continue }
+                            uiState = uiState.copy(links = uiState.links.upsert(link))
+                            run {
+                                bodies++
+                                uiState = uiState.copy(offlineReads = uiState.offlineReads + (id to OfflineReadInfo(saved.savedAt, saved.pinned, true, saved.tagLabels)),
+                                    offlineLinks = uiState.offlineLinks.upsert(link))
+                                verifiedDetails += id
+                                for (key in link.enrichment?.imageKeys.orEmpty()) {
+                                    if (!active()) return@launch
+                                    if (id in deletedLinks) break
+                                    val bytes = localMedia.load(account, key, link.mediaVersion()) { repository.image(key, token) }
+                                    if (bytes == null) failures++ else images++
+                                }
+                            }
+                        }
+                        LinkGetResult.NotFound -> forgetDeletedLink(id)
+                        is LinkGetResult.Failed -> {
+                            if (result.kind == FailureKind.Unauthorized) throw java.io.IOException("访问凭证已失效，请重新配置连接。")
+                            failures++
+                        }
+                    }
+                    if (active()) uiState = uiState.copy(downloadStatus = "已处理 ${index + 1} / ${summaries.size} 条 · 正文 $bodies · 图片 $images")
+                }
+                if (active()) uiState = uiState.copy(downloadStatus = "本次已保存 $bodies 条正文、$images 张图片" +
+                    if (failures == 0) "。可断网阅读；云端更新后请再次下载。" else "；$failures 项未完成，再次下载可重试。")
+            } catch (error: java.io.IOException) {
+                if (active()) uiState = uiState.copy(downloadStatus = (error.message ?: "下载中断") + " 已保存资料保留，可重试。")
+            } finally {
+                if (active()) uiState = uiState.copy(downloadingLibrary = false)
+            }
+        }
+    }
+
     fun setOfflinePinned(id: Int, pinned: Boolean) {
         val account = curationAccountKey()
         val generation = uiState.accountGeneration
@@ -804,7 +1011,7 @@ internal class CairnLinksViewModel(
                     if (!isCurrentAccount(generation)) return@launch
                     uiState = uiState.copy(offlineReads = rows.associate { it.link.id to OfflineReadInfo(it.savedAt, it.pinned, it.link.id in verifiedDetails, it.tagLabels) },
                         offlineLinks = rows.map { it.link },
-                        message = nextMessage(if (pinned) "已固定离线正文；账号切换后不会显示给其他账号。" else "已取消固定，仍保留在最近阅读缓存中。"))
+                        message = nextMessage(if (pinned) "已固定离线正文；账号切换后不会显示给其他账号。" else "已取消固定，正文仍保存在本机。"))
                 }
             } catch (error: java.io.IOException) {
                 if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage(error.message ?: "离线固定未保存，请重试。"))
@@ -813,12 +1020,21 @@ internal class CairnLinksViewModel(
     }
 
     fun clearOfflineReading() {
+        cancelLibraryDownload()
+        refreshJob?.cancel()
+        localCacheGeneration += 1
         val account = curationAccountKey()
         val generation = uiState.accountGeneration
         viewModelScope.launch {
             try {
-                offlineReads.clear(account)
-                if (isCurrentAccount(generation)) uiState = uiState.copy(offlineReads = emptyMap(), offlineLinks = emptyList(), message = nextMessage("已清除当前账号的离线阅读缓存。"))
+                settingsStore.setAutomaticSync(false)
+                LibrarySync.schedule(curationActionStore.context, uiState.apiBaseUrl, currentApiToken(), false)
+                LibrarySync.exclusive(account) {
+                    offlineReads.clear(account)
+                    localMedia.clear(account)
+                    BookmarkImageCache.clear(account)
+                }
+                if (isCurrentAccount(generation)) uiState = uiState.copy(loading = false, offlineReads = emptyMap(), offlineLinks = emptyList(), downloadStatus = "", localStorageText = "", message = nextMessage("已清除当前账号的本地资料，自动更新已暂停。"))
             } catch (_: java.io.IOException) { if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("缓存未能清除，请重试。")) }
         }
     }
@@ -865,8 +1081,13 @@ internal class CairnLinksViewModel(
                     libraryNextBeforeId = result.page.nextBeforeId,
                     libraryStatusText = if (rows.isEmpty()) "没有符合条件的收藏。" else "已显示 ${rows.size} 条${if (result.page.nextBeforeId != null) "，还有更多。" else "。"}")
             }
-            is LinkPageResult.Failed -> uiState = uiState.copy(libraryLoading = false,
-                libraryStatusText = failureText(result.kind, if (append) "加载更多失败，请重试。" else "筛选失败，请检查网络后重试。"))
+            is LinkPageResult.Failed -> {
+                val local = result.kind != FailureKind.Unauthorized && !append
+                uiState = uiState.copy(libraryLoading = false,
+                    libraryResults = if (local) localResults(learned, "", filters) else uiState.libraryResults,
+                    libraryStale = if (local) false else uiState.libraryStale,
+                    libraryStatusText = if (local) "当前显示本地资料；联网刷新后更新。" else failureText(result.kind, "筛选失败，请重试。"))
+            }
             LinkPageResult.UnsupportedFilters -> uiState = uiState.copy(libraryLoading = false,
                 libraryNextBeforeId = null, libraryStatusText = FILTER_UNSUPPORTED_MESSAGE)
         }
@@ -882,7 +1103,20 @@ internal class CairnLinksViewModel(
         }
     }
 
+    fun formatBody(id: Int) {
+        val generation = uiState.accountGeneration
+        val token = currentApiToken()
+        if (token.isBlank() || id in deletedLinks) return
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { repository.formatBody(id, token) }
+            if (!isCurrentAccount(generation) || id in deletedLinks) return@launch
+            uiState = uiState.copy(message = nextMessage(if (ok) "已加入正文整理队列；完成前仍可阅读原内容。" else "暂时无法提交正文整理，请稍后重试。"))
+            if (ok) ensureLink(id, force = true)
+        }
+    }
+
     fun ensureLink(id: Int, force: Boolean = false) {
+        val cacheGeneration = localCacheGeneration
         if (id in deletedLinks) return
         val generation = uiState.accountGeneration
         if (uiState.detailLoads[id] == DetailLoadState.Loading) return
@@ -892,6 +1126,7 @@ internal class CairnLinksViewModel(
             verifiedDetails += id
             viewModelScope.launch {
                 try {
+                    if (cacheGeneration != localCacheGeneration) return@launch
                     if (!offlineReads.touch(account, id, expected = loaded)) offlineReads.save(account, loaded,
                         labels = readerTags(loaded, null, uiState.v2Taxonomy ?: uiState.taxonomy))
                     val rows = offlineReads.snapshot(account)
@@ -912,7 +1147,10 @@ internal class CairnLinksViewModel(
         }
         val initial = uiState.links.firstOrNull { it.id == id }
         uiState = uiState.copy(detailLoads = uiState.detailLoads + (id to DetailLoadState.Loading))
+        val account = curationAccountKey()
         viewModelScope.launch {
+            var localReadable = true
+            val expectedLocal = try { offlineReads.get(account, id) } catch (_: java.io.IOException) { localReadable = false; null }
             val result = cancellableRead { repository.get(id, apiToken, it) }
             if (!isCurrentAccount(generation) || id in deletedLinks) return@launch
             if (uiState.links.firstOrNull { it.id == id } != initial) {
@@ -924,31 +1162,52 @@ internal class CairnLinksViewModel(
             }
             when (result) {
                 is LinkGetResult.Loaded -> {
-                    verifiedDetails += id
-                    uiState = uiState.copy(
-                        links = uiState.links.upsert(result.link),
-                        libraryResults = uiState.libraryResults.map { if (it.id == result.link.id) result.link else it },
-                        searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it },
-                        detailLoads = uiState.detailLoads - id,
-                    )
-                    try {
-                        val cached = offlineReads.save(curationAccountKey(), result.link,
-                            labels = readerTags(result.link, null, uiState.v2Taxonomy ?: uiState.taxonomy))
-                        if (isCurrentAccount(generation) && cached != null) {
-                            val saved = offlineReads.snapshot(curationAccountKey())
-                            if (isCurrentAccount(generation)) uiState = uiState.copy(
-                                offlineReads = saved.associate { it.link.id to OfflineReadInfo(it.savedAt, it.pinned, it.link.id in verifiedDetails, it.tagLabels) },
-                                offlineLinks = saved.map { it.link })
-                        }
-                    } catch (_: java.io.IOException) {
-                        if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("正文已读取；离线缓存未能保存，请检查存储。"))
+                    if (cacheGeneration != localCacheGeneration) return@launch
+                    var cached: OfflineReadEntry? = null
+                    var cacheFailed = !localReadable
+                    if (localReadable && result.link.enrichment?.contentLoaded == true && result.link.enrichment.cacheIdentity != null) {
+                        try {
+                            cached = offlineReads.saveDownloaded(account, result.link, expectedLocal,
+                                readerTags(result.link, null, uiState.v2Taxonomy ?: uiState.taxonomy))
+                            if (!isCurrentAccount(generation) || id in deletedLinks) return@launch
+                            if (cached == null) {
+                                // Background sync committed before its UI notification; reject this late detail.
+                                uiState = uiState.copy(detailLoads = uiState.detailLoads - id)
+                                reloadLocalLibrary(account, verified = true)
+                                return@launch
+                            }
+                        } catch (_: java.io.IOException) { cacheFailed = true }
                     }
+                    if (!isCurrentAccount(generation) || id in deletedLinks || uiState.links.firstOrNull { it.id == id } != initial) {
+                        if (isCurrentAccount(generation)) uiState = uiState.copy(detailLoads = uiState.detailLoads - id)
+                        return@launch
+                    }
+                    verifiedDetails += id
+                    val current = cached?.link ?: result.link.withMediaVersionsFrom(expectedLocal)
+                    uiState = uiState.copy(
+                        links = uiState.links.upsert(current),
+                        libraryResults = uiState.libraryResults.map { if (it.id == id) current else it },
+                        searchResults = uiState.searchResults.map { if (it.id == id) current else it },
+                        detailLoads = uiState.detailLoads - id,
+                        message = if (cacheFailed) nextMessage("正文已读取；离线缓存未能保存，请检查存储。") else uiState.message,
+                    )
+                    if (cached != null) uiState = uiState.copy(
+                        offlineReads = uiState.offlineReads + (id to OfflineReadInfo(cached.savedAt, cached.pinned, true, cached.tagLabels)),
+                        offlineLinks = uiState.offlineLinks.upsert(current))
                 }
                 LinkGetResult.NotFound -> {
-                    try { offlineReads.remove(curationAccountKey(), id) } catch (_: java.io.IOException) {
+                    if (cacheGeneration != localCacheGeneration) return@launch
+                    try {
+                        if (!localReadable || !offlineReads.removeIfUnchanged(account, id, expectedLocal)) {
+                            uiState = uiState.copy(detailLoads = uiState.detailLoads - id)
+                            reloadLocalLibrary(account, verified = true)
+                            return@launch
+                        }
+                    } catch (_: java.io.IOException) {
                         if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("收藏已不存在；本地缓存清理失败，请在设置重试。"))
                     }
                     if (!isCurrentAccount(generation)) return@launch
+                    forgetDeletedLink(id)
                     uiState = uiState.copy(offlineReads = uiState.offlineReads - id, offlineLinks = uiState.offlineLinks.filterNot { it.id == id }, links = uiState.links.filterNot { it.id == id })
                     uiState = uiState.copy(detailLoads = uiState.detailLoads + (id to DetailLoadState.NotFound))
                 }
@@ -966,15 +1225,15 @@ internal class CairnLinksViewModel(
         }
     }
 
-    fun loadTaxonomy() {
+    fun loadTaxonomy(force: Boolean = false) {
         val generation = uiState.accountGeneration
         val token = currentApiToken()
-        if (token.isBlank() || uiState.taxonomy != null || uiState.taxonomyLoading) return
+        if (token.isBlank() || (!force && uiState.taxonomy != null) || uiState.taxonomyLoading) return
         uiState = uiState.copy(taxonomyLoading = true)
         viewModelScope.launch {
             val result = cancellableRead { repository.taxonomy(token, it) }
             if (!isCurrentAccount(generation) || token != currentApiToken()) return@launch
-            uiState = uiState.copy(taxonomyLoading = false, taxonomy = (result as? TaxonomyResult.Loaded)?.taxonomy)
+            uiState = uiState.copy(taxonomyLoading = false, taxonomy = (result as? TaxonomyResult.Loaded)?.taxonomy ?: uiState.taxonomy)
         }
     }
 
@@ -1191,6 +1450,11 @@ internal class CairnLinksViewModel(
     }
 
     private fun forgetDeletedLink(id: Int) {
+        val account = curationAccountKey()
+        viewModelScope.launch {
+            try { offlineReads.remove(account, id); localMedia.remove(account, id) }
+            catch (_: java.io.IOException) { if (account == curationAccountKey()) uiState = uiState.copy(message = nextMessage("本地资料清理失败，请在设置中重试。")) }
+        }
         BookmarkImageCache.forget(curationAccountKey(), id)
         deletedLinks = deletedLinks + id
         pendingDeletions = pendingDeletions - id
@@ -1314,6 +1578,8 @@ internal class CairnLinksViewModel(
         val intent = ++tokenIntent
         pendingTokenIntent = intent
         refreshJob?.cancel()
+        cancelLibraryDownload()
+        localCacheGeneration += 1
         searchJob?.cancel()
         // The settings UI updates optimistically, before DataStore emits. Never
         // expose the previous account's selection to actions in that interval.
@@ -1514,12 +1780,15 @@ internal class CairnLinksViewModel(
                             uiState = uiState.copy(message = nextMessage("个人标签离线队列暂时无法读取，请检查存储。"))
                         }
                         try {
+                            val localTaxonomy = offlineReads.taxonomy(curationAccountKey())
+                            val localLinks = offlineReads.catalog(curationAccountKey()).filterNot { it.id in deletedLinks }
                             val cached = offlineReads.snapshot(curationAccountKey()).filterNot { it.link.id in deletedLinks }
                             if (isCurrentAccount(generation)) uiState = uiState.copy(
-                                links = (uiState.links + cached.map { it.link }).distinctBy { it.id }.sortedByDescending { it.id },
+                                taxonomy = localTaxonomy,
+                                links = (uiState.links + localLinks).distinctBy { it.id }.sortedByDescending { it.id },
                                 offlineReads = cached.associate { it.link.id to OfflineReadInfo(it.savedAt, it.pinned, tagLabels = it.tagLabels) },
                                 offlineLinks = cached.map { it.link },
-                                statusText = if (cached.isEmpty()) "" else "已读取 ${cached.size} 条离线正文，正在确认云端版本…")
+                                statusText = if (localLinks.isEmpty()) "" else "已读取 ${localLinks.size} 条本地收藏，正在确认云端版本…")
                         } catch (_: java.io.IOException) {
                             if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("离线正文暂时无法读取，请检查存储。"))
                         }
@@ -1691,17 +1960,22 @@ internal class CairnLinksViewModel(
             is LinkPageResult.Failed -> {
                 if (uiState.searchQuery.trim() != query) return
                 val authFailure = result.kind == FailureKind.Unauthorized
+                val local = result.kind != FailureKind.Unauthorized && !append
                 uiState = uiState.copy(
+                    searchResults = if (local) localResults(LinkFilter.All, query, filters) else uiState.searchResults,
+                    searchStale = if (local) false else uiState.searchStale,
                     searchLoading = false,
                     searchStatusText = when {
                         authFailure -> "Token 无效，请在设置中重新填写。"
                         append -> "加载更多失败。"
+                        local -> "当前搜索本地标题、正文、备注；联网后可刷新结果。"
                         else -> "搜索失败。请检查网络后重试。"
                     },
                     message = nextMessage(
                         when {
                             authFailure -> "Token 无效，请在设置中重新填写。"
                             append -> "加载更多失败。"
+                            local -> "云端暂不可用，已搜索本地资料。"
                             else -> "搜索失败。请检查网络。"
                         },
                     ),
@@ -1805,7 +2079,7 @@ internal fun CairnLinksUiState.stats(): LinkStats {
 
 private fun List<SavedLink>.upsert(link: SavedLink): List<SavedLink> =
     if (any { it.id == link.id }) {
-        map { if (it.id == link.id) link else it }.sortedByDescending { it.id }
+        map { if (it.id == link.id) link.withMediaVersionsFrom(it) else it }.sortedByDescending { it.id }
     } else {
         (this + link).sortedByDescending { it.id }
     }

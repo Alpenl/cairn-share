@@ -1,7 +1,7 @@
 # Cairn Share
 
-Cairn Share 是一个开源 Android 分享入口：从系统分享菜单接收完整的 HTTP(S)
-链接和可选备注，先保存到设备上的持久队列，再写入 Cloudflare Worker 与 D1。
+Cairn Share 提供开源 Android 分享入口和浏览器收藏扩展：接收完整的 HTTP(S)
+链接和可选备注，先保存到设备上的持久队列，再写入同一个 Cloudflare Worker 与 D1。
 
 生产 API 当前部署在：
 
@@ -11,11 +11,12 @@ https://share.alpenl.com
 
 ## 项目组成
 
-本仓库包含三个目录，另有一个紧密关联但独立发布的伴随服务：
+本仓库包含四个主要目录，另有一个紧密关联但独立发布的伴随服务：
 
 | 组成 | 位置 | 说明 |
 | --- | --- | --- |
 | Android 客户端 | `android/` | 系统分享入口和完整应用壳，随 GitHub Release 分发 APK |
+| 浏览器扩展 | `browser-extension/` | Chrome、Edge、Firefox 收藏弹窗、右键入口和持久上传队列 |
 | Cloudflare 后端 | `worker/` | 唯一的线上后端：Worker `cairn-share-api`、D1 `cairn-share`、R2 图片桶 |
 | 界面设计基线 | `design/` | Android 界面原型，不参与运行 |
 | X 增强服务 | [`cairn-x-enricher`](https://github.com/Alpenl/cairn-x-enricher)（独立仓库） | 自托管 Go 服务，通常以 Docker 跑在 NAS 上，通过内部接口回写 X 收藏的增强内容 |
@@ -179,7 +180,9 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 - “收藏”提供搜索、未读／已读筛选、摘要和标签预览、手动收藏及刷新入口。
 - 筛选在独立底部面板中展示，点选即生效，“查看结果”关闭面板；列表保留当前条件摘要与清除入口。主题支持搜索与常用项管理，其他低频条件折叠，原有同组任一／全部及跨组组合语义保留。
 - 阅读页常驻“打开原帖”和已读切换；编辑、复制、离线固定和删除位于更多菜单。标签编辑默认折叠，收起仍保留草稿；点标签查找相关收藏后可以返回阅读位置。编辑链接时，返回会确认尚未保存的修改。
-- 最近阅读正文与固定收藏保存为有容量上限、按访问凭据隔离的本地副本；断网时显示保存时间与离线状态。最近记录最多 30 条、固定最多 20 条，总预算 16 MiB；并非全库或图片离线镜像。
+- 本地资料使用 Android SQLite（SQLiteOpenHelper / WAL），按访问凭据隔离并事务迁移旧 JSON 正文。启动先读本地，支持断网阅读、搜索和筛选。正文、翻译、整理结果和图片持久保存在应用私有目录。
+- 新服务通过事务变更序号同步增量与删除；本地内容、图片任务与游标一起提交。设置可手动更新、暂停、选择仅 Wi-Fi 保存图片和调整容量上限。图片按内容版本续传，文字更新与图片完成分开显示。
+- 自动更新使用 Android WorkManager；联网后继续，后台周期由系统调度，可能受节电限制。旧服务保留前台全库下载兼容路径。清除本地资料会暂停自动更新，保留云端收藏和待提交修改。协议、额度计算及验证说明见 [本地资料库同步](docs/library-sync.md)。
 - 自定义标记的创建、挂载及修改使用持久操作队列；重试保留原操作身份，版本冲突保留输入，避免响应丢失后重复创建。
 - “待读”使用服务端按收藏时间排序的未读队列、分页与全库计数，更多菜单支持批量标记已读。
 - “待上传队列”展示尚未同步的本地链接，支持逐条重试、全部重试和移除。
@@ -223,6 +226,19 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 任意 API 主机；API 调试台也被限制在当前配置服务器下。
 
 ## 本地构建
+
+浏览器扩展的安装与完整验证见 [browser-extension/README.md](browser-extension/README.md)：
+
+```bash
+cd browser-extension
+npm ci
+npm test
+npm run build
+```
+
+Chrome / Edge 加载构建后的 `browser-extension/dist/chrome`；Firefox 临时加载
+`browser-extension/dist/firefox/manifest.json`。打开扩展设置，填写与 Android 相同的
+访问 Token，并测试连接后保存。两种浏览器的 ZIP 安装归档同时生成于 `dist/`。
 
 全仓行为消融及原始结果见 [ablation/README.md](ablation/README.md)，包含 Worker、Android
 和新增阅读功能的设备对照。实验使用当前工作区的临时副本，不操作生产 D1。

@@ -3,6 +3,9 @@ package com.alpenl.cairn.share
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.SystemClock
+import android.view.KeyEvent
+import android.view.KeyCharacterMap
+import android.view.InputDevice
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.unit.dp
@@ -152,10 +155,14 @@ class AndroidUiRedesignInstrumentedTest {
         // A dismissed dialog can still own the native window while Compose is already idle.
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
         SystemClock.sleep(800)
-        // Inject through the system input dispatcher, including IME/dialog windows.
-        // Instrumentation's app-scoped key injection is unreliable across windows on API 35.
-        instrumentation.uiAutomation.executeShellCommand("input keyevent 4").use { output ->
-            java.io.FileInputStream(output.fileDescriptor).use { it.readBytes() }
+        // Send a real system key synchronously, and fail at the injection boundary
+        // instead of silently ignoring a failed shell command on newer emulators.
+        val downTime = SystemClock.uptimeMillis()
+        for (action in listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
+            val event = KeyEvent(downTime, SystemClock.uptimeMillis(), action, KeyEvent.KEYCODE_BACK,
+                0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+                KeyEvent.FLAG_FROM_SYSTEM or KeyEvent.FLAG_VIRTUAL_HARD_KEY, InputDevice.SOURCE_KEYBOARD)
+            assertTrue("System back event must be delivered", instrumentation.uiAutomation.injectInputEvent(event, true))
         }
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
         SystemClock.sleep(800)

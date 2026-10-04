@@ -34,6 +34,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.handle_request()
 
+    def do_PATCH(self):
+        self.handle_request()
+
     def do_DELETE(self):
         self.handle_request()
 
@@ -44,7 +47,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def respond(self, status, body, headers=None):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", next((v for k,v in (headers or {}).items() if k.lower() == "content-type"), "application/json"))
         self.send_header("Content-Length", str(len(body)))
         # Capability acknowledgements are part of the real Worker contract.
         for name, value in (headers or {}).items():
@@ -67,7 +70,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         direct = self.path.startswith("/__test/direct/")
         path = self.path.removeprefix("/__test/direct") if direct else self.path
         headers = {name: value for name, value in self.headers.items()
-                   if name.lower() in ("authorization", "content-type", "accept", "user-agent")
+                   if name.lower() in ("authorization", "content-type", "accept", "user-agent", "if-match", "if-none-match")
                    or name.lower().startswith("x-cairn-")}
         mutation = not direct and self.command == "POST" and path.endswith(("/v2-override", "/tags"))
         deletion = not direct and self.command == "DELETE" and path.startswith("/api/links/")
