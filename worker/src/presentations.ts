@@ -8,25 +8,30 @@ type Input = {
     id: number;
     original_text: string | null;
     translated_text: string | null;
+    original_language: string | null;
     images: string | null;
 };
+function readingInput(row: Input) {
+    const chinese = /^(zh(?:[-_].*)?|chinese|中文|简体中文|繁体中文)$/i.test((row.original_language || '').trim());
+    const original = Boolean(chinese && row.original_text?.trim()) || !row.translated_text?.trim();
+    return { text: original ? row.original_text : row.translated_text, kind: original ? 'original' : 'translation' };
+}
 async function enqueue(env: Env, id: number, force = false) {
-    const row = await env.DB.prepare('SELECT id,original_text,translated_text,images FROM links WHERE id=?').bind(id).first<Input>();
+    const row = await env.DB.prepare('SELECT id,original_text,translated_text,original_language,images FROM links WHERE id=?').bind(id).first<Input>();
     if (!row)
         return reply({ error: 'not_found' }, 404);
-    const text = row.translated_text?.trim() ? row.translated_text : row.original_text;
+    const { text, kind } = readingInput(row);
     if (!text?.trim())
         return reply({ error: 'source_required' }, 409);
-    const kind = row.translated_text?.trim() ? 'translation' : 'original';
     const images = row.images || '[]';
     const hash = await digest(JSON.stringify([text, images, kind]));
     const now = new Date().toISOString();
     await env.DB.prepare(`INSERT INTO content_presentations(link_id,input_text,input_images,input_kind,input_hash,updated_at)
- SELECT id,?,?,?,?,? FROM links WHERE id=? AND original_text IS ? AND translated_text IS ? AND images IS ?
+ SELECT id,?,?,?,?,? FROM links WHERE id=? AND original_text IS ? AND translated_text IS ? AND images IS ? AND original_language IS ?
  ON CONFLICT(link_id) DO UPDATE SET input_text=excluded.input_text,input_images=excluded.input_images,input_kind=excluded.input_kind,
  input_hash=excluded.input_hash,status='pending',lease_token=NULL,lease_until=NULL,attempts=0,error=NULL,updated_at=excluded.updated_at
  WHERE content_presentations.input_hash<>excluded.input_hash OR content_presentations.status IN ('failed','stale') OR (? AND content_presentations.status='completed')`)
-        .bind(text, images, kind, hash, now, id, row.original_text, row.translated_text, row.images, force ? 1 : 0).run();
+        .bind(text, images, kind, hash, now, id, row.original_text, row.translated_text, row.images, row.original_language, force ? 1 : 0).run();
     return reply({ status: 'queued' }, 202);
 }
 export function validPresentation(input: string, output: unknown): output is string {
@@ -48,10 +53,12 @@ export function validPresentation(input: string, output: unknown): output is str
     }
     if (missing > Math.max(3, plain(input).length * .03))
         return false;
-    const refs = (s: string) => s.match(/https?:\/\/[^\s<>\])]+|cairn-image:\d+/g) || [];
+    const refs = (s: string) => s.match(/https?:\/\/[^\s<>\])]+|cairn-(?:image|media):\d+/g) || [];
     const before = new Set(refs(input)), after = new Set(refs(output));
     if ([...before].some(v => !after.has(v)) || [...after].some(v => !before.has(v)))
         return false;
+    const mediaOrder = (s: string) => (s.match(/cairn-(?:image|media):\d+/g) || []).join(',');
+    if (mediaOrder(input) !== mediaOrder(output)) return false;
     if ((input.match(/\d+(?:[.,]\d+)*/g) || []).some(v => !output.includes(v)))
         return false;
     const code = [...input.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].map(m => m[1]);
@@ -91,12 +98,17 @@ export async function presentationRoute(request: Request, env: Env, path: string
         }
         const now = new Date().toISOString(), day = now.slice(0, 10), token = crypto.randomUUID();
         const limit = typeof body.daily_limit === 'number' ? Math.max(1, Math.min(100, Math.trunc(body.daily_limit))) : 20;
+        await env.DB.prepare("UPDATE content_presentations SET status='failed',error='整理任务中断，可手动重试',lease_token=NULL WHERE status='processing' AND lease_until<? AND attempts>=3").bind(now).run();
+        // Pin the refreshed candidate: refreshing its input changes updated_at,
+        // so selecting again by age could claim another, unrefreshed old input.
+        const pending = await env.DB.prepare("SELECT link_id FROM content_presentations WHERE (status='pending' OR (status='processing' AND lease_until<?)) AND attempts<3 ORDER BY updated_at LIMIT 1").bind(now).first<{ link_id: number }>();
+        if (!pending) return new Response(null, { status: 204 });
+        await enqueue(env, pending.link_id);
         await env.DB.batch([
-            env.DB.prepare("UPDATE content_presentations SET status='failed',error='整理任务中断，可手动重试',lease_token=NULL WHERE status='processing' AND lease_until<? AND attempts>=3").bind(now),
             env.DB.prepare('INSERT INTO presentation_budget(day,calls) VALUES(?,0) ON CONFLICT DO NOTHING').bind(day),
             env.DB.prepare(`UPDATE content_presentations SET status='processing',lease_token=?,lease_until=?,attempts=attempts+1,updated_at=?
-    WHERE link_id=(SELECT link_id FROM content_presentations WHERE (status='pending' OR (status='processing' AND lease_until<?)) AND attempts<3 ORDER BY updated_at LIMIT 1)
-    AND (SELECT calls FROM presentation_budget WHERE day=?)<?`).bind(token, new Date(Date.now() + 240000).toISOString(), now, now, day, limit),
+    WHERE link_id=? AND (status='pending' OR (status='processing' AND lease_until<?)) AND attempts<3
+    AND (SELECT calls FROM presentation_budget WHERE day=?)<?`).bind(token, new Date(Date.now() + 240000).toISOString(), now, pending.link_id, now, day, limit),
             env.DB.prepare('UPDATE presentation_budget SET calls=calls+1 WHERE day=? AND EXISTS(SELECT 1 FROM content_presentations WHERE lease_token=?)').bind(day, token)
         ]);
         const job = await env.DB.prepare('SELECT link_id,input_text,input_images,input_kind,input_hash,lease_token FROM content_presentations WHERE lease_token=?').bind(token).first();
@@ -105,12 +117,21 @@ export async function presentationRoute(request: Request, env: Env, path: string
     if (path.endsWith('/complete') || path.endsWith('/fail')) {
         if (!Number.isSafeInteger(body.link_id) || typeof body.lease_token !== 'string')
             return reply({ error: 'invalid_json' }, 400);
-        const row = await env.DB.prepare(`SELECT input_text FROM content_presentations WHERE link_id=? AND lease_token=? AND status='processing' AND lease_until>?`).bind(body.link_id, body.lease_token, new Date().toISOString()).first<{
+        const row = await env.DB.prepare(`SELECT input_text,input_kind,input_images FROM content_presentations WHERE link_id=? AND lease_token=? AND status='processing' AND lease_until>?`).bind(body.link_id, body.lease_token, new Date().toISOString()).first<{
             input_text: string;
+            input_kind: string;
+            input_images: string;
         }>();
         if (!row)
             return reply({ error: 'input_changed' }, 409);
         const complete = path.endsWith('/complete');
+        if (complete) {
+            const current = await env.DB.prepare('SELECT id,original_text,translated_text,original_language,images FROM links WHERE id=?').bind(body.link_id).first<Input>();
+            if (!current) return reply({ error: 'input_changed' }, 409);
+            const chosen = readingInput(current);
+            if (chosen.text !== row.input_text || chosen.kind !== row.input_kind || (current.images || '[]') !== row.input_images)
+                return reply({ error: 'input_changed' }, 409);
+        }
         if (complete && (!validPresentation(row.input_text, body.formatted_content) || typeof body.model !== 'string' || body.model.length > 200 || body.prompt_version !== 'format-v1'))
             return reply({ error: 'invalid_presentation' }, 400);
         const result = await env.DB.prepare(`UPDATE content_presentations SET status=?,formatted_content=CASE WHEN ? THEN ? ELSE formatted_content END,

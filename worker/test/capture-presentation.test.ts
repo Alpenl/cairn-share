@@ -77,6 +77,8 @@ it('formatting is optional, source-bound, idempotent, private, and never rewrite
     expect((await call('/api/enrichment/presentations/complete', result, true)).status).toBe(409);
 });
 it('rejects content loss, invented links and changed code; caps daily model claims', async () => {
+    expect(validPresentation('正文 cairn-media:0 cairn-image:1', '正文 cairn-image:1 cairn-media:0')).toBe(false);
+    expect(validPresentation('正文 cairn-media:0', '正文')).toBe(false);
     expect(validPresentation('正文 123 https://example.com/a', '正文 123 https://evil.test')).toBe(false);
     expect(validPresentation('```js\nconst x=1;\n```', '```js\nconst x=2;\n```')).toBe(false);
     expect(validPresentation('一段完整的正文应该保留所有信息。', '摘要')).toBe(false);
@@ -86,6 +88,38 @@ it('rejects content loss, invented links and changed code; caps daily model clai
     await call('/api/enrichment/presentations/fail', job, true);
     await call(`/api/links/${saved.id}/presentation`, {});
     expect((await call('/api/enrichment/presentations/claim', { daily_limit: 1 }, true)).status).toBe(204);
+});
+
+it('formats complete Chinese originals and repairs old queued translation inputs before claiming', async () => {
+    const saved: any = await (await call('/api/captures', capture)).json();
+    await env.DB.prepare("UPDATE links SET translated_text='旧译文缺少正文结构' WHERE id=?").bind(saved.id).run();
+    await call(`/api/links/${saved.id}/presentation`, {});
+    const original: any = await env.DB.prepare('SELECT * FROM content_presentations WHERE link_id=?').bind(saved.id).first();
+    expect(original.input_text).toBe(capture.capture.text);
+    expect(original.input_kind).toBe('original');
+    // Simulate a task queued by the previous release, plus a later task that
+    // must not jump ahead when refreshing the first task changes its timestamp.
+    await env.DB.prepare("UPDATE content_presentations SET input_text='旧译文缺少正文结构',input_kind='translation',input_hash='old',updated_at='2026-01-01' WHERE link_id=?").bind(saved.id).run();
+    const second: any = await (await call('/api/captures', { ...capture, url: 'https://x.com/p/status/456', client_id: crypto.randomUUID() })).json();
+    await call(`/api/links/${second.id}/presentation`, {});
+    const claim: any = await (await call('/api/enrichment/presentations/claim', {}, true)).json();
+    expect(claim.link_id).toBe(saved.id);
+    expect(claim.input_text).toBe(capture.capture.text);
+    expect(claim.input_kind).toBe('original');
+    expect(claim.input_hash).toBe(original.input_hash);
+    expect(await env.DB.prepare('SELECT original_text FROM links WHERE id=?').bind(saved.id).first('original_text')).toBe(capture.capture.text);
+    expect((await call('/api/enrichment/presentations/complete', { link_id: saved.id, lease_token: claim.lease_token, formatted_content: capture.capture.text, model: 'fixture', prompt_version: 'format-v1' }, true)).status).toBe(200);
+});
+
+it('keeps translated reading input for non-Chinese originals', async () => {
+    const saved: any = await (await call('/api/captures', { ...capture, capture: { ...capture.capture, language: 'en', text: 'Original English article.' } })).json();
+    await env.DB.prepare("UPDATE links SET translated_text='完整中文译文。' WHERE id=?").bind(saved.id).run();
+    await call(`/api/links/${saved.id}/presentation`, {});
+    const claim: any = await (await call('/api/enrichment/presentations/claim', {}, true)).json();
+    expect(claim.input_text).toBe('完整中文译文。');
+    expect(claim.input_kind).toBe('translation');
+    await env.DB.prepare("UPDATE links SET original_language='zh-CN' WHERE id=?").bind(saved.id).run();
+    expect((await call('/api/enrichment/presentations/complete', { link_id: saved.id, lease_token: claim.lease_token, formatted_content: '完整中文译文。', model: 'fixture', prompt_version: 'format-v1' }, true)).status).toBe(409);
 });
 
 it('updates the original app bookmark across WeChat tracking URLs without losing personal facts', async () => {
