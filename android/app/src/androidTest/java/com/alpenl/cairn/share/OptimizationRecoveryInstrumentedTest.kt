@@ -103,10 +103,10 @@ class OptimizationRecoveryInstrumentedTest {
             assertTrue(restored.pinned)
             assertTrue(OfflineReadStore(context).snapshot(other).isEmpty())
             for (id in 100..130) store.save(account, LinkJson.decodeLink(archive(id, true)), now = id.toLong())
-            val bounded = store.snapshot(account)
-            assertEquals(31, bounded.size)
-            assertTrue(bounded.any { it.link.id == 28 && it.pinned })
-            assertFalse(bounded.any { it.link.id == 100 })
+            val complete = store.snapshot(account)
+            assertEquals(32, complete.size)
+            assertTrue(complete.any { it.link.id == 28 && it.pinned })
+            assertTrue(complete.any { it.link.id == 100 })
         } finally { store.clear(account); store.clear(other) }
     }
 

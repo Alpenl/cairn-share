@@ -60,6 +60,8 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -143,7 +145,7 @@ internal fun SaveLinkSheetContent(
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(title, style = MaterialTheme.typography.titleLarge.copy(fontSize = 20.sp, lineHeight = 28.sp),
                     fontWeight = FontWeight.Medium, modifier = Modifier.semantics { heading() })
-                Text(subtitle, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 18.sp),
+                if (manualUrl != null || candidates.size != 1) Text(subtitle, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 18.sp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (manualUrl != null) {
@@ -168,8 +170,8 @@ internal fun SaveLinkSheetContent(
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             selectedLabel?.let {
-                                Text("已选择", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                if (candidates.size > 1) Text("已选择", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 21.sp),
                                     modifier = Modifier.testTag("selected_label"))
                             }
@@ -198,15 +200,29 @@ internal fun SaveLinkSheetContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            TextField(value = note, onValueChange = onNoteChange, label = { Text("备注，可选", style = MaterialTheme.typography.labelMedium) },
-                placeholder = { Text("留下一句收藏原因") }, supportingText = {
-                    Text("${note.length} / $MAX_NOTE_LENGTH", style = MaterialTheme.typography.labelSmall,
-                        color = if (note.length > MAX_NOTE_LENGTH) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-                },
-                isError = note.length > MAX_NOTE_LENGTH, enabled = editable, minLines = 2, maxLines = 4,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }),
-                textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 23.sp),
-                colors = shareFieldColors(), shape = RoundedCornerShape(4.dp), modifier = Modifier.fillMaxWidth().testTag("note"))
+            Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.04f), RoundedCornerShape(8.dp))
+                .padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("备注，可选", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                androidx.compose.foundation.text.BasicTextField(value = note, onValueChange = onNoteChange,
+                    enabled = editable, minLines = 1, maxLines = 3,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 23.sp, color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+                    decorationBox = { field ->
+                        androidx.compose.foundation.layout.Box {
+                            if (note.isEmpty()) Text("留下一句收藏原因", style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            field()
+                        }
+                    }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("note").semantics {
+                        contentDescription = "备注，可选"
+                        if (note.length > MAX_NOTE_LENGTH) error("备注不能超过 $MAX_NOTE_LENGTH 字")
+                    })
+                Text("${note.length} / $MAX_NOTE_LENGTH", style = MaterialTheme.typography.labelSmall,
+                    color = if (note.length > MAX_NOTE_LENGTH) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.End).testTag("note_count"))
+            }
         }
         Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
             Column {

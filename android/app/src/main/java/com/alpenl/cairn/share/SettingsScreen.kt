@@ -65,6 +65,8 @@ internal fun SettingsScreen(
     onClearOffline: () -> Unit,
     onFlushPersonal: () -> Unit,
     onOpenOffline: () -> Unit,
+    onDownloadLibrary: () -> Unit = {},
+    onCancelDownload: () -> Unit = {},
 ) {
     var tokenDialogOpen by rememberSaveable { mutableStateOf(false) }
     var tokenDraft by rememberSaveable { mutableStateOf("") }
@@ -100,13 +102,20 @@ internal fun SettingsScreen(
                 else -> onFlushPersonal
             }, modifier = Modifier.testTag("settings_personal_sync"))
             SettingsDivider()
-            SettingsRow(CairnIcons.Offline, "离线阅读", "本机已存 ${state.offlineReads.size} 条正文 · 最近阅读与固定收藏", onOpenOffline)
-            Text("最近 30 条正文与最多 20 条固定收藏，共用 16 MB 缓存；图片需要联网。",
+            SettingsRow(CairnIcons.Offline, "本地资料", "已保存 ${state.offlineReads.size} 条正文 · 点按离线阅读", onOpenOffline)
+            Text("正文与图片保存在本机，下载完成后可断网阅读。下载期间请保持 APP 打开。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 32.dp, end = 4.dp))
-            TextButton(onClick = { confirmClearCache = true }, enabled = state.offlineReads.isNotEmpty(),
+            if (state.downloadStatus.isNotBlank()) Text(state.downloadStatus, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 32.dp, top = 8.dp).testTag("library_download_status"))
+            TextButton(onClick = if (state.downloadingLibrary) onCancelDownload else onDownloadLibrary,
+                enabled = state.preferences.apiToken.isNotBlank(),
+                modifier = Modifier.padding(start = 20.dp).heightIn(min = 48.dp).testTag("download_library")) {
+                Text(if (state.downloadingLibrary) "暂停下载" else "下载 / 更新全部资料", style = MaterialTheme.typography.labelMedium)
+            }
+            TextButton(onClick = { confirmClearCache = true }, enabled = !state.downloadingLibrary,
                 modifier = Modifier.padding(start = 20.dp).heightIn(min = 48.dp).testTag("clear_offline_cache")) {
-                Text("清除当前账号的离线缓存", style = MaterialTheme.typography.labelMedium)
+                Text("清除当前账号的本地资料", style = MaterialTheme.typography.labelMedium)
             }
         }
         SettingsGroup("分享") {
@@ -134,7 +143,7 @@ internal fun SettingsScreen(
     if (confirmClearCache) AlertDialog(
         onDismissRequest = { confirmClearCache = false },
         title = { Text("清除离线阅读缓存？") },
-        text = { Text("仅清除当前账号在本机保存的正文与固定记录，云端收藏和待同步修改会保留。") },
+        text = { Text("仅清除当前账号在本机保存的列表、正文、图片与固定记录，云端收藏和待同步修改会保留。") },
         confirmButton = { TextButton(onClick = { confirmClearCache = false; onClearOffline() }) { Text("清除本机缓存") } },
         dismissButton = { TextButton(onClick = { confirmClearCache = false }) { Text("取消") } },
     )

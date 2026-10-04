@@ -275,6 +275,8 @@ internal fun CairnLinksApp(
                     onOpenUpdate = { navController.navigate(Routes.Update) },
                     onOpenAbout = { navController.navigate(Routes.About) },
                     onClearOffline = viewModel::clearOfflineReading,
+                    onDownloadLibrary = viewModel::downloadLibrary,
+                    onCancelDownload = viewModel::cancelLibraryDownload,
                     onFlushPersonal = viewModel::flushPersonalTags,
                     onOpenOffline = { navController.navigate(Routes.Offline) },
                 )
@@ -302,11 +304,11 @@ internal fun CairnLinksApp(
             composable(Routes.Offline) {
                 ScreenColumn {
                     DetailTopBar(title = "离线阅读", onBack = { navController.popBackStack() })
-                    Text("本机保存的最近阅读与固定正文；联网后会确认版本。离线图片不在缓存内。", style = MaterialTheme.typography.bodySmall)
+                    Text("本机保存的正文与图片；可在设置中下载或更新全部资料。", style = MaterialTheme.typography.bodySmall)
                     LinkList(items = state.offlineLinks.sortedWith(compareByDescending<SavedLink> { state.offlineReads[it.id]?.pinned == true }.thenByDescending { it.id }),
                         onTagFilter = onTagFilter,
                         taxonomy = state.v2Taxonomy ?: state.taxonomy,
-                        loading = false, emptyText = "成功阅读归档正文后会自动缓存，也可以在阅读页固定。",
+                        loading = false, emptyText = "阅读后会自动保存正文；也可以在设置中下载全部资料。",
                         onOpenLinkDetail = { link -> viewModel.openOfflineLink(link); navController.navigate(Routes.detail(link.id)) })
                 }
             }
@@ -325,7 +327,7 @@ internal fun CairnLinksApp(
                     onCopy = onCopy,
                     onToggleLearned = viewModel::toggleLearned,
                     onTagFilter = onTagFilter,
-                    onLoadTaxonomy = viewModel::loadTaxonomy,
+                    onLoadTaxonomy = { viewModel.loadTaxonomy() },
                     onSaveCuration = { update, onSuccess -> viewModel.saveCuration(id, update, onSuccess) },
                     onLoadV2 = viewModel::loadV2Selection,
                     onLoadV2Taxonomy = viewModel::loadV2Taxonomy,
@@ -944,7 +946,7 @@ private fun DetailScreen(
                         }
                     }
                     items(enrichment.imageKeys, key = { "image_$it" }, contentType = { "image" }) { key ->
-                        BookmarkImage(state.apiBaseUrl, state.preferences.apiToken, key)
+                        BookmarkImage(state.apiBaseUrl, state.preferences.apiToken, key, link.mediaVersion())
                     }
                     if (enrichment.relatedLinks.isNotEmpty()) item(key = "links_title") { SectionLabel("相关链接") }
                     items(enrichment.relatedLinks, key = { "related_$it" }, contentType = { "related" }) { url ->
