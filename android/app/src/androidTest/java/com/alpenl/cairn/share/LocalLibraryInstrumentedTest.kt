@@ -165,7 +165,17 @@ class LocalLibraryInstrumentedTest {
             assertTrue(store.pendingMedia(account).isEmpty())
             assertNull(LocalMediaStore(isolated).load(account,imageKey,"v2") { error("Deleted") })
             assertEquals(listOf(null,"baseline","c0","c1","c1","c2"), synchronized(cursors) { cursors.toList() })
+            // Exercise actual on-demand WorkManager initialization and its persisted worker.
+            settings.setAutomaticSync(true)
+            LibrarySync.schedule(context, base, token, true)
+            val manager = androidx.work.WorkManager.getInstance(context)
+            withTimeout(30_000) {
+                while (withContext(Dispatchers.IO) { manager.getWorkInfosForUniqueWork("library:$account:now").get() }
+                    .none { it.state == androidx.work.WorkInfo.State.SUCCEEDED }) delay(100)
+            }
+            LibrarySync.schedule(context, base, token, false)
         } finally {
+            LibrarySync.schedule(context, base, token, false)
             server.shutdown(); settings.setApiToken(original.apiToken); settings.setImagesWifiOnly(original.imagesWifiOnly); settings.setAutomaticSync(original.automaticSync)
         }
     }

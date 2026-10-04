@@ -57,7 +57,7 @@ internal fun readingInline(text: String): AnnotatedString = buildAnnotatedString
     append(text.substring(last))
 }
 @Composable
-internal fun ReadingBlock(part: ReadingPart, images: List<String>, apiBase: String, token: String) {
+internal fun ReadingBlock(part: ReadingPart, images: List<String>, apiBase: String, token: String, versions: Map<String, String> = emptyMap(), fallbackVersion: String = "") {
     if (part.kind == "table") {
         val rows = remember(part) { part.text.lines().filterIndexed { index, _ -> index != 1 }.map { it.trim().trim('|').split('|') } }
         Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
@@ -70,7 +70,7 @@ internal fun ReadingBlock(part: ReadingPart, images: List<String>, apiBase: Stri
         return
     }
     if(part.kind == "image") {
-        images.getOrNull(part.level)?.let { BookmarkImage(apiBase, token, it) }
+        images.getOrNull(part.level)?.let { BookmarkImage(apiBase, token, it, versions[it] ?: fallbackVersion, versions[it]) }
         if(part.text.isNotBlank()) Text(part.text, style = MaterialTheme.typography.labelSmall)
         return
     }

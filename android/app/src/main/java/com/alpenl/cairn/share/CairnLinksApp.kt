@@ -959,7 +959,7 @@ private fun DetailScreen(
                             }
                         }
                         items(paragraphs.size, key = { "paragraph_$it" }, contentType = { "paragraph" }) { index ->
-                            ReadingBlock(paragraphs[index], enrichment.imageKeys, state.apiBaseUrl, state.preferences.apiToken)
+                            ReadingBlock(paragraphs[index], enrichment.imageKeys, state.apiBaseUrl, state.preferences.apiToken, enrichment.imageVersions, link.mediaVersion())
                         }
                     }
                     items(enrichment.imageKeys.filterIndexed { index, _ -> !readingText.contains("(cairn-image:$index)") }, key = { "image_$it" }, contentType = { "image" }) { key ->

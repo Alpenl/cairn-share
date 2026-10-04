@@ -66,5 +66,13 @@ for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConfl
   # am instrument can exit zero on a failed test; require the actual JUnit result.
   grep -Eq '^OK \(1 test\)' "$work/$phase.log"
 done
+for phase in persistBaselineWithRealWorker resumeRealCursorApplyUpdatesAndDeletesAfterProcessDeath; do
+  "$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
+  "$adb" -s "$serial" shell am instrument -w -r \
+    -e class "com.alpenl.cairn.share.LibrarySyncWorkerIntegrationTest#$phase" \
+    -e cairnWorkerUrl http://127.0.0.1:18978 \
+    com.alpenl.cairn.share.test/androidx.test.runner.AndroidJUnitRunner | tee "$work/$phase.log"
+  grep -Eq '^OK \(1 test\)' "$work/$phase.log"
+done
 curl -fsS "http://127.0.0.1:$proxy_port/__test/control" > "$work/transport-history.json"
-echo "PASS: fourteen phases ran in separate Android processes against actual authenticated Worker/D1"
+echo "PASS: sixteen phases ran in separate Android processes against actual authenticated Worker/D1"

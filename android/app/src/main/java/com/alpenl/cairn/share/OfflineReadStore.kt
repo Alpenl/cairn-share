@@ -111,7 +111,7 @@ internal class OfflineReadStore(context: Context) {
                 if (entry.pinned) 1 else 0, labels.toString(), if (entry.link.enrichment?.contentLoaded == true) 1 else 0))
     }
     private fun SavedLink.cacheable(): SavedLink = if (enrichment?.cacheIdentity != null) this else copy(
-        enrichment = enrichment?.copy(originalText = "", translatedText = "", relatedLinks = emptyList(), imageKeys = emptyList(), contentLoaded = false))
+        enrichment = enrichment?.copy(originalText = "", translatedText = "", formattedContent = "", formattingStatus = "", imageVersions = emptyMap(), relatedLinks = emptyList(), imageKeys = emptyList(), contentLoaded = false))
 
     private fun deleted(db: android.database.sqlite.SQLiteDatabase, account: String, id: Int): Boolean =
         db.rawQuery("SELECT 1 FROM deleted WHERE account=? AND id=?", arrayOf(account, id.toString())).use { it.moveToFirst() }
