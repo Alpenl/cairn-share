@@ -1094,6 +1094,18 @@ internal class CairnLinksViewModel(
         }
     }
 
+    fun formatBody(id: Int) {
+        val generation = uiState.accountGeneration
+        val token = currentApiToken()
+        if (token.isBlank() || id in deletedLinks) return
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { repository.formatBody(id, token) }
+            if (!isCurrentAccount(generation) || id in deletedLinks) return@launch
+            uiState = uiState.copy(message = nextMessage(if (ok) "已加入正文整理队列；完成前仍可阅读原内容。" else "暂时无法提交正文整理，请稍后重试。"))
+            if (ok) ensureLink(id, force = true)
+        }
+    }
+
     fun ensureLink(id: Int, force: Boolean = false) {
         val cacheGeneration = localCacheGeneration
         if (id in deletedLinks) return

@@ -1,7 +1,7 @@
 # Cairn Share
 
-Cairn Share 是一个开源 Android 分享入口：从系统分享菜单接收完整的 HTTP(S)
-链接和可选备注，先保存到设备上的持久队列，再写入 Cloudflare Worker 与 D1。
+Cairn Share 提供开源 Android 分享入口和浏览器收藏扩展：接收完整的 HTTP(S)
+链接和可选备注，先保存到设备上的持久队列，再写入同一个 Cloudflare Worker 与 D1。
 
 生产 API 当前部署在：
 
@@ -11,11 +11,12 @@ https://share.alpenl.com
 
 ## 项目组成
 
-本仓库包含三个目录，另有一个紧密关联但独立发布的伴随服务：
+本仓库包含四个主要目录，另有一个紧密关联但独立发布的伴随服务：
 
 | 组成 | 位置 | 说明 |
 | --- | --- | --- |
 | Android 客户端 | `android/` | 系统分享入口和完整应用壳，随 GitHub Release 分发 APK |
+| 浏览器扩展 | `browser-extension/` | Chrome、Edge、Firefox 收藏弹窗、右键入口和持久上传队列 |
 | Cloudflare 后端 | `worker/` | 唯一的线上后端：Worker `cairn-share-api`、D1 `cairn-share`、R2 图片桶 |
 | 界面设计基线 | `design/` | Android 界面原型，不参与运行 |
 | X 增强服务 | [`cairn-x-enricher`](https://github.com/Alpenl/cairn-x-enricher)（独立仓库） | 自托管 Go 服务，通常以 Docker 跑在 NAS 上，通过内部接口回写 X 收藏的增强内容 |
@@ -224,6 +225,19 @@ Android app 位于 `android/`，application id 是 `com.alpenl.cairn.share`，�
 任意 API 主机；API 调试台也被限制在当前配置服务器下。
 
 ## 本地构建
+
+浏览器扩展的安装与完整验证见 [browser-extension/README.md](browser-extension/README.md)：
+
+```bash
+cd browser-extension
+npm ci
+npm test
+npm run build
+```
+
+Chrome / Edge 加载构建后的 `browser-extension/dist/chrome`；Firefox 临时加载
+`browser-extension/dist/firefox/manifest.json`。打开扩展设置，填写与 Android 相同的
+访问 Token，并测试连接后保存。两种浏览器的 ZIP 安装归档同时生成于 `dist/`。
 
 全仓行为消融及原始结果见 [ablation/README.md](ablation/README.md)，包含 Worker、Android
 和新增阅读功能的设备对照。实验使用当前工作区的临时副本，不操作生产 D1。

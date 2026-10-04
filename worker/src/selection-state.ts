@@ -59,6 +59,8 @@ const readingColumns = `,l.url,l.note,l.created_at,l.curation,l.enrichment_statu
   l.ai_title,l.original_language,
   CASE WHEN l.app_body_revision=? THEN NULL ELSE l.original_text END AS original_text,
   CASE WHEN l.app_body_revision=? THEN NULL ELSE l.translated_text END AS translated_text,
+  CASE WHEN l.app_body_revision=? THEN NULL ELSE (SELECT p.formatted_content FROM content_presentations p WHERE p.link_id=l.id AND p.status='completed') END AS formatted_content,
+  (SELECT p.status FROM content_presentations p WHERE p.link_id=l.id) AS formatting_status,
   l.summary,l.related_links,
   l.images,l.enrichment_model,l.enrichment_error,l.enrichment_updated_at,l.enriched_at,
   l.app_body_revision`;
@@ -115,7 +117,7 @@ export async function readSelectionSnapshot(env: Env, id: number, includeReading
       LEFT JOIN tag_operations o ON o.operation_key=f.operation_id) AS tag_origins` : "";
   const link = await env.DB.prepare(selectionSQL("l.id=?", includeReading,
     (includeTags ? `,${tagSummaryColumns("l")}` : "") + detailColumns))
-    .bind(...(includeReading ? [knownBodyRevision, knownBodyRevision, id] : [id])).first<Row>();
+    .bind(...(includeReading ? [knownBodyRevision, knownBodyRevision, knownBodyRevision, id] : [id])).first<Row>();
   return link ? selectionFromRow(link) : null;
 }
 

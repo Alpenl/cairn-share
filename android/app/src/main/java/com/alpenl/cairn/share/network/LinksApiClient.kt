@@ -84,6 +84,17 @@ internal class LinksApiClient(
 ) {
     @Volatile var supportsSync: Boolean = false
         private set
+    fun formatBody(id: Int, apiToken: String): Boolean {
+        val connection = URL("${baseUrl.trimEnd('/')}/api/links/$id/presentation").openConnection() as HttpURLConnection
+        return try {
+            configure(connection, apiToken)
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.outputStream.use { it.write("{\"force\":true}".toByteArray()) }
+            connection.responseCode in 200..299
+        } catch (_: IOException) { false } finally { connection.disconnect() }
+    }
 
     fun listPage(filter: LinkFilter, query: String, apiToken: String, beforeId: Int? = null, filters: BookmarkFilters = BookmarkFilters(), filterTime: Instant = Instant.now(), cancellation: ReadCancellation? = null): LinkPageResult {
         val endpoint = URL(listUrl(filter, query, beforeId, filters, filterTime))

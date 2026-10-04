@@ -36,6 +36,38 @@ class ReaderOptimizationInstrumentedTest {
     private fun waitTag(tag: String) = compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag(tag).assertExists(); true }.getOrDefault(false) }
     private fun scroll(tag: String) { compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag(tag)) }
 
+    @Test fun formattedReadingRendersStructureAndCanSwitchBackWithoutModelCalls() {
+        val server = MockWebServer(); server.start()
+        val link = archive(28)
+        link.getJSONObject("enrichment").put("formatted_content", "## 清晰标题\n\n- 第一项\n- 第二项\n\n```kotlin\nval x = 123\n```")
+            .put("formatting_status", "completed").put("translated_text", "原内容译文。")
+        runBlocking { SharePreferencesStore(context).apply { setApiToken("formatting-ui-fixture"); setLastRoute("library"); setLastFilter("all"); setLastSearchQuery("") } }
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> json(JSONObject().put("items", JSONArray().put(link)).put("next_before_id", JSONObject.NULL))
+                "/api/links/28" -> json(link)
+                "/api/v2-taxonomy", "/api/taxonomy" -> json(taxonomy())
+                "/api/bookmarks/28/tags" -> json(tags(28))
+                "/api/custom-tags" -> json(JSONObject().put("tags", JSONArray()))
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        try {
+            ActivityScenario.launch<LauncherActivity>(intent(server)).use {
+                waitTag("link_28"); compose.onNodeWithTag("link_28").performScrollTo().performClick()
+                waitTag("reader_tag_overview")
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasText("清晰标题"))
+                compose.onNodeWithText("清晰标题").assertIsDisplayed()
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasText("val x = 123"))
+                compose.onNodeWithText("val x = 123").assertIsDisplayed()
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasText("查看原内容"))
+                compose.onNodeWithText("查看原内容").performClick()
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasText("原内容译文。"))
+                compose.onNodeWithText("原内容译文。").assertIsDisplayed()
+            }
+        } finally { server.shutdown() }
+    }
+
     @Test fun readerStartsFoldedIncludesFunctionsAndPreservesEditorDraftAcrossCollapseAndSave() {
         val server = MockWebServer(); server.start()
         val token = "reader-isolated-test"

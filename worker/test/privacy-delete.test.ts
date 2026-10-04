@@ -159,7 +159,9 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("rerank_cache",{cache_key:"private-rank",owner_token:"owner",status:"pending",request_json:"private query",scope_hash:"scope",spec_hash:"spec",model:"model",items:"[]",created_at:1,expires_at:2});
   await insert("rerank_cache_links",{cache_key:"private-rank",link_id:id});
   await insert("entity_cache",{cache_key:"private-entity",link_id:id,evidence_snapshot_id:snapshotID,content_revision:1,content_hash:"hash",source_links:"[]",owner_token:"owner",status:"completed",request_json:"private entity material",candidates:"[]",spec_hash:"spec",answers:"{}",created_at:1,expires_at:Date.now()+86400000});
-  const tables=["entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links","custom_tag_links","tag_operations","tag_change_facts"];
+  await insert("content_presentations",{link_id:id,input_text:"private body",input_images:"[]",input_kind:"original",input_hash:"hash",updated_at:"t"});
+  await insert("browser_captures",{client_id:"fixture",link_id:id,payload_hash:"private-hash",created_at:"t"});
+  const tables=["content_presentations","entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links","custom_tag_links","tag_operations","tag_change_facts"];
   tables.push("effective_tag_memberships","classification_reservations","classification_attempt_operations","classification_provider_attempts");
   tables.push("effective_entity_memberships","bookmark_search_documents","bookmark_search_grams","bookmark_search_fields","bookmark_search_field_grams");
   await env.DB.prepare("INSERT OR IGNORE INTO effective_entity_memberships(link_id,term) VALUES(?,'private derived entity')").bind(id).run();
@@ -171,7 +173,7 @@ it("atomically deletes populated private tables, references, budgets and cached 
       expect(fields.results.map(f=>f.name)).toEqual(["seq","link_id","kind","created_at"]);
       continue; // Numeric tombstones only; no URL, note, body, tag or credential.
     }
-    if(name!=="privacy_deletions" && fields.results.some(f=>f.name==="link_id")) linked.push(name);
+    if(name!=="privacy_deletions" && name!=="browser_captures" && fields.results.some(f=>f.name==="link_id")) linked.push(name);
   }
   expect(linked.sort()).toEqual([...tables].sort());
   // Recovery rows require a settled permit and expired lease. The real route
@@ -186,6 +188,7 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await request("links");
   const generation=await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value");
   expect((await request(`links/${id}`,"DELETE")).status).toBe(204);
+  expect(await env.DB.prepare("SELECT payload_hash FROM browser_captures WHERE link_id=?").bind(id).first("payload_hash")).toBe("");
   for(const table of tables) expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first("n"),table).toBe(0);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM bookmark_search_gram_counts").first("n")).toBe(0);
   expect(await env.DB.prepare("SELECT total FROM enrichment_provider_daily_usage WHERE day='t'")

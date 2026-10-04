@@ -324,6 +324,8 @@ internal fun CairnLinksApp(
                     id = id,
                     state = state,
                     onEnsureLink = { viewModel.ensureLink(it) },
+                    onFormatBody = { viewModel.formatBody(id) },
+                    onRefreshBody = { viewModel.ensureLink(id, force = true) },
                     onBack = { navController.popBackStack() },
                     onEdit = { navController.navigate(Routes.edit(id)) },
                     onOpenExternal = onOpenExternal,
@@ -806,6 +808,8 @@ private fun DetailScreen(
     id: Int,
     state: CairnLinksUiState,
     onEnsureLink: (Int) -> Unit,
+    onFormatBody: () -> Unit,
+    onRefreshBody: () -> Unit,
     onBack: () -> Unit,
     onEdit: () -> Unit,
     onOpenExternal: (String) -> Unit,
@@ -834,8 +838,15 @@ private fun DetailScreen(
     val editorState = rememberSaveableStateHolder()
     val personalEditor = rememberSaveable(id, state.accountGeneration, saver = PersonalTagEditorDraft.saver) { PersonalTagEditorDraft() }
     val enrichment = link?.enrichment
-    val readingText = if (showOriginal || enrichment?.translatedText.isNullOrBlank()) enrichment?.originalText.orEmpty() else enrichment?.translatedText.orEmpty()
-    val paragraphs = remember(readingText) { readingText.split(Regex("\\n+")).map { it.trim() }.filter { it.isNotEmpty() } }
+    var showUnformatted by rememberSaveable(id, state.accountGeneration) { mutableStateOf(false) }
+    val readingText = if (!showOriginal && !showUnformatted && !enrichment?.formattedContent.isNullOrBlank()) enrichment!!.formattedContent else if (showOriginal || enrichment?.translatedText.isNullOrBlank()) enrichment?.originalText.orEmpty() else enrichment?.translatedText.orEmpty()
+    val paragraphs = remember(readingText) { readingBlocks(readingText) }
+    LaunchedEffect(id, state.accountGeneration, enrichment?.formattingStatus) {
+        if (enrichment?.formattingStatus in listOf("pending", "processing")) repeat(24) {
+            kotlinx.coroutines.delay(8000)
+            onRefreshBody()
+        }
+    }
     LaunchedEffect(id, state.accountGeneration, link?.enrichment?.cacheIdentity,
         link?.enrichment?.updatedAt, link?.enrichment?.status, link?.url, link?.note) {
         onEnsureLink(id)
@@ -937,18 +948,21 @@ private fun DetailScreen(
                     if (readingText.isNotBlank()) {
                         item(key = "reading_controls") {
                             FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(if (showOriginal || enrichment.translatedText.isBlank()) "原文 ${enrichment.originalLanguage}" else "中文译文", modifier = Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(if (!showOriginal && !showUnformatted && enrichment.formattedContent.isNotBlank()) "整理版" else if (showOriginal || enrichment.translatedText.isBlank()) "原文 ${enrichment.originalLanguage}" else "中文译文", modifier = Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 if (enrichment.originalText.isNotBlank() && enrichment.translatedText.isNotBlank()) TextButton(
                                     onClick = { showOriginal = !showOriginal }, modifier = Modifier.testTag("toggle_original"),
                                 ) { Text(if (showOriginal) "查看译文" else "查看原文") }
+                                if (enrichment.formattedContent.isNotBlank()) TextButton(onClick = { showUnformatted = !showUnformatted; showOriginal = false }) { Text(if(showUnformatted) "查看整理版" else "查看原内容") }
+                                TextButton(onClick = onFormatBody, enabled = enrichment.formattingStatus !in listOf("pending", "processing")) { Text(if(enrichment.formattingStatus in listOf("pending", "processing")) "等待正文整理" else if(enrichment.formattedContent.isNotBlank()) "重新整理正文" else "整理正文") }
+                                TextButton(onClick = onRefreshBody) { Text("刷新正文") }
                                 TextButton(onClick = { onCopy(readingText) }) { Text("复制全文", style = MaterialTheme.typography.labelMedium) }
                             }
                         }
                         items(paragraphs.size, key = { "paragraph_$it" }, contentType = { "paragraph" }) { index ->
-                            SelectionContainer { Text(paragraphs[index], style = MaterialTheme.typography.bodyLarge) }
+                            ReadingBlock(paragraphs[index], enrichment.imageKeys, state.apiBaseUrl, state.preferences.apiToken)
                         }
                     }
-                    items(enrichment.imageKeys, key = { "image_$it" }, contentType = { "image" }) { key ->
+                    items(enrichment.imageKeys.filterIndexed { index, _ -> !readingText.contains("(cairn-image:$index)") }, key = { "image_$it" }, contentType = { "image" }) { key ->
                         BookmarkImage(state.apiBaseUrl, state.preferences.apiToken, key, enrichment.imageVersions[key] ?: link.mediaVersion(), enrichment.imageVersions[key])
                     }
                     if (enrichment.relatedLinks.isNotEmpty()) item(key = "links_title") { SectionLabel("相关链接") }
