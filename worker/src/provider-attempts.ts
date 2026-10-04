@@ -5,7 +5,7 @@ import { validEnrichmentSource } from "./source-validation";
 
 // Call-count reservations are the hard stop. Observed cost is recorded later,
 // since xAI does not provide a pre-call price for a tool-using response.
-export const PROVIDER_ATTEMPT_LIMITS = { daily_total: 500, daily_item: 10, daily_canary: 4 };
+export const PROVIDER_ATTEMPT_LIMITS = { daily_total: 500, daily_item: 10, canary_min_interval_seconds: 60 };
 const hex = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const integer = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -14,7 +14,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 const fail = (code: string, status = 400) => json({ error: code }, status);
 type AttemptEvent = Extract<WorkerBusinessEvent, { kind: "provider_attempt" }>;
 
-async function readBody(request: Request, maxBytes = 4096): Promise<Record<string, unknown> | Response> {
+export async function readBody(request: Request, maxBytes = 4096): Promise<Record<string, unknown> | Response> {
   if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
     return fail("invalid_content_type");
   }
@@ -100,11 +100,11 @@ async function reserve(request: Request, env: Env,
       (operation_key,stage,variant,attempt_number,request_hash,reservation_hash,model,created_at)
       SELECT ?,'canary','canary',1,?,?,?,?
       WHERE COALESCE((SELECT total FROM enrichment_provider_daily_usage WHERE day=?),0) < ?
-        AND COALESCE((SELECT canary FROM enrichment_provider_daily_usage WHERE day=?),0) < ?
+        AND NOT EXISTS (SELECT 1 FROM enrichment_provider_attempts WHERE stage='canary' AND created_at>?)
       ON CONFLICT(operation_key) DO NOTHING`)
       .bind(value.operation_key, value.request_hash, payloadHash, value.model, nowISO,
         day, PROVIDER_ATTEMPT_LIMITS.daily_total,
-        day, PROVIDER_ATTEMPT_LIMITS.daily_canary).run();
+        new Date(now.getTime() - 60_000).toISOString()).run();
   } else {
     const leaseHash = await digest(value.lease_token!);
     const deadline = new Date(now.getTime() + value.min_remaining_ms!).toISOString();
@@ -166,13 +166,17 @@ async function reserve(request: Request, env: Env,
     .bind(day, day, value.link_id ?? null, start, end)
     .first<{ total: number; canary: number; item: number }>();
   if (counts && ((counts.total ?? 0) >= PROVIDER_ATTEMPT_LIMITS.daily_total ||
-      value.stage === "canary" && (counts.canary ?? 0) >= PROVIDER_ATTEMPT_LIMITS.daily_canary ||
       value.stage !== "canary" && counts.item >= PROVIDER_ATTEMPT_LIMITS.daily_item)) {
     onResolved({ kind: "provider_attempt", action: "reserve", stage: value.stage,
       outcome: "rejected", status: 429, reason: "budget_exhausted" });
     return fail("budget_exhausted", 429);
   }
-  if (value.stage !== "canary") {
+  if (value.stage === "canary") {
+    const response = fail("canary_cooldown", 429);
+    response.headers.set("Retry-After", "60");
+    return response;
+  }
+  {
     const gate = await env.DB.prepare(`SELECT state,probe_token,probe_until,retry_at
       FROM enrichment_component_gates WHERE component=?`)
       .bind(value.stage === "fetch" ? "source" : "reading")
