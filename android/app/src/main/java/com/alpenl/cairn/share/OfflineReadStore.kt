@@ -188,7 +188,13 @@ internal class OfflineReadStore(context: Context) {
         val old = row(db, account, id) ?: throw IOException("请先读取正文再固定。")
         write(db, old.copy(pinned = pinned))
     }
-    suspend fun remove(account: String, id: Int) = access { db ->
+    suspend fun removeIfUnchanged(account: String, id: Int, expected: SavedLink?): Boolean = access { db ->
+        if (row(db, account, id)?.link != expected) return@access false
+        remove(db, account, id)
+        true
+    }
+    suspend fun remove(account: String, id: Int) = access { db -> remove(db, account, id) }
+    private fun remove(db: android.database.sqlite.SQLiteDatabase, account: String, id: Int) {
         val sync = syncState(db, account)
         writeSyncState(db, account, sync.copy(generation = sync.generation + 1))
         db.delete("sync_media", "account=? AND link_id=?", arrayOf(account, id.toString()))

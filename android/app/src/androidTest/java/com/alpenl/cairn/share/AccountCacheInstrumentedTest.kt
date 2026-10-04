@@ -103,7 +103,9 @@ class AccountCacheInstrumentedTest {
 
     @Test fun backgroundDeleteCannotBeResurrectedByLateDetail() = runBlocking<Unit> { lateDetailAfterBackgroundCommit(true) }
 
-    private suspend fun lateDetailAfterBackgroundCommit(deleted: Boolean) {
+    @Test fun staleNotFoundCannotDeleteBackgroundUpdate() = runBlocking<Unit> { lateDetailAfterBackgroundCommit(false, true) }
+
+    private suspend fun lateDetailAfterBackgroundCommit(deleted: Boolean, notFound: Boolean = false) {
         val reading = CountDownLatch(1)
         fun versioned(note: String, revision: Int, loaded: Boolean): JSONObject = link(1, note, loaded).apply {
             getJSONObject("enrichment").put("cache_identity", JSONObject()
@@ -114,7 +116,7 @@ class AccountCacheInstrumentedTest {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when(request.requestUrl!!.encodedPath) {
                 "/api/links" -> json(JSONObject().put("items", JSONArray().put(versioned("old", 1, false))).put("next_before_id", JSONObject.NULL))
-                "/api/links/1" -> { reading.countDown(); release.await(10, TimeUnit.SECONDS); json(versioned("old", 1, true)) }
+                "/api/links/1" -> { reading.countDown(); release.await(10, TimeUnit.SECONDS); if (notFound) MockResponse().setResponseCode(404) else json(versioned("old", 1, true)) }
                 else -> MockResponse().setResponseCode(404)
             }
         }

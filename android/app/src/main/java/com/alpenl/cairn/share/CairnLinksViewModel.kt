@@ -1196,11 +1196,18 @@ internal class CairnLinksViewModel(
                         offlineLinks = uiState.offlineLinks.upsert(current))
                 }
                 LinkGetResult.NotFound -> {
-                    forgetDeletedLink(id)
-                    try { offlineReads.remove(curationAccountKey(), id) } catch (_: java.io.IOException) {
+                    if (cacheGeneration != localCacheGeneration) return@launch
+                    try {
+                        if (!localReadable || !offlineReads.removeIfUnchanged(account, id, expectedLocal)) {
+                            uiState = uiState.copy(detailLoads = uiState.detailLoads - id)
+                            reloadLocalLibrary(account, verified = true)
+                            return@launch
+                        }
+                    } catch (_: java.io.IOException) {
                         if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("收藏已不存在；本地缓存清理失败，请在设置重试。"))
                     }
                     if (!isCurrentAccount(generation)) return@launch
+                    forgetDeletedLink(id)
                     uiState = uiState.copy(offlineReads = uiState.offlineReads - id, offlineLinks = uiState.offlineLinks.filterNot { it.id == id }, links = uiState.links.filterNot { it.id == id })
                     uiState = uiState.copy(detailLoads = uiState.detailLoads + (id to DetailLoadState.NotFound))
                 }
