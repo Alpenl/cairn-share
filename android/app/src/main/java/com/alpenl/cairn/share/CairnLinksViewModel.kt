@@ -235,6 +235,7 @@ internal class CairnLinksViewModel(
     // The serial curation action queue. A pending action is only removed after
     // the server confirms it (R2-04/R2-05).
     private var v2Pumping = false
+    private var v2PumpRequested = false
     private var deletedLinks = emptySet<Int>()
     private var pendingDeletions = emptySet<Int>()
 
@@ -259,6 +260,7 @@ internal class CairnLinksViewModel(
         val taxonomy = offlineReads.taxonomy(account)
         val info = offlineReads.storageInfo(account)
         val sync = offlineReads.syncState(account)
+        val removed = offlineReads.deletedIds(account).toSet()
         val error = offlineReads.syncError(account)
         val size = (info.textBytes + localMedia.diskBytes(account)) / (1024.0 * 1024.0)
         if (!isCurrentAccount(generation) || account != curationAccountKey()) return
@@ -267,6 +269,7 @@ internal class CairnLinksViewModel(
         verifiedDetails.retainAll(present)
         if (verified) verifiedDetails += links.filter { it.enrichment?.contentLoaded == true }.map { it.id }
         uiState = uiState.copy(links = links.filterNot { it.id in deletedLinks },
+            detailLoads = uiState.detailLoads + removed.associateWith { DetailLoadState.NotFound },
             offlineLinks = rows.map { it.link },
             offlineReads = rows.associate { it.link.id to OfflineReadInfo(it.savedAt, it.pinned, true, it.tagLabels) },
             taxonomy = taxonomy ?: uiState.taxonomy, v2Taxonomy = taxonomy ?: uiState.v2Taxonomy,
@@ -441,6 +444,7 @@ internal class CairnLinksViewModel(
             when (result) {
                 is V2Result.Loaded -> {
                     if (result.value.revision < (uiState.v2Selections[id]?.revision ?: 0)) return@launch
+                    val draftBeforeRead = uiState.v2Drafts[id]
                     val pending = curationActionStore.snapshot().filter { it.accountKey == account && it.linkId == id }
                     if (id in deletedLinks || account != curationAccountKey() || !isCurrentAccount(generation) || selectionRequests[id] != request) return@launch
                     val draft = pending.fold(result.value) { current, action ->
@@ -448,7 +452,8 @@ internal class CairnLinksViewModel(
                     }
                     uiState = uiState.copy(
                         v2Selections = uiState.v2Selections + (id to result.value),
-                        v2Drafts = if (pending.isEmpty()) uiState.v2Drafts - id else uiState.v2Drafts + (id to draft),
+                        // Enqueue is asynchronous. An empty durable snapshot cannot discard an in-memory edit.
+                        v2Drafts = if (pending.isEmpty() || uiState.v2Drafts[id] != draftBeforeRead) uiState.v2Drafts else uiState.v2Drafts + (id to draft),
                         v2SelectionAvailable = true,
                     )
                 }
@@ -496,6 +501,7 @@ internal class CairnLinksViewModel(
         val queued = QueuedCurationAction(id, UUID.randomUUID().toString(), field, term, action, selection.revision, account,
             expectedDecisionId = selection.decisionId, expectedContentRevision = selection.contentRevision,
             legacyEndpoint = !selection.tagSystem)
+        selectionRequests[id] = (selectionRequests[id] ?: 0) + 1
         uiState = uiState.copy(v2Drafts = uiState.v2Drafts + (id to draft), v2Busy = uiState.v2Busy + id)
         viewModelScope.launch {
             try {
@@ -509,7 +515,8 @@ internal class CairnLinksViewModel(
     }
 
     private fun pumpV2Actions() {
-        if (v2Pumping) return
+        if (v2Pumping) { v2PumpRequested = true; return }
+        v2PumpRequested = false
         val token = uiState.preferences.apiToken
         if (token.isBlank()) return
         val account = curationAccountKey()
@@ -557,7 +564,7 @@ internal class CairnLinksViewModel(
             } finally {
                 v2Pumping = false
                 if (account == curationAccountKey() && isCurrentAccount(generation)) uiState = uiState.copy(v2Busy = emptySet())
-                else pumpV2Actions()
+                if (v2PumpRequested || account != curationAccountKey() || !isCurrentAccount(generation)) pumpV2Actions()
             }
         }
     }
@@ -1140,7 +1147,10 @@ internal class CairnLinksViewModel(
         }
         val initial = uiState.links.firstOrNull { it.id == id }
         uiState = uiState.copy(detailLoads = uiState.detailLoads + (id to DetailLoadState.Loading))
+        val account = curationAccountKey()
         viewModelScope.launch {
+            var localReadable = true
+            val expectedLocal = try { offlineReads.get(account, id) } catch (_: java.io.IOException) { localReadable = false; null }
             val result = cancellableRead { repository.get(id, apiToken, it) }
             if (!isCurrentAccount(generation) || id in deletedLinks) return@launch
             if (uiState.links.firstOrNull { it.id == id } != initial) {
@@ -1152,28 +1162,38 @@ internal class CairnLinksViewModel(
             }
             when (result) {
                 is LinkGetResult.Loaded -> {
-                    verifiedDetails += id
-                    uiState = uiState.copy(
-                        links = uiState.links.upsert(result.link),
-                        libraryResults = uiState.libraryResults.map { if (it.id == result.link.id) result.link else it },
-                        searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it },
-                        detailLoads = uiState.detailLoads - id,
-                    )
-                    try {
-                        if (cacheGeneration != localCacheGeneration) return@launch
-                        val previous = offlineReads.get(curationAccountKey(), id)
-                        val current = result.link.withMediaVersionsFrom(previous)
-                        val cached = offlineReads.save(curationAccountKey(), current,
-                            labels = readerTags(result.link, null, uiState.v2Taxonomy ?: uiState.taxonomy))
-                        if (isCurrentAccount(generation) && cached != null) {
-                            val saved = offlineReads.snapshot(curationAccountKey())
-                            if (isCurrentAccount(generation)) uiState = uiState.copy(
-                                offlineReads = saved.associate { it.link.id to OfflineReadInfo(it.savedAt, it.pinned, it.link.id in verifiedDetails, it.tagLabels) },
-                                offlineLinks = saved.map { it.link })
-                        }
-                    } catch (_: java.io.IOException) {
-                        if (isCurrentAccount(generation)) uiState = uiState.copy(message = nextMessage("正文已读取；离线缓存未能保存，请检查存储。"))
+                    if (cacheGeneration != localCacheGeneration) return@launch
+                    var cached: OfflineReadEntry? = null
+                    var cacheFailed = !localReadable
+                    if (localReadable && result.link.enrichment?.contentLoaded == true && result.link.enrichment.cacheIdentity != null) {
+                        try {
+                            cached = offlineReads.saveDownloaded(account, result.link, expectedLocal,
+                                readerTags(result.link, null, uiState.v2Taxonomy ?: uiState.taxonomy))
+                            if (!isCurrentAccount(generation) || id in deletedLinks) return@launch
+                            if (cached == null) {
+                                // Background sync committed before its UI notification; reject this late detail.
+                                uiState = uiState.copy(detailLoads = uiState.detailLoads - id)
+                                reloadLocalLibrary(account, verified = true)
+                                return@launch
+                            }
+                        } catch (_: java.io.IOException) { cacheFailed = true }
                     }
+                    if (!isCurrentAccount(generation) || id in deletedLinks || uiState.links.firstOrNull { it.id == id } != initial) {
+                        if (isCurrentAccount(generation)) uiState = uiState.copy(detailLoads = uiState.detailLoads - id)
+                        return@launch
+                    }
+                    verifiedDetails += id
+                    val current = cached?.link ?: result.link.withMediaVersionsFrom(expectedLocal)
+                    uiState = uiState.copy(
+                        links = uiState.links.upsert(current),
+                        libraryResults = uiState.libraryResults.map { if (it.id == id) current else it },
+                        searchResults = uiState.searchResults.map { if (it.id == id) current else it },
+                        detailLoads = uiState.detailLoads - id,
+                        message = if (cacheFailed) nextMessage("正文已读取；离线缓存未能保存，请检查存储。") else uiState.message,
+                    )
+                    if (cached != null) uiState = uiState.copy(
+                        offlineReads = uiState.offlineReads + (id to OfflineReadInfo(cached.savedAt, cached.pinned, true, cached.tagLabels)),
+                        offlineLinks = uiState.offlineLinks.upsert(current))
                 }
                 LinkGetResult.NotFound -> {
                     forgetDeletedLink(id)

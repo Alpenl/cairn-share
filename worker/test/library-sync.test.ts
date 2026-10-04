@@ -95,10 +95,14 @@ it("includes custom label renames, manual classification and entity revisions wi
   expect(response.status).toBe(200);
   const manual = await finish(changed.at(-1)!.cursor);
   expect(JSON.stringify(manual)).toContain('"design"');
-  await env.DB.prepare("INSERT INTO entity_states(link_id,state,content_revision,entities,updated_at) VALUES(1,'failed',1,'[]','now')").run();
+  const snapshot = await env.DB.prepare("INSERT INTO evidence_snapshots(link_id,content_revision,content_hash,payload,created_at) VALUES(1,1,'hash','{}','now')").run();
+  await env.DB.prepare("INSERT INTO entity_states(link_id,state,content_revision,content_hash,evidence_snapshot_id,entities,updated_at) VALUES(1,'failed',1,'hash',?,'[]','now')").bind(snapshot.meta.last_row_id).run();
   const entity = await finish(manual.at(-1)!.cursor);
   expect(entity.flatMap(p=>p.items).map(i=>i.id)).toContain(1);
   expect(JSON.stringify(entity)).toContain('"entity_state":"failed"');
+  await env.DB.prepare("UPDATE evidence_snapshots SET content_hash='changed' WHERE id=?").bind(snapshot.meta.last_row_id).run();
+  const invalidated = await finish(entity.at(-1)!.cursor);
+  expect(JSON.stringify(invalidated)).toContain('"entity_state":"stale"');
 });
 
 it("never acknowledges a retention gap introduced while reading a page", async () => {

@@ -6,7 +6,7 @@ import { ReadProfile, profileBindings } from "./read-profiling";
 import { indexedSearchCandidate } from "./search-index";
 import { encodeCursor, decodeCursor } from "./cursor";
 import { cleanupDeletedImages, maintainPrivacy } from "./privacy";
-import { selectionFilters, SELECTION_FILTER_KEYS } from "./selection-filter";
+import { selectionFilters, SELECTION_FILTER_KEYS, entityStateSQL } from "./selection-filter";
 import { tagSystemRoute, attachTagSummaries, projectTagSummaryRows, contentFunctionsAware } from "./tag-system";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
@@ -444,7 +444,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     return routeMethod(request, ["GET"], () => librarySyncRoute(request, env, async (ids) => {
       if (!ids.length) return [];
       const rows = await env.DB.prepare(`SELECT ${LINK_COLUMNS},${ENRICHMENT_COLUMNS},${contentColumns(false)}${cacheIdentityColumns(true)},${tagSummaryColumns()},
-        COALESCE((SELECT CASE WHEN e.content_revision<>links.content_revision THEN 'stale' ELSE e.state END FROM entity_states e WHERE e.link_id=links.id),'not_run') AS entity_state
+        ${entityStateSQL} AS entity_state
         FROM links WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id DESC`).bind(JSON.stringify(ids)).all<LinkRow & EnrichmentListRow & TagSummaryRow & {entity_state:string}>();
       return projectTagSummaryRows(rows.results.map(row => {
         const item = mapAppLink(row, true, true);
