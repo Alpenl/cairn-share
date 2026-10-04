@@ -1,6 +1,7 @@
 import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {build as bundle} from "esbuild";
 import JSZip from "jszip";
 import { API_BASE } from "../src/config.mjs";
 
@@ -60,6 +61,17 @@ export async function build({ outputRoot = join(projectRoot, "dist"), apiBase = 
     const folder = join(outputRoot, browser);
     await rm(folder, { recursive: true, force: true });
     await cp(join(projectRoot, "src"), folder, { recursive: true });
+    await bundle({entryPoints:[join(projectRoot,"src/extractor.mjs")],bundle:true,format:"iife",platform:"browser",target:"es2022",minify:true,legalComments:"eof",outfile:join(folder,"capture-extractor.js")});
+    await rm(join(folder,"extractor.mjs"));
+    const licenses=[];
+    for(const name of ['defuddle','turndown','turndown-plugin-gfm','dompurify']) {
+      const root=join(projectRoot,'node_modules',name);
+      const file=(await readdir(root)).find(file=>/^license(?:\.md|\.txt)?$/i.test(file));
+      if(!file)throw new Error(`Missing license: ${name}`);
+      licenses.push(name+'\n'+await readFile(join(root,file),'utf8'));
+    }
+    await writeFile(join(folder,'THIRD_PARTY_LICENSES.txt'),licenses.join('\n\n'));
+
     if (apiBase !== API_BASE) {
       const configPath = join(folder, "config.mjs");
       const source = await readFile(configPath, "utf8");

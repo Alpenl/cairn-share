@@ -163,7 +163,7 @@ test("capture rendered content with real scripting and keep success visible in a
   await expect(popup.locator('#status')).toContainText('已同步');
   const saved=posts.find(p=>p.url===article.url());
   expect(saved.capture.text).toContain('# 已加载文章');
-  expect(saved.capture.text).toContain('- 第一项');
+  expect(saved.capture.text).toMatch(/^-\s+第一项$/m);
   expect(saved.capture.text).toContain('![已加载配图](cairn-image:0)');
   expect(saved.capture.images).toHaveLength(1);
   expect(saved.capture.images[0].content_type).toBe('image/webp');
@@ -196,4 +196,21 @@ test('archives lazy cross-origin image bytes and resumes a video using durable m
  expect(saved.capture.media).toHaveLength(1);const upload=[...mediaUploads.values()].at(-1);expect(upload.parts).toHaveLength(2);expect(Buffer.concat(upload.bytes)).toEqual(movie);
  expect(await worker.evaluate(async()=>new Promise((resolve,reject)=>{const r=indexedDB.open('cairn-media-queue',1);r.onsuccess=()=>{const c=r.result.transaction('files').objectStore('files').count();c.onsuccess=()=>{resolve(c.result);r.result.close();};};r.onerror=reject;}))).toBe(0);
  await article.close();
+});
+
+
+test('library extractor isolates the selected X post and keeps paragraphs, links and media',async()=>{
+ const page=await context.newPage();
+ await page.route('https://x.com/Example/status/123',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<html><body>
+ <article data-testid="tweet"><a href="/Example/status/123"><time>12:00</time></a><div data-testid="User-Name"><a href="/Example">Example</a><a href="/Example">@Example</a></div>
+ <div>翻译自 韩语</div><div data-testid="tweetText">第一段正文。
+
+第二段正文，有 <a href="https://example.org/paper">原始论文</a>。</div><div>评价此翻译：</div><a href="/Example/status/123/analytics">9万 查看</a><button>转发</button><video src="https://video.twimg.com/example.mp4"></video></article>
+ <article data-testid="tweet"><div data-testid="tweetText">推荐广告，不属于收藏</div></article></body></html>`}));
+ await page.goto('https://x.com/Example/status/123');
+ await page.addScriptTag({content:await readFile(join(root,'build/chrome/capture-extractor.js'),'utf8')});
+ const result=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true));
+ expect(result.text).toContain('第一段正文。');expect(result.text).toContain('第二段正文');expect(result.text).not.toMatch(/翻译自|评价此翻译|推荐广告|9万|@Example/);
+ expect(result.text).toContain('https://example.org/paper');expect(result.media).toHaveLength(1);expect(result.media[0].url).toBe('https://video.twimg.com/example.mp4');
+ await page.close();
 });
