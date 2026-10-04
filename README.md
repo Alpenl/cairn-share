@@ -417,3 +417,7 @@ GitHub Release 只上传 APK 和 `SHA256SUMS`。本项目不自动上传 Google 
 ## 许可证
 
 [MIT](LICENSE)
+
+### 持久化模型自检
+
+迁移0056引入配置摘要绑定的`provider_checks`。Enricher专用接口`/api/enrichment/provider-checks/{status,claim,finish,recover}`共享检查租约、24小时成功缓存、5至60分钟退避和60秒手动恢复冷却；App token无权访问。恢复只安排检查，自检通过后仅提前现有source/reading单次探测，不关闭阶段熔断、不抢占租约、不改分类或付费账本。旧canary每日4次限制改为至少60秒调用间隔；全局每日500及每篇10次原限制保持。

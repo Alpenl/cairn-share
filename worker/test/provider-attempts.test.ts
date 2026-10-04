@@ -464,22 +464,21 @@ it("rolls back the operator audit if releasing the blocked link fails", async ()
     enrichment_status: "processing" });
 });
 
-it("budgets startup canaries independently even across unique operations", async () => {
+it("spaces canaries without a four-per-day lockout and preserves the global ledger", async () => {
   const path = "enrichment/provider-attempts/reserve";
-  for (let n = 0; n < 4; n++) {
+  for (let n = 0; n < 6; n++) {
     const body = { operation_key: n.toString(16).repeat(64), request_hash: "f".repeat(64),
       model: "grok-test", stage: "canary", variant: "canary", attempt_number: 1 };
     expect(await (await call(path, body)).json()).toEqual({ granted: true, reason: "reserved" });
+    const blocked = await call(path, {...body, operation_key:"f".repeat(64)});
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toEqual({error:"canary_cooldown"});
+    expect(blocked.headers.get("Retry-After")).toBe("60");
+    await env.DB.prepare("UPDATE enrichment_provider_attempts SET created_at=? WHERE stage='canary'")
+      .bind(new Date(Date.now()-61_000).toISOString()).run();
   }
-  const excess = { operation_key: "f".repeat(64), request_hash: "f".repeat(64),
-    model: "grok-test", stage: "canary", variant: "canary", attempt_number: 1 };
-  const rejected = await call(path, excess);
-  expect(rejected.status).toBe(429);
-  expect(await rejected.json()).toEqual({ error: "budget_exhausted" });
-  await env.DB.prepare("DELETE FROM enrichment_provider_attempts WHERE stage='canary'").run();
-  expect((await call(path, excess)).status).toBe(429);
   const summary = await call("enrichment/provider-attempts/summary", undefined, "internal", "GET");
-  expect(await summary.json()).toMatchObject({ budget: { used: { canary: 4, total: 4 } } });
+  expect(await summary.json()).toMatchObject({ budget: { used: { canary: 6, total: 6 } } });
 });
 
 it("defers a budget-denied stage without charging a job attempt or losing its priority", async () => {

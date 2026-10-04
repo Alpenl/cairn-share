@@ -18,6 +18,7 @@ import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
 import { readSelectionSnapshot, tagSummaryColumns, type TagSummaryRow } from "./selection-state";
 import { emitProviderRecovery, emitRequest, emitWorkerBusiness, logExporterStatus, policyReadAvailable, publishPolicy, requestPolicy,
   type ProviderRecoveryEvent, type RequestD1Stats, type WorkerBusinessEvent } from "./observability";
+import { providerCheckRoute } from "./provider-checks";
 import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
 import { MAX_ENRICHMENT_ATTEMPTS, SOURCE_CLAIM_CANDIDATE_SQL, SOURCE_GATE_READY_SQL,
   SOURCE_NEXT_COMPONENT_SQL, X_LINK_SQL,
@@ -594,6 +595,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["POST"], () => claimEnrichmentJob(request, env, timing));
+  }
+
+  if (path.startsWith("/api/enrichment/provider-checks/")) {
+    const authResult = requireEnricherToken(request, env);
+    if (authResult !== null) return authResult;
+    return providerCheckRoute(request, env, path);
   }
 
   if (path.startsWith("/api/enrichment/provider-attempts")) {
