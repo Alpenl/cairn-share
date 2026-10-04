@@ -1,3 +1,5 @@
+import { presentationColumns, presentationRoute } from "./presentations";
+import { browserCapture } from "./browser-capture";
 import { readBoundedJSON, readJSONObject } from "./json-body";
 import { ReadProfile, profileBindings } from "./read-profiling";
 import { indexedSearchCandidate } from "./search-index";
@@ -81,6 +83,8 @@ interface EnrichmentListRow {
   enrichment_paid_stage: string | null;
   ai_title: string | null;
   original_language: string | null;
+  formatted_content?: string | null;
+  formatting_status?: string | null;
   original_text: string | null;
   translated_text: string | null;
   summary: string | null;
@@ -211,7 +215,7 @@ const ENRICHMENT_COLUMNS = `enrichment_status, enrichment_attempts, enrichment_n
 function contentColumns(summary: boolean): string {
   return summary
     ? "NULL AS original_text, NULL AS translated_text, NULL AS related_links"
-    : "original_text, translated_text, related_links";
+    : `original_text, translated_text, related_links, ${presentationColumns}`;
 }
 
 function searchExcerptColumns(enabled: boolean, query: string | undefined): { sql: string; bindings: string[] } {
@@ -429,6 +433,18 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   if (path === "/health") {
     return routeMethod(request, ["GET"], () => json({ ok: true }));
+  }
+
+  if (/^\/api\/links\/\d+\/presentation$/.test(path) || path.startsWith("/api/enrichment/presentations/") || /^\/api\/enrichment\/\d+\/presentation$/.test(path)) {
+    const auth = path.startsWith("/api/links/") ? requireApiToken(request, env) : requireEnricherToken(request, env);
+    if (auth) return auth;
+    return presentationRoute(request, env, path);
+  }
+
+  if (path === "/api/captures") {
+    const auth = requireApiToken(request, env);
+    if (auth) return auth;
+    return routeMethod(request, ["POST"], () => browserCapture(request, env));
   }
 
   if (path === "/api/links") {
@@ -1196,7 +1212,7 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, w
       `SELECT id, url, note, created_at, enrichment_status, enrichment_attempts,
               enrichment_next_retry_at, enrichment_paid_uncertain, enrichment_paid_stage,
               ai_title, original_language, original_text,
-              translated_text, summary, related_links, images, enrichment_model,
+              translated_text, ${presentationColumns}, summary, related_links, images, enrichment_model,
               enrichment_error, enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
               CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable${cacheIdentityColumns(withIdentity)}
               ${tagAware ? "," + tagSummaryColumns() : ""}
@@ -1801,7 +1817,7 @@ async function completeEnrichmentJob(
             translated_text = ?,
             summary = ?,
             related_links = ?,
-            images = ?,
+            images = CASE WHEN EXISTS(SELECT 1 FROM enrichment_sources s WHERE s.link_id=links.id AND json_extract(s.payload,'$.model')='browser_capture') THEN images ELSE ? END,
             classification = COALESCE(?, classification),
             enrichment_model = ?,
             enrichment_error = NULL,
@@ -2232,7 +2248,7 @@ function imageExtension(contentType: string): string {
 }
 
 function validateStoredImages(value: unknown, id: number): EnrichmentImage[] | null {
-  if (!Array.isArray(value) || value.length > MAX_IMAGES) return null;
+  if (!Array.isArray(value) || value.length > 24) return null;
   const images: EnrichmentImage[] = [];
   const seen = new Set<string>();
   for (const item of value) {
@@ -2604,6 +2620,8 @@ function mapAppLink(row: LinkRow & EnrichmentListRow, detail: boolean, withIdent
       ...(detail ? {
         original_text: row.original_text,
         translated_text: row.translated_text,
+        formatted_content: row.formatted_content ?? null,
+        formatting_status: row.formatting_status ?? null,
         related_links: parseStoredRelatedLinks(row.related_links),
         images: parseStoredImages(row.images, row.id)
       } : {})
@@ -2648,6 +2666,7 @@ function mapEnrichmentListItem(row: EnrichmentListRow, withIdentity = false): Re
     original_language: row.original_language,
     original_text: row.original_text,
     translated_text: row.translated_text,
+    ...(row.formatted_content !== undefined ? {formatted_content:row.formatted_content, formatting_status:row.formatting_status} : {}),
     summary: row.summary,
     related_links: parseStoredRelatedLinks(row.related_links),
     images: parseStoredImages(row.images, row.id),

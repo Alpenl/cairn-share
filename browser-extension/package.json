@@ -1,0 +1,20 @@
+{
+  "name": "cairn-browser-extension",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Collect links and notes into Cairn Share from your browser.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "playwright test",
+    "test:firefox": "node test/firefox-smoke.mjs",
+    "verify": "npm test && npm run build && npm run test:browser"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "jszip": "3.10.1"
+  }
+}

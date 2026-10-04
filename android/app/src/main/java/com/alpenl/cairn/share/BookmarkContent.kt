@@ -72,7 +72,7 @@ internal fun LinkEnrichment.statusLabel(): String = when (status) {
     "processing" -> "正在整理内容"
     "failed" -> "读取失败，稍后重试"
     "exhausted" -> "暂时无法读取内容"
-    "unsupported" -> "尚未归档正文"
+    "unsupported" -> if (originalText.isNotBlank()) "正文已归档" else "尚未归档正文"
     else -> "等待整理内容"
 }
 

@@ -41,7 +41,7 @@ internal object OfflineReadJson {
             .put("tag_ref", tag.tagRef).put("label", tag.label).put("revision", tag.revision).put("status", tag.status).put("owner_id", tag.ownerId)) } })
         .apply { link.enrichment?.let { enrichment -> put("enrichment", JSONObject()
             .put("status", enrichment.status).put("source", enrichment.source).put("ai_title", enrichment.aiTitle).put("summary", enrichment.summary)
-            .put("original_language", enrichment.originalLanguage).put("original_text", enrichment.originalText).put("translated_text", enrichment.translatedText)
+            .put("original_language", enrichment.originalLanguage).put("original_text", enrichment.originalText).put("translated_text", enrichment.translatedText).put("formatted_content", enrichment.formattedContent).put("formatting_status", enrichment.formattingStatus)
             .put("related_links", JSONArray(enrichment.relatedLinks)).put("images", JSONArray().also { array -> enrichment.imageKeys.forEach { array.put(JSONObject().put("key", it)) } })
             .put("content_loaded", enrichment.contentLoaded).put("why", enrichment.why).put("curation_status", enrichment.curationStatus.apiValue)
             .put("classification_reviewed", enrichment.classificationReviewed).put("entity_state", enrichment.entityState).put("updated_at", enrichment.updatedAt)
