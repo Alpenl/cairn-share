@@ -124,7 +124,7 @@ it("backfills the indexed read model from 0048 without changing original materia
     overrides: (await env.DB.prepare("SELECT * FROM curation_overrides WHERE link_id=1").all()).results,
     facts: (await env.DB.prepare("SELECT * FROM tag_change_facts WHERE link_id=1").all()).results };
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-  expect(await env.DB.prepare("SELECT * FROM links WHERE id=1").first()).toEqual(before.link);
+  expect(await env.DB.prepare("SELECT * FROM links WHERE id=1").first()).toEqual({...before.link,url_identity:null,last_capture_id:null});
   expect((await env.DB.prepare("SELECT * FROM curation_overrides WHERE link_id=1").all()).results).toEqual(before.overrides);
   expect((await env.DB.prepare("SELECT * FROM tag_change_facts WHERE link_id=1").all()).results).toEqual(before.facts);
   expect((await state(1)).selection.topics).toEqual(["image_creation", "life"]);

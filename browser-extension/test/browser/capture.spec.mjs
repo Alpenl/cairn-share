@@ -1,18 +1,32 @@
 import { chromium, expect, test } from "@playwright/test";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "../../scripts/build.mjs";
 
-let context, server, origin, extensionURL, worker, root;
+let context, server, origin, extensionURL, worker, root, mediaServer, mediaOrigin;
+const mediaUploads=new Map();
+let failSecondPart=false;const partRequests=[];
+const movie=Buffer.alloc(9*1024*1024,42);movie.write("ftypisom",4);
+const picture=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a42kAAAAASUVORK5CYII=","base64");
 let offline = false, holdResponse = false, releaseResponse;
 const posts = [];
 const records = new Map();
 const errors = [];
 
 test.beforeAll(async () => {
+  mediaServer=createServer((req,res)=>{const bytes=req.url==='/movie.mp4'?movie:picture;res.writeHead(200,{'Content-Type':req.url==='/movie.mp4'?'video/mp4':'image/png','Content-Length':bytes.length});res.end(bytes);});
+  await new Promise(resolve=>mediaServer.listen(0,'127.0.0.1',resolve));mediaOrigin=`http://localhost:${mediaServer.address().port}`;
   server = createServer(async (request, response) => {
+    if(request.url.startsWith('/api/media/uploads/')) {
+      if(request.headers.authorization!=='Bearer browser-test-token'){response.writeHead(401);response.end();return;}
+      const [,id,action]=request.url.match(/uploads\/([a-f0-9]+)(?:\/(.+))?$/);const chunks=[];for await(const c of request)chunks.push(c);const raw=Buffer.concat(chunks);
+      let saved=mediaUploads.get(id);response.setHeader('Content-Type','application/json');
+      if(!action){if(!saved){saved={status:'uploading',parts:[],bytes:[],...JSON.parse(raw)};mediaUploads.set(id,saved);}response.end(JSON.stringify({...saved,bytes:undefined,chunk_size:8*1024*1024}));return;}
+      if(action==='complete'){saved.status='ready';response.end(JSON.stringify({status:'ready'}));return;}
+      const number=Number(action);partRequests.push(number);if(number===2&&failSecondPart){response.writeHead(503);response.end('{}');return;}saved.parts[number-1]={partNumber:number};saved.bytes[number-1]=raw;response.end(JSON.stringify({part:number}));return;
+    }
     if (request.url.startsWith("/api/")) {
       if (offline) { response.writeHead(503); response.end(); return; }
       if (request.headers.authorization !== "Bearer browser-test-token") { response.writeHead(401); response.end(); return; }
@@ -37,6 +51,9 @@ test.beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "cairn-browser-"));
   await build({ outputRoot: join(root, "build"), apiBase: origin, pack: false });
   const extensionPath = join(root, "build", "chrome");
+  // Grant only our synthetic CDN in this fixture. The real optional permission
+  // request still executes, and the image response deliberately has no CORS.
+  const manifest=JSON.parse(await readFile(join(extensionPath,'manifest.json'),'utf8'));manifest.host_permissions.push('http://localhost/*');await writeFile(join(extensionPath,'manifest.json'),JSON.stringify(manifest));
   context = await chromium.launchPersistentContext(join(root, "profile"), {
     channel: "chromium", headless: true,
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"]
@@ -50,6 +67,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   if (releaseResponse) releaseResponse();
   await context?.close();
+  await new Promise(resolve=>{mediaServer.closeAllConnections();mediaServer.close(resolve);});
   await new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); });
   await rm(root, { recursive: true, force: true });
 });
@@ -161,4 +179,21 @@ test("capture rendered content with real scripting and keep success visible in a
   await popup.reload();await expect(popup.locator('#status')).toContainText('已同步');
   await popup.locator('#note').fill('补充备注');await expect(popup.locator('#save')).toBeEnabled();
   await article.close();await popup.close();
+});
+
+
+test('archives lazy cross-origin image bytes and resumes a video using durable multipart state',async()=>{
+ await worker.evaluate(()=>chrome.storage.local.remove('cairn_capture_draft'));failSecondPart=true;
+ const article=await context.newPage();await article.goto(`${origin}/lazy-media`);
+ await article.evaluate(mediaOrigin=>{document.body.innerHTML=`<article><h1>懒加载图文</h1><p>配图与视频归档。</p><img data-src="${mediaOrigin}/photo.png" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"><video preload="none"><source src="${mediaOrigin}/movie.mp4" type="video/mp4"></video></article>`;},mediaOrigin);
+ const tab=await worker.evaluate(async url=>(await chrome.tabs.query({})).find(t=>t.url===url),article.url());
+ const popup=await context.newPage();await popup.addInitScript(tab=>{chrome.tabs.query=async()=>[tab];},tab);await popup.goto(`${extensionURL}/popup.html`);
+ await popup.locator('#save').click();await expect(popup.locator('#queue')).toContainText('服务暂时不可用');
+ await popup.close();const cdp=await context.newCDPSession(article);await cdp.send('ServiceWorker.enable');await cdp.send('ServiceWorker.stopAllWorkers');failSecondPart=false;
+ const resumed=await context.newPage();await resumed.goto(`${extensionURL}/options.html`);await resumed.locator('#retry-all').click();await expect(resumed.locator('#pending-count')).toHaveText('0');
+ const result=await worker.evaluate(async()=>(await chrome.storage.local.get('cairn_capture_v1')).cairn_capture_v1.lastResult);expect(result.mediaSaved).toBe(1);expect(partRequests.filter(n=>n===1)).toHaveLength(1);await resumed.close();
+ const saved=posts.find(p=>p.url===article.url());expect(saved.capture.images).toHaveLength(1);expect(Buffer.from(saved.capture.images[0].data,'base64')).toEqual(picture);expect(saved.capture.missing_images).toBe(0);
+ expect(saved.capture.media).toHaveLength(1);const upload=[...mediaUploads.values()].at(-1);expect(upload.parts).toHaveLength(2);expect(Buffer.concat(upload.bytes)).toEqual(movie);
+ expect(await worker.evaluate(async()=>new Promise((resolve,reject)=>{const r=indexedDB.open('cairn-media-queue',1);r.onsuccess=()=>{const c=r.result.transaction('files').objectStore('files').count();c.onsuccess=()=>{resolve(c.result);r.result.close();};};r.onerror=reject;}))).toBe(0);
+ await article.close();
 });

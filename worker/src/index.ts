@@ -1,5 +1,6 @@
 import { presentationColumns, presentationRoute } from "./presentations";
 import { browserCapture } from "./browser-capture";
+import { mediaRoute } from './archived-media';
 import { readBoundedJSON, readJSONObject } from "./json-body";
 import { ReadProfile, profileBindings } from "./read-profiling";
 import { indexedSearchCandidate } from "./search-index";
@@ -161,8 +162,8 @@ type ErrorCode =
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage, If-None-Match",
+  "Access-Control-Allow-Methods": "GET, HEAD, PUT, POST, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, Range, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage, If-None-Match",
   "Access-Control-Expose-Headers": "X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage",
   "Access-Control-Max-Age": "86400"
 };
@@ -445,6 +446,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const auth = requireApiToken(request, env);
     if (auth) return auth;
     return routeMethod(request, ["POST"], () => browserCapture(request, env));
+  }
+
+  if (path.startsWith('/api/media/') || path.startsWith('/api/enrichment/media/') || /^\/api\/(links|enrichment)\/\d+\/media$/.test(path)) {
+    const auth = path.startsWith('/api/enrichment/') ? requireEnricherToken(request, env) : requireApiToken(request, env);
+    if (auth) return auth;
+    return mediaRoute(request, env, path);
   }
 
   if (path === "/api/links") {

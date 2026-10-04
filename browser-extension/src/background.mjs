@@ -3,6 +3,7 @@ import { captureTab } from "./capture.mjs";
 import { CaptureError } from "./config.mjs";
 import { createClient } from "./api.mjs";
 import { createController } from "./controller.mjs";
+import { pruneMedia } from './media.mjs';
 
 const ext = globalThis.browser ?? chrome;
 const controller = createController({
@@ -29,6 +30,7 @@ async function initialize() {
   if (ext.storage.local.setAccessLevel) await ext.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
   await ensureAlarm();
   const state = await controller.snapshot();
+  if(typeof indexedDB!=='undefined')await pruneMedia(state.queue.map(j=>j.client_id));
   await ext.action.setBadgeText({ text: state.queue.length ? String(state.queue.length) : "" });
   await controller.flush();
 }
@@ -59,7 +61,11 @@ async function dispatch(message) {
       return result;
     }
     case "retry": return controller.flush({ force: true, onlyId: message.client_id });
-    case "remove": return controller.remove(message.client_id);
+    case "remove": {
+      const state=await controller.remove(message.client_id);
+      if(typeof indexedDB!=='undefined')await pruneMedia(state.queue.map(j=>j.client_id));
+      return state;
+    }
     default: throw new Error("Unknown message");
   }
 }

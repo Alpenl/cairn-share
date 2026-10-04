@@ -54,8 +54,19 @@ export const ERROR_TEXT = {
   capture_unavailable: "未能读取此页正文。请回到网页重试，或取消勾选正文采集，仅保存链接。",
   invalid_capture: "采集内容未通过校验，请更新插件后重试。",
   capture_conflict: "这次收藏的内容与已提交内容不同，请重新打开插件保存。",
+  capture_images_incomplete: "本次图片未取全，原收藏已保留。请允许媒体站点权限后重新采集。",
   capture_deleted: "该收藏已经被删除，请移除待上传记录；如需恢复，请重新收藏。",
   upgrade_required: "收藏服务尚未支持正文采集。内容已保存在本机，服务更新后可重试。",
+  media_permission: '正文已保存；媒体站点尚未授权，请点击允许读取媒体后重试。',
+  media_unavailable: '正文已保存；未取得媒体文件，请在原页面播放或展开媒体后重新采集。',
+  media_too_large: '正文已保存；单个媒体超过 256 MB，尚未归档。',
+  media_protected: '正文已保存；媒体受加密保护，未能归档。',
+  media_live_or_unsupported: '正文已保存；媒体为直播或未能取得完整播放列表，尚未归档。',
+  media_unsupported: '正文已保存；媒体格式尚不支持，未归档。',
+  media_stale: '原收藏已删除或已重新采集，请移除此旧媒体任务。',
+  media_conflict: '媒体内容发生变化，请重新采集原页面。',
+  invalid_media: '媒体文件未通过校验，请重新采集。',
+  media_incomplete: '媒体尚未上传完整，请重试以继续上传。',
   unexpected: "操作未完成，请重试。"
 };
 
