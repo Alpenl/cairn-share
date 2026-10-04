@@ -42,7 +42,7 @@ it("backfills without changing any old business table or byte-gram and preserves
   const old = new Map<string,unknown[]>();
   for (const {name} of tables.results) old.set(name, await read(`SELECT * FROM "${name}" ORDER BY 1`));
   await migrate();
-  for (const [name, rows] of old) expect(await read(`SELECT * FROM "${name}" ORDER BY 1`), name).toEqual(rows);
+  for (const [name, rows] of old) expect(await read(`SELECT * FROM "${name}" ORDER BY 1`), name).toEqual(name==="links" ? rows.map(row=>({...row as object,url_identity:null,last_capture_id:null})) : rows);
   await assertIndex();
   // A field boundary shift may leave the same composite document. The next
   // changed document still refreshes field ownership without false candidates.

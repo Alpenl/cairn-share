@@ -2,6 +2,7 @@ import { applyD1Migrations, env, reset } from 'cloudflare:test';
 import { beforeEach, expect, it } from 'vitest';
 import worker from '../src/index';
 import { validPresentation } from '../src/presentations';
+import { urlIdentity } from '../src/url-identity';
 const bindings = { ...env, CAIRN_API_TOKEN: 'app-test', CAIRN_ENRICHER_TOKEN: 'internal-test' };
 const call = (path: string, body?: unknown, internal = false) => worker.fetch(new Request('https://share.alpenl.com' + path, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${internal ? 'internal-test' : 'app-test'}`, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), bindings);
 const capture = { url: 'https://x.com/person/status/123', note: 'keep', client_id: '3f55e9e8-4d52-4f45-a33d-89be8ef7ab45', capture: { title: 'Browser title', language: 'zh', text: '# 标题\n\n正文保留 123。\n\n![图](cairn-image:0)', images: [{ content_type: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a42kAAAAASUVORK5CYII=' }] } };
@@ -55,4 +56,36 @@ it('rejects content loss, invented links and changed code; caps daily model clai
     await call('/api/enrichment/presentations/fail', job, true);
     await call(`/api/links/${saved.id}/presentation`, {});
     expect((await call('/api/enrichment/presentations/claim', { daily_limit: 1 }, true)).status).toBe(204);
+});
+
+it('updates the original app bookmark across WeChat tracking URLs without losing personal facts', async () => {
+ const url='https://mp.weixin.qq.com/s/article-123';
+ const first:any=await (await call('/api/links',{url,note:'我的原备注',client_id:crypto.randomUUID()})).json();
+ await env.DB.prepare("UPDATE links SET learned=1,learned_at='2026-10-04',why='保留的策展理由' WHERE id=?").bind(first.id).run();
+ const result=await call('/api/captures',{...capture,url:url+'?poc_token=temporary&scene=1',note:'',client_id:crypto.randomUUID()});
+ expect(result.status).toBe(201);const saved:any=await result.json();expect(saved.id).toBe(first.id);expect(saved.capture_result.action).toBe('updated');
+ const row:any=await env.DB.prepare('SELECT * FROM links WHERE id=?').bind(first.id).first();
+ expect(row).toMatchObject({url,note:'我的原备注',learned:1,why:'保留的策展理由',original_text:capture.capture.text});
+ expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM links').first('n')).toBe(1);
+ const refreshed:any=await (await call('/api/captures',{...capture,url,client_id:crypto.randomUUID(),capture:{...capture.capture,text:'更新后的完整正文 456'}})).json();
+ expect(refreshed.id).toBe(first.id);expect(await env.DB.prepare('SELECT original_text FROM links WHERE id=?').bind(first.id).first('original_text')).toBe('更新后的完整正文 456');
+ expect((await env.DB.prepare('SELECT payload FROM enrichment_sources WHERE link_id=?').bind(first.id).first<any>())?.payload).toContain('更新后的完整正文 456');
+});
+
+it('normalizes known article identities while preserving meaningful queries and hash routes',()=>{
+ expect(urlIdentity('https://twitter.com/name/status/123?s=20')).toBe(urlIdentity('https://x.com/i/web/status/123'));
+ expect(urlIdentity('https://mp.weixin.qq.com/s?__biz=A&mid=1&idx=2&sn=signature&scene=3')).toBe('https://mp.weixin.qq.com/s?__biz=A&mid=1&idx=2');
+ expect(urlIdentity('https://example.com/article?id=1&utm_source=share#title')).toBe('https://example.com/article?id=1');
+ expect(urlIdentity('https://example.com/article?id=1')).not.toBe(urlIdentity('https://example.com/article?id=2'));
+ expect(urlIdentity('https://example.com/#/article/1')).not.toBe(urlIdentity('https://example.com/#/article/2'));
+});
+
+it('simultaneous new captures resolve to one bookmark and stale uploads cannot overwrite later content',async()=>{
+ const a={...capture,client_id:crypto.randomUUID()},b={...capture,client_id:crypto.randomUUID()};
+ const results=await Promise.all([call('/api/captures',a),call('/api/captures',b)]);
+ expect(results.some(r=>r.status===201)).toBe(true);
+ expect(results.every(r=>[201,409].includes(r.status))).toBe(true);
+ expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM links').first('n')).toBe(1);
+ const stale=await env.DB.prepare('SELECT * FROM browser_captures WHERE completed=0').first<any>();
+ if(stale){expect((await call('/api/captures',stale.client_id===a.client_id?a:b)).status).toBe(409);}
 });
