@@ -126,8 +126,11 @@ export async function browserCapture(request: Request, env: Env): Promise<Respon
               note=CASE WHEN note='' THEN ? ELSE note END,
               enrichment_status=CASE WHEN original_text IS ? AND enrichment_status='completed' THEN 'completed' ELSE 'pending' END,
               enrichment_attempts=0,enrichment_error=NULL,enrichment_next_retry_at=NULL,enrichment_lease_token=NULL,enrichment_lease_until=NULL,
+              enrichment_paid_uncertain=CASE WHEN original_text IS ? THEN enrichment_paid_uncertain ELSE 0 END,
+              enrichment_paid_stage=CASE WHEN original_text IS ? THEN enrichment_paid_stage ELSE NULL END,
+              enrichment_paid_stage_started=CASE WHEN original_text IS ? THEN enrichment_paid_stage_started ELSE 0 END,
               enrichment_updated_at=?,last_capture_id=? WHERE id=? AND ${guard} AND content_revision=? AND app_body_revision=?`)
-                .bind(c.text, c.language || 'und', c.title, JSON.stringify(refs), c.text, c.text, body.note, c.text, now, body.client_id, id, body.client_id, current.url, receipt.expected_revision, receipt.expected_body_revision),
+                .bind(c.text, c.language || 'und', c.title, JSON.stringify(refs), c.text, c.text, body.note, c.text, c.text, c.text, c.text, now, body.client_id, id, body.client_id, current.url, receipt.expected_revision, receipt.expected_body_revision),
             env.DB.prepare(`INSERT INTO enrichment_sources(link_id,url,original_text,payload,fetched_at) SELECT id,url,original_text,?,? FROM links WHERE id=? AND ${applied} AND original_text=? AND images=?
               ON CONFLICT(link_id) DO UPDATE SET url=excluded.url,original_text=excluded.original_text,payload=excluded.payload,fetched_at=excluded.fetched_at
               WHERE enrichment_sources.payload<>excluded.payload OR enrichment_sources.url<>excluded.url OR enrichment_sources.original_text<>excluded.original_text`)

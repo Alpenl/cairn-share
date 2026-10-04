@@ -7,6 +7,36 @@ const bindings = { ...env, CAIRN_API_TOKEN: 'app-test', CAIRN_ENRICHER_TOKEN: 'i
 const call = (path: string, body?: unknown, internal = false) => worker.fetch(new Request('https://share.alpenl.com' + path, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${internal ? 'internal-test' : 'app-test'}`, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), bindings);
 const capture = { url: 'https://x.com/person/status/123', note: 'keep', client_id: '3f55e9e8-4d52-4f45-a33d-89be8ef7ab45', capture: { title: 'Browser title', language: 'zh', text: '# 标题\n\n正文保留 123。\n\n![图](cairn-image:0)', images: [{ content_type: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a42kAAAAASUVORK5CYII=' }] } };
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
+it('fresh browser evidence releases only the old revision block and preserves its paid receipt', async () => {
+    const saved: any = await (await call('/api/captures', capture)).json();
+    const before: any = await env.DB.prepare('SELECT content_revision FROM links WHERE id=?').bind(saved.id).first();
+    await env.DB.prepare(`INSERT INTO enrichment_provider_attempts(operation_key,link_id,lease_hash,content_revision,stage,variant,attempt_number,request_hash,reservation_hash,model,created_at)
+      VALUES(?,?,?,?,'reading','fixture',1,?,?,'fixture','2026-10-04T00:00:00Z')`)
+      .bind('a'.repeat(64), saved.id, 'b'.repeat(64), before.content_revision, 'c'.repeat(64), 'd'.repeat(64)).run();
+    await env.DB.prepare("UPDATE links SET enrichment_status='failed',enrichment_paid_stage='reading',enrichment_lease_token='old-lease' WHERE id=?").bind(saved.id).run();
+    const receipt = await env.DB.prepare('SELECT * FROM enrichment_provider_attempts').first();
+    // A duplicate submission cannot authorize another call for the same evidence.
+    expect((await call('/api/captures', { ...capture, client_id: crypto.randomUUID() })).status).toBe(201);
+    expect(await env.DB.prepare('SELECT enrichment_paid_uncertain FROM links WHERE id=?').bind(saved.id).first('enrichment_paid_uncertain')).toBe(1);
+    expect((await call('/api/captures', { ...capture, client_id: crypto.randomUUID(), capture: { ...capture.capture, text: '新采集的完整正文。' } })).status).toBe(201);
+    const row: any = await env.DB.prepare('SELECT * FROM links WHERE id=?').bind(saved.id).first();
+    expect(row).toMatchObject({ enrichment_status: 'pending', enrichment_paid_uncertain: 0, enrichment_paid_stage: null, enrichment_paid_stage_started: 0, enrichment_lease_token: null });
+    expect(row.content_revision).toBeGreaterThan(before.content_revision);
+    expect(await env.DB.prepare('SELECT * FROM enrichment_provider_attempts').first()).toEqual(receipt);
+    expect((await call(`/api/enrichment/jobs/${saved.id}/complete`, { lease_token: 'old-lease', original_text: 'stale', ai_title: 'stale', original_language: 'zh', translated_text: 'stale', summary: 'stale', related_links: [], images: [], model: 'fixture' }, true)).status).toBe(409);
+    expect(await env.DB.prepare('SELECT original_text FROM links WHERE id=?').bind(saved.id).first('original_text')).toBe('新采集的完整正文。');
+});
+
+it('repairs the oldest original bookmark when historical duplicates already exist', async () => {
+    for (const url of ['https://twitter.com/old/status/123', 'https://x.com/person/status/123']) {
+        await env.DB.prepare("INSERT INTO links(url,note,created_at,enrichment_status) VALUES(?,'保留','2026-10-01','failed')").bind(url).run();
+    }
+    const result: any = await (await call('/api/captures', capture)).json();
+    expect(result.id).toBe(1);
+    expect(await env.DB.prepare('SELECT COUNT(*) FROM links').first('COUNT(*)')).toBe(2);
+    expect(await env.DB.prepare('SELECT note FROM links WHERE id=1').first('note')).toBe('保留');
+    expect(await env.DB.prepare('SELECT original_text FROM links WHERE id=2').first('original_text')).toBeNull();
+});
 it('archives browser evidence and image bytes once; replay cannot overwrite or resurrect', async () => {
     const first = await call('/api/captures', capture);
     expect(first.status).toBe(201);
