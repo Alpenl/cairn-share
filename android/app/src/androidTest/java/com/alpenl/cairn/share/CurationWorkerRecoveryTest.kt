@@ -112,15 +112,14 @@ class CurationWorkerRecoveryTest {
         control("online")
         val created = http("/__test/direct/api/links", JSONObject().put("url", "https://example.com/android-recovery"))
         val id = created.getInt("id")
+        val summary = (LinksApiClient(base).listPage(LinkFilter.All, "", token) as LinkPageResult.Loaded).page.items.first { it.id == id }
+        assertNotNull("real Worker list negotiates a recognized cache identity", summary.enrichment!!.cacheIdentity)
+        assertEquals("enrichment_summary", summary.enrichment.cacheIdentity!!.representation)
         val model = start()
         waitFor { withContext(Dispatchers.Main) { model.uiState.preferencesLoaded } }
         waitFor { withContext(Dispatchers.Main) { model.uiState.links.any { it.id == id } } }
-        withContext(Dispatchers.Main) {
-            val identity = model.uiState.links.first { it.id == id }.enrichment!!.cacheIdentity
-            assertNotNull("real Worker list negotiates a recognized cache identity", identity)
-            assertEquals("enrichment_summary", identity!!.representation)
-            model.ensureLink(id)
-        }
+        // Startup sync can already have supplied the full body; the list API remains a summary.
+        withContext(Dispatchers.Main) { model.ensureLink(id) }
         waitFor { withContext(Dispatchers.Main) { model.uiState.links.first { it.id == id }.enrichment!!.contentLoaded } }
         withContext(Dispatchers.Main) {
             assertEquals("enrichment_detail", model.uiState.links.first { it.id == id }.enrichment!!.cacheIdentity!!.representation)

@@ -23,6 +23,7 @@ import com.alpenl.cairn.share.network.QueuedCurationAction
 import com.alpenl.cairn.share.network.TaxonomyResult
 import com.alpenl.cairn.share.network.V2CurationRepository
 import com.alpenl.cairn.share.network.V2Result
+import com.alpenl.cairn.share.network.withMediaVersionsFrom
 import com.alpenl.cairn.share.network.retainLoadedContent
 import com.alpenl.cairn.share.network.LinkMutationResult
 import com.alpenl.cairn.share.network.LinkPageResult
@@ -246,12 +247,12 @@ internal class CairnLinksViewModel(
         checkForUpdates()
         viewModelScope.launch {
             LibrarySync.updates.collect { account ->
-                if (account == curationAccountKey()) reloadLocalLibrary(account)
+                if (account == curationAccountKey()) reloadLocalLibrary(account, verified = true)
             }
         }
     }
 
-    private suspend fun reloadLocalLibrary(account: String) {
+    private suspend fun reloadLocalLibrary(account: String, verified: Boolean = false) {
         val generation = uiState.accountGeneration
         val links = offlineReads.catalog(account)
         val rows = offlineReads.snapshot(account)
@@ -264,6 +265,7 @@ internal class CairnLinksViewModel(
         val present = links.map { it.id }.toSet()
         queryPages.clear()
         verifiedDetails.retainAll(present)
+        if (verified) verifiedDetails += links.filter { it.enrichment?.contentLoaded == true }.map { it.id }
         uiState = uiState.copy(links = links.filterNot { it.id in deletedLinks },
             offlineLinks = rows.map { it.link },
             offlineReads = rows.associate { it.link.id to OfflineReadInfo(it.savedAt, it.pinned, true, it.tagLabels) },
@@ -1159,7 +1161,9 @@ internal class CairnLinksViewModel(
                     )
                     try {
                         if (cacheGeneration != localCacheGeneration) return@launch
-                        val cached = offlineReads.save(curationAccountKey(), result.link,
+                        val previous = offlineReads.get(curationAccountKey(), id)
+                        val current = result.link.withMediaVersionsFrom(previous)
+                        val cached = offlineReads.save(curationAccountKey(), current,
                             labels = readerTags(result.link, null, uiState.v2Taxonomy ?: uiState.taxonomy))
                         if (isCurrentAccount(generation) && cached != null) {
                             val saved = offlineReads.snapshot(curationAccountKey())
@@ -2048,7 +2052,7 @@ internal fun CairnLinksUiState.stats(): LinkStats {
 
 private fun List<SavedLink>.upsert(link: SavedLink): List<SavedLink> =
     if (any { it.id == link.id }) {
-        map { if (it.id == link.id) link else it }.sortedByDescending { it.id }
+        map { if (it.id == link.id) link.withMediaVersionsFrom(it) else it }.sortedByDescending { it.id }
     } else {
         (this + link).sortedByDescending { it.id }
     }

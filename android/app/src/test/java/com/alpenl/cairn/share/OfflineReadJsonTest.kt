@@ -36,4 +36,14 @@ class OfflineReadJsonTest {
         assertEquals(8, tags.size)
         assertTrue(tags.any { it.ref == "system/content_functions/method" })
     }
+    @Test fun `matching detail retains image manifest but changed body and resource cannot reuse it`() {
+        val full = link().let { it.copy(enrichment = it.enrichment!!.copy(imageKeys = listOf("image"), imageVersions = mapOf("image" to "etag"))) }
+        val fresh = full.copy(enrichment = full.enrichment!!.copy(imageVersions = emptyMap()))
+        assertEquals(mapOf("image" to "etag"), fresh.withMediaVersionsFrom(full).enrichment!!.imageVersions)
+        val changed = fresh.copy(enrichment = fresh.enrichment!!.copy(cacheIdentity = fresh.enrichment.cacheIdentity!!.copy(bodyRevision = 12)))
+        assertTrue(changed.withMediaVersionsFrom(full).enrichment!!.imageVersions.isEmpty())
+        assertTrue(fresh.copy(url = "https://other.invalid").withMediaVersionsFrom(full).enrichment!!.imageVersions.isEmpty())
+        assertEquals(mapOf("image" to "etag"), OfflineReadJson.decode(OfflineReadJson.encode(listOf(OfflineReadEntry("v2:a", full, 1, 2, false)))).single().link.enrichment!!.imageVersions)
+    }
+
 }

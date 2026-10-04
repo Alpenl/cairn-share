@@ -148,7 +148,7 @@ internal class OfflineReadStore(context: Context) {
         if (old?.link != expected || deleted(db, account, link.id)) return@access null
         val now = System.currentTimeMillis()
         val full = link.enrichment?.contentLoaded == true && link.enrichment.cacheIdentity != null
-        val entry = OfflineReadEntry(account, link.cacheable(), if (full) now else 0, old?.readAt ?: now, old?.pinned ?: false, labels)
+        val entry = OfflineReadEntry(account, link.withMediaVersionsFrom(old?.link).cacheable(), if (full) now else 0, old?.readAt ?: now, old?.pinned ?: false, labels)
         write(db, entry)
         val sync = syncState(db, account); writeSyncState(db, account, sync.copy(generation = sync.generation + 1))
         entry.takeIf { full }
@@ -166,7 +166,7 @@ internal class OfflineReadStore(context: Context) {
         for (link in links) {
             if (deleted(db, account, link.id)) continue
             val old = row(db, account, link.id)
-            val merged = link.retainLoadedContent(old?.link).cacheable()
+            val merged = link.retainLoadedContent(old?.link).withMediaVersionsFrom(old?.link).cacheable()
             if (merged == old?.link) continue
             write(db, OfflineReadEntry(account, merged, old?.savedAt ?: 0, old?.readAt ?: 0, old?.pinned ?: false,
                 // Labels belong to the observed classification, not to a future revision.
@@ -181,7 +181,7 @@ internal class OfflineReadStore(context: Context) {
     suspend fun save(account: String, link: SavedLink, pinned: Boolean? = null, now: Long = System.currentTimeMillis(), labels: List<ReaderTag>? = null): OfflineReadEntry? = access { db ->
         if (!account.startsWith("v2:") || link.enrichment?.contentLoaded != true || link.enrichment.cacheIdentity == null || deleted(db, account, link.id)) return@access null
         val old = row(db, account, link.id)
-        val entry = OfflineReadEntry(account, link, now, now, pinned ?: old?.pinned ?: false, labels ?: old?.tagLabels.orEmpty())
+        val entry = OfflineReadEntry(account, link.withMediaVersionsFrom(old?.link), now, now, pinned ?: old?.pinned ?: false, labels ?: old?.tagLabels.orEmpty())
         write(db, entry); val sync = syncState(db, account); writeSyncState(db, account, sync.copy(generation = sync.generation + 1)); entry
     }
     suspend fun setPinned(account: String, id: Int, pinned: Boolean) = access { db ->

@@ -248,3 +248,15 @@ private fun JSONArray?.strings(): List<String> = this?.let { array ->
     List(array.length()) { index -> array.optString(index).takeUnless { it == "null" }.orEmpty() }
         .filter { it.isNotBlank() }
 }.orEmpty()
+
+/** A detail read may omit the manifest; reuse it only for exactly the same body. */
+internal fun SavedLink.withMediaVersionsFrom(previous: SavedLink?): SavedLink {
+    val fresh = enrichment ?: return this
+    val old = previous?.enrichment ?: return this
+    val a = fresh.cacheIdentity ?: return this
+    val b = old.cacheIdentity ?: return this
+    if (id != previous.id || url != previous.url || a.schemaVersion != b.schemaVersion ||
+        a.contentRevision != b.contentRevision || a.bodyRevision != b.bodyRevision ||
+        fresh.imageKeys != old.imageKeys || fresh.imageVersions.isNotEmpty()) return this
+    return copy(enrichment = fresh.copy(imageVersions = old.imageVersions))
+}
