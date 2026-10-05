@@ -137,6 +137,7 @@ internal data class EditDraft(
 
 internal data class ManualAddState(
     val visible: Boolean = false,
+    val collectionIds: Set<String> = emptySet(),
     val url: String = "",
     val note: String = "",
     val submitting: Boolean = false,
@@ -1302,7 +1303,7 @@ internal class CairnLinksViewModel(
         val apiToken = currentApiToken()
         uiState = uiState.copy(manualAdd = draft.copy(submitting = true, statusText = "正在保存到本地..."))
         viewModelScope.launch {
-            val pending = runCatching { pendingUploadStore.enqueue(preparedUrl, note) }.getOrNull()
+            val pending = runCatching { pendingUploadStore.enqueue(preparedUrl,note,collectionIds=draft.collectionIds.toList(),collectionAccount=accountKeyFor(uiState.apiBaseUrl,apiToken)) }.getOrNull()
             if (!isCurrentAccount(generation)) return@launch
             if (pending == null) {
                 uiState = uiState.copy(
@@ -1342,6 +1343,8 @@ internal class CairnLinksViewModel(
             }
         }
     }
+
+    fun setAddCollections(ids: Set<String>) { uiState=uiState.copy(manualAdd=uiState.manualAdd.copy(collectionIds=ids)) }
 
     fun beginEdit(link: SavedLink) {
         if (uiState.editDraft?.id == link.id) return
@@ -1887,6 +1890,7 @@ internal class CairnLinksViewModel(
     private suspend fun uploadPending(pending: PendingUpload, apiToken: String): LinkCreateResult? {
         val generation = uiState.accountGeneration
         if (pending.id in uiState.uploadBusyIds) return null
+        if(pending.collectionIds.isNotEmpty() && pending.collectionAccount != accountKeyFor(uiState.apiBaseUrl,apiToken)) return null
         uiState = uiState.copy(uploadBusyIds = uiState.uploadBusyIds + pending.id)
         val result = withContext(Dispatchers.IO) {
             runCatching {
@@ -1900,7 +1904,9 @@ internal class CairnLinksViewModel(
         }
         when (result) {
             is LinkCreateResult.Created -> {
-                runCatching { pendingUploadStore.remove(pending.id) }
+                runCatching {
+                    if(attachPendingCollections(curationActionStore.context,uiState.apiBaseUrl,apiToken,pending,result.link.id)) pendingUploadStore.remove(pending.id)
+                }
                 if (isCurrentAccount(generation)) {
                     uiState = uiState.copy(links = uiState.links.upsert(result.link),
                         searchResults = uiState.searchResults.map { if (it.id == result.link.id) result.link else it })

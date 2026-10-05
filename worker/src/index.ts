@@ -1,3 +1,4 @@
+import { collectionsRoute, collectionID } from "./collections";
 import { librarySyncRoute, maintainLibrarySync } from "./library-sync";
 import { presentationColumns, presentationRoute } from "./presentations";
 import { browserCapture } from "./browser-capture";
@@ -165,8 +166,8 @@ type ErrorCode =
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, HEAD, PUT, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, Range, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage, X-Cairn-Sync, If-Match, If-None-Match",
-  "Access-Control-Expose-Headers": "X-Cairn-Sync, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage",
+  "Access-Control-Allow-Headers": "X-Cairn-Collections, Content-Type, Authorization, Range, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage, X-Cairn-Sync, If-Match, If-None-Match",
+  "Access-Control-Expose-Headers": "X-Cairn-Collections, X-Cairn-Sync, X-Cairn-Tag-System, X-Cairn-Content-Functions, X-Cairn-Queue, X-Cairn-Tag-Export, X-Cairn-Run-History, X-Cairn-Search-Summary, X-Cairn-Classification-Attempts, X-Cairn-Topic-Granularity, X-Cairn-Candidate-Manifest, X-Cairn-Image-Privacy, X-Cairn-Backstage",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -335,6 +336,7 @@ export default {
       const policy = await policyRead;
       response = withServerTiming(response, timing);
       if (response.ok) response.headers.set("X-Cairn-Sync", "1");
+      if (request.headers.get("X-Cairn-Collections") === "1") response.headers.set("X-Cairn-Collections", "1");
       if (contentFunctionsAware(request)) response.headers.set("X-Cairn-Content-Functions", "1");
       if (request.headers.get("X-Cairn-Search-Summary") === "1") response.headers.set("X-Cairn-Search-Summary", "1");
       if (request.headers.get("X-Cairn-Tag-System") === "1") response.headers.set("X-Cairn-Tag-System", "1");
@@ -438,6 +440,13 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   if (path === "/health") {
     return routeMethod(request, ["GET"], () => json({ ok: true }));
+  }
+
+  if (path === "/api/collections" || path.startsWith("/api/collections/") || path === "/api/enrichment/collections" || path.startsWith("/api/enrichment/collections/")) {
+    const internal = path.startsWith("/api/enrichment/");
+    const auth = internal ? requireEnricherToken(request, env) : requireApiToken(request, env);
+    if (auth) return auth;
+    return collectionsRoute(request, env, path.replace("/api/enrichment/collections", "/api/collections"));
   }
 
   if (path === "/api/sync") {
@@ -808,7 +817,7 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
     const select = `SELECT ${LINK_COLUMNS}${enriched ? `, ${ENRICHMENT_COLUMNS}, ${contentColumns(true)}${cacheIdentityColumns(includeCacheIdentity(url))}` : ""}${excerpt.sql}`;
     const tagAware = request.headers.get("X-Cairn-Tag-System") === "1";
     const tagColumns = tagAware ? "," + tagSummaryColumns() : "";
-    const order = "ORDER BY id DESC LIMIT ?";
+    const order = url.searchParams.has("collection_id") ? `ORDER BY (SELECT position FROM collection_items WHERE collection_id=\'${url.searchParams.get("collection_id")}\' AND link_id=links.id),id LIMIT ?` : "ORDER BY id DESC LIMIT ?";
     const clauses = [...filters.clauses];
     const bindings = [...filters.bindings];
 
@@ -817,8 +826,10 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
       bindings.push(learned ? 1 : 0);
     }
     if (beforeId !== undefined) {
-      clauses.push("id < ?");
-      bindings.push(beforeId);
+      if (url.searchParams.has("collection_id")) {
+        clauses.push("(SELECT position FROM collection_items WHERE collection_id=? AND link_id=links.id)>(SELECT position FROM collection_items WHERE collection_id=? AND link_id=?)");
+        bindings.push(url.searchParams.get("collection_id")!,url.searchParams.get("collection_id")!,beforeId);
+      } else { clauses.push("id < ?"); bindings.push(beforeId); }
     }
     if (query !== undefined && !enriched) {
       clauses.push("(url LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\')");
@@ -1026,6 +1037,12 @@ async function deleteLink(env: Env, id: number, timing: TimingCollector): Promis
 export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; bindings: Array<string | number> } | Response {
   const clauses: string[] = [];
   const bindings: Array<string | number> = [];
+  const collection = url.searchParams.get("collection_id");
+  if (collection !== null) {
+    if (!collectionID(collection) || url.searchParams.getAll("collection_id").length !== 1) return error("invalid_query");
+    clauses.push("links.id IN(SELECT i.link_id FROM collection_items i JOIN collections c ON c.id=i.collection_id WHERE c.id=? AND c.deleted=0)");
+    bindings.push(collection);
+  }
   const curationStatus = url.searchParams.get("curation_status");
   if (curationStatus && curationStatus !== "all") {
     if (!validCurationStatus(curationStatus)) return error("invalid_query");
@@ -1099,8 +1116,10 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, t
   const countBindings = includeCounts ? [...filters.bindings] : [];
   const { clauses, bindings } = filters;
   if (beforeId !== undefined) {
-    clauses.push("id < ?");
-    bindings.push(beforeId);
+    if (url.searchParams.has("collection_id")) {
+      clauses.push("(SELECT position FROM collection_items WHERE collection_id=? AND link_id=links.id)>(SELECT position FROM collection_items WHERE collection_id=? AND link_id=?)");
+      bindings.push(url.searchParams.get("collection_id")!,url.searchParams.get("collection_id")!,beforeId);
+    } else { clauses.push("id < ?"); bindings.push(beforeId); }
   }
   if (status === "unsupported") {
     clauses.push(`NOT ${X_LINK_SQL}`);
@@ -1120,7 +1139,7 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, t
        ${tagAware ? "," + tagSummaryColumns() : ""}
        FROM links
       ${where}
-      ORDER BY id DESC
+      ORDER BY ${url.searchParams.has("collection_id") ? `(SELECT position FROM collection_items WHERE collection_id='${url.searchParams.get("collection_id")}' AND link_id=links.id),id` : "id DESC"}
       LIMIT ?`
   ).bind(...excerpt.bindings, ...bindings, pageSize);
   let rows: EnrichmentListRow[];
@@ -2485,7 +2504,7 @@ function listCacheUrl(
   if (parsed.beforeId !== undefined) url.searchParams.set("before_id", String(parsed.beforeId));
   if (parsed.learned !== undefined) url.searchParams.set("learned", parsed.learned ? "true" : "false");
   if (parsed.query !== undefined) url.searchParams.set("q", parsed.query);
-  for (const key of ["include", "include_cache_identity", "tag_system", "content_functions_view", "search_summary_view", "curation_status", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
+  for (const key of ["include", "include_cache_identity", "tag_system", "content_functions_view", "search_summary_view", "curation_status", "collection_id", ...SELECTION_FILTER_KEYS, "source", "uncertain", "since"]) {
     const value = requestUrl.searchParams.get(key);
     if (value) url.searchParams.set(key, value);
   }

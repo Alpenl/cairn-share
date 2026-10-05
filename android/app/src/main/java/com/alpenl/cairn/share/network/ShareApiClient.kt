@@ -25,6 +25,8 @@ internal class ShareApiClient(
     private val readTimeoutMillis: Int = 10_000,
     private val userAgent: String = AppUserAgent.value(),
 ) {
+    var savedLinkId: Int? = null; private set
+
     fun save(url: String, note: String, clientId: String? = null): ShareSubmitResult {
         val endpoint = URL(baseUrl.trimEnd('/') + "/api/links")
         val body = LinkRequestJson.encode(url, note, clientId).toByteArray(StandardCharsets.UTF_8)
@@ -44,7 +46,8 @@ internal class ShareApiClient(
             connection.outputStream.use { it.write(body) }
 
             val status = connection.responseCode
-            drainResponse(connection)
+            val response = drainResponse(connection)
+            if(status == HttpURLConnection.HTTP_CREATED) savedLinkId=runCatching { org.json.JSONObject(response).getInt("id").takeIf { it>0 } }.getOrNull()
             when (status) {
                 HttpURLConnection.HTTP_CREATED -> ShareSubmitResult.Saved
                 HttpURLConnection.HTTP_UNAUTHORIZED -> ShareSubmitResult.Failed(FailureKind.Unauthorized)
@@ -59,10 +62,10 @@ internal class ShareApiClient(
         }
     }
 
-    private fun drainResponse(connection: HttpURLConnection) {
+    private fun drainResponse(connection: HttpURLConnection): String {
         val stream = runCatching {
             if (connection.responseCode >= 400) connection.errorStream else connection.inputStream
         }.getOrNull()
-        stream?.use { it.readBytes() }
+        return stream?.use { it.bufferedReader().readText() }.orEmpty()
     }
 }

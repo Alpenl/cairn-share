@@ -162,7 +162,10 @@ it("atomically deletes populated private tables, references, budgets and cached 
   await insert("content_presentations",{link_id:id,input_text:"private body",input_images:"[]",input_kind:"original",input_hash:"hash",updated_at:"t"});
   await insert("browser_captures",{client_id:"fixture",link_id:id,payload_hash:"private-hash",created_at:"t"});
   await insert("archived_media",{id:"a".repeat(32),link_id:id,capture_id:"fixture",ordinal:0,url:"https://example.com/private.mp4",title:"private video",kind:"video",updated_at:"t"});
-  const tables=["archived_media","content_presentations","entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links","custom_tag_links","tag_operations","tag_change_facts"];
+  const collection=crypto.randomUUID();
+  await insert("collections",{id:collection,name:"Project",created_at:"t",updated_at:"t",last_operation:"fixture"});
+  await insert("collection_items",{collection_id:collection,link_id:id,position:0,note:"private collection note",added_at:"t"});
+  const tables=["collection_items","archived_media","content_presentations","entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links","custom_tag_links","tag_operations","tag_change_facts"];
   tables.push("effective_tag_memberships","classification_reservations","classification_attempt_operations","classification_provider_attempts");
   tables.push("effective_entity_memberships","bookmark_search_documents","bookmark_search_grams","bookmark_search_fields","bookmark_search_field_grams");
   await env.DB.prepare("INSERT OR IGNORE INTO effective_entity_memberships(link_id,term) VALUES(?,'private derived entity')").bind(id).run();
@@ -170,6 +173,10 @@ it("atomically deletes populated private tables, references, budgets and cached 
   const linked:string[]=[];
   for(const {name} of schema.results) {
     const fields=await env.DB.prepare(`PRAGMA table_info(${name})`).all<{name:string}>();
+    if(name === "collection_changes") {
+      expect(fields.results.map(f=>f.name)).toEqual(["seq","collection_id","link_id"]);
+      continue; // Relationship identities only; hydration yields null after deletion.
+    }
     if(name === "library_sync_changes") {
       expect(fields.results.map(f=>f.name)).toEqual(["seq","link_id","kind","created_at"]);
       continue; // Numeric tombstones only; no URL, note, body, tag or credential.
@@ -191,6 +198,8 @@ it("atomically deletes populated private tables, references, budgets and cached 
   expect((await request(`links/${id}`,"DELETE")).status).toBe(204);
   expect(await env.DB.prepare("SELECT payload_hash FROM browser_captures WHERE link_id=?").bind(id).first("payload_hash")).toBe("");
   for(const table of tables) expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first("n"),table).toBe(0);
+  expect(await env.DB.prepare("SELECT COUNT(*) n FROM collection_changes WHERE link_id=?").bind(id).first<number>("n")).toBeGreaterThan(0);
+  expect(await env.DB.prepare("SELECT revision FROM collections WHERE id=?").bind(collection).first("revision")).toBe(2);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM bookmark_search_gram_counts").first("n")).toBe(0);
   expect(await env.DB.prepare("SELECT total FROM enrichment_provider_daily_usage WHERE day='t'")
     .first<number>("total")).toBe(1);

@@ -47,6 +47,8 @@ class ShareActivity : ComponentActivity() {
     private var status by mutableStateOf<String?>(null)
     private var submitting by mutableStateOf(false)
     private var accepted by mutableStateOf(false)
+    private var collectionIds by mutableStateOf(setOf<String>())
+    private var collectionAccount = ""
     private var preferences by mutableStateOf(SharePreferences())
     private var preferencesLoaded by mutableStateOf(false)
     private var submitGeneration = 0
@@ -78,6 +80,7 @@ class ShareActivity : ComponentActivity() {
                     preserveCompleteUrl = preferences.preserveCompleteUrl,
                     onSelectCandidate = ::selectCandidate,
                     onNoteChange = ::changeNote,
+                    collectionsContent = { CollectionDraftSelector(apiBaseUrl,preferences.apiToken,collectionIds,{collectionIds=it},!submitting&&!accepted) },
                     onSave = ::submitSelected,
                     onCancel = { if (!submitting || accepted) finish() },
                 )
@@ -92,6 +95,7 @@ class ShareActivity : ComponentActivity() {
         submitJob = null
         submitGeneration += 1
         note = ""
+        collectionIds = emptySet()
         status = null
         submitting = false
         accepted = false
@@ -100,6 +104,8 @@ class ShareActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt(STATE_SELECTED_INDEX, selectedIndex)
+        outState.putStringArrayList("collection_ids", ArrayList(collectionIds))
+        outState.putString("collection_account",collectionAccount)
         outState.putString(STATE_NOTE, note)
         status?.let { outState.putString(STATE_STATUS, it) }
         outState.putBoolean(STATE_SUBMITTING, submitting)
@@ -146,6 +152,8 @@ class ShareActivity : ComponentActivity() {
         val restoredIndex = savedInstanceState.getInt(STATE_SELECTED_INDEX, selectedIndex)
         selectedIndex = if (restoredIndex in candidates.indices) restoredIndex else selectedIndex
         note = savedInstanceState.getString(STATE_NOTE).orEmpty()
+        collectionIds = savedInstanceState.getStringArrayList("collection_ids").orEmpty().toSet()
+        collectionAccount = savedInstanceState.getString("collection_account").orEmpty()
         accepted = savedInstanceState.getBoolean(STATE_ACCEPTED)
         status = when {
             accepted -> savedInstanceState.getString(STATE_STATUS) ?: getString(R.string.share_queued)
@@ -158,6 +166,9 @@ class ShareActivity : ComponentActivity() {
     private fun observeSettings() {
         settingsJob = lifecycleScope.launch {
             SharePreferencesStore(this@ShareActivity).preferences.collect {
+                val account=accountKeyFor(apiBaseUrl,it.apiToken)
+                if(collectionAccount.isNotEmpty() && collectionAccount!=account)collectionIds=emptySet()
+                collectionAccount=account
                 preferences = it
                 preferencesLoaded = true
             }
@@ -204,7 +215,7 @@ class ShareActivity : ComponentActivity() {
         submitting = true
         status = getString(R.string.share_saving_locally)
         submitJob = lifecycleScope.launch {
-            val pending = runCatching { pendingUploadStore.enqueue(preparedUrl, note) }.getOrNull()
+            val pending = runCatching { pendingUploadStore.enqueue(preparedUrl, note,collectionIds=collectionIds.toList(),collectionAccount=accountKeyFor(apiBaseUrl,apiToken)) }.getOrNull()
             if (!isActive || generation != submitGeneration) return@launch
             if (pending == null) {
                 submitting = false
@@ -224,15 +235,18 @@ class ShareActivity : ComponentActivity() {
                 return@launch
             }
 
-            val result = withContext(Dispatchers.IO) {
-                ShareApiClient(apiBaseUrl, apiToken).save(preparedUrl, note, pending.id)
-            }
+            val client = ShareApiClient(apiBaseUrl, apiToken)
+            val result = withContext(Dispatchers.IO) { client.save(preparedUrl, note, pending.id) }
             if (!isActive || generation != submitGeneration) return@launch
             submitting = false
             when (result) {
                 ShareSubmitResult.Saved -> {
-                    runCatching { pendingUploadStore.remove(pending.id) }
-                    status = getString(R.string.share_saved)
+                    val attached = runCatching {
+                        val done = pending.collectionIds.isEmpty() || client.savedLinkId?.let { attachPendingCollections(this@ShareActivity,apiBaseUrl,apiToken,pending,it) } == true
+                        if(done) pendingUploadStore.remove(pending.id)
+                        done
+                    }.getOrDefault(false)
+                    status = if(attached) getString(R.string.share_saved) else "链接已保存，所选合集将在连接恢复后同步"
                     closeAfterAccepted(generation)
                 }
                 is ShareSubmitResult.Failed -> {

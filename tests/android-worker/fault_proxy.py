@@ -72,7 +72,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         headers = {name: value for name, value in self.headers.items()
                    if name.lower() in ("authorization", "content-type", "accept", "user-agent", "if-match", "if-none-match")
                    or name.lower().startswith("x-cairn-")}
-        mutation = not direct and self.command == "POST" and path.endswith(("/v2-override", "/tags"))
+        mutation = not direct and self.command == "POST" and (path.endswith(("/v2-override", "/tags")) or path.startswith("/api/collections/") and path.endswith("/operations"))
         deletion = not direct and self.command == "DELETE" and path.startswith("/api/links/")
         action = json.loads(body) if mutation else {}
         with lock:

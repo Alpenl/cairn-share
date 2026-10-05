@@ -62,6 +62,7 @@ internal object LibrarySync {
                 }
             }
             active()
+            CollectionSync.schedule(context, base, token)
             val links = store.catalog(account)
             mediaStore.prune(account, links.associate { link -> link.id to link.enrichment?.imageVersions.orEmpty().toList().toSet() })
             val pending = store.pendingMedia(account)
