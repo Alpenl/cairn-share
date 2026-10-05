@@ -1,3 +1,5 @@
+import { drainCollectionRules } from "./collection-rules";
+import { managedCatalog, filterCatalog, tagCatalogRoute } from "./tag-catalog";
 import { collectionOrganizingRoute } from "./collection-organizing";
 import { collectionsRoute, collectionID } from "./collections";
 import { librarySyncRoute, maintainLibrarySync } from "./library-sync";
@@ -319,8 +321,9 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     await maintainPrivacy(env);
     await maintainLibrarySync(env);
+    await drainCollectionRules(env,100);
   },
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const timing = new TimingCollector();
     env = profileBindings(env, timing.profile);
     const path = new URL(request.url).pathname;
@@ -334,6 +337,7 @@ export default {
     let response: Response | null = null;
     try {
       response = await handleRequest(request, env, timing);
+      if(response.ok && request.method!=="GET" && request.method!=="OPTIONS" && ctx) ctx.waitUntil(drainCollectionRules(env).catch(()=>{}));
       const policy = await policyRead;
       response = withServerTiming(response, timing);
       if (response.ok) response.headers.set("X-Cairn-Sync", "1");
@@ -560,6 +564,17 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     }));
   }
 
+  if (/^\/api\/(?:v2\/)?tag-catalog(?:\/(?:operations|history))?$/.test(path)) {
+    const denied=path.startsWith("/api/v2/")?requireEnricherToken(request,env):requireApiToken(request,env);
+    if(denied!==null)return denied;
+    return tagCatalogRoute(request,env,path);
+  }
+
+  if(path==="/api/enrichment/collection-rules/drain") {
+    const denied=requireEnricherToken(request,env);if(denied!==null)return denied;
+    if(request.method!=="POST")return error("method_not_allowed",405);
+    return json({processed:await drainCollectionRules(env,100)});
+  }
   // App-facing curation is an exact allowlist, never an alias for arbitrary
   // internal v2 paths. Reads and human field actions do not invoke a model.
   const appV2 = path.match(/^\/api\/bookmarks\/(\d+)\/(v2-selection|v2-override)$/);
@@ -812,7 +827,7 @@ async function listLinks(request: Request, url: URL, env: Env, timing: TimingCol
 
   const enriched = includeEnrichment(url);
   const excerpt = searchExcerptColumns(request.headers.get("X-Cairn-Search-Summary") === "1", query);
-  const filters = bookmarkFilters(url, enriched ? query : undefined);
+  const filters = bookmarkFilters(url, enriched ? query : undefined, await filterCatalog(env,url));
   if (filters instanceof Response) return filters;
 
   return cachedJson(request, env, timing, (generation) => listCacheUrl(url, { limit, beforeId, learned, query }, generation), async () => {
@@ -1037,7 +1052,7 @@ async function deleteLink(env: Env, id: number, timing: TimingCollector): Promis
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
-export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; bindings: Array<string | number> } | Response {
+export function bookmarkFilters(url: URL, query?: string, catalog?: import("./taxonomy-v2").Taxonomy): { clauses: string[]; bindings: Array<string | number> } | Response {
   const clauses: string[] = [];
   const bindings: Array<string | number> = [];
   const collection = url.searchParams.get("collection_id");
@@ -1052,7 +1067,7 @@ export function bookmarkFilters(url: URL, query?: string): { clauses: string[]; 
     clauses.push("curation_status = ?");
     bindings.push(curationStatus);
   }
-  const selection = selectionFilters(url.searchParams);
+  const selection = selectionFilters(url.searchParams, catalog);
   if (!selection) return error("invalid_query");
   clauses.push(...selection.clauses);
   bindings.push(...selection.bindings);
@@ -1111,7 +1126,7 @@ async function listEnrichmentJobs(url: URL, env: Env, timing: TimingCollector, t
   if (status === null) return error("invalid_status");
   const query = parseSearchQuery(url.searchParams.get("q"));
   if (query === null) return error("invalid_query");
-  const filters = bookmarkFilters(url, query);
+  const filters = bookmarkFilters(url, query, await filterCatalog(env,url));
   if (filters instanceof Response) return filters;
   // Counts are status facets for the filtered collection, independent of the
   // selected status tab and page cursor. Capture before adding those clauses.

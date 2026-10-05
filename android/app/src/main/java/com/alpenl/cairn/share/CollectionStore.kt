@@ -14,15 +14,16 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 internal data class CollectionRecord(val id: String, val name: String, val description: String = "", val pinned: Boolean = false,
-    val archived: Boolean = false, val deleted: Boolean = false, val revision: Long = 0) {
+    val archived: Boolean = false, val deleted: Boolean = false, val revision: Long = 0,
+    val ruleEnabled:Boolean=false,val ruleMode:String="any",val ruleTags:List<String> = emptyList(),val ruleAfterId:Int=0,val ruleRevision:Long=0) {
     fun json(): JSONObject = JSONObject().put("id", id).put("name", name).put("description", description).put("pinned", if(pinned) 1 else 0)
-        .put("archived", if(archived) 1 else 0).put("deleted", if(deleted) 1 else 0).put("revision", revision)
+        .put("archived", if(archived) 1 else 0).put("deleted", if(deleted) 1 else 0).put("revision", revision).put("rule_enabled",if(ruleEnabled)1 else 0).put("rule_mode",ruleMode).put("rule_tags",JSONArray(ruleTags).toString()).put("rule_after_id",ruleAfterId).put("rule_revision",ruleRevision)
     companion object { fun decode(j: JSONObject) = CollectionRecord(j.getString("id"), j.getString("name"), j.optString("description"),
-        j.optInt("pinned") == 1, j.optInt("archived") == 1, j.optInt("deleted") == 1, j.getLong("revision")) }
+        j.optInt("pinned") == 1, j.optInt("archived") == 1, j.optInt("deleted") == 1, j.getLong("revision"),j.optInt("rule_enabled")==1,j.optString("rule_mode","any"),JSONArray(j.optString("rule_tags","[]")).let{a->List(a.length()){a.getString(it)}},j.optInt("rule_after_id"),j.optLong("rule_revision")) }
 }
-internal data class CollectionMember(val collection: String, val link: Int, val position: Int, val note: String = "") {
-    fun json(): JSONObject = JSONObject().put("collection_id", collection).put("link_id", link).put("position", position).put("note", note)
-    companion object { fun decode(j: JSONObject) = CollectionMember(j.getString("collection_id"), j.getInt("link_id"), j.getInt("position"), j.optString("note")) }
+internal data class CollectionMember(val collection: String, val link: Int, val position: Int, val note: String = "",val origin:String="manual",val matchedTags:List<String> = emptyList()) {
+    fun json(): JSONObject = JSONObject().put("collection_id", collection).put("link_id", link).put("position", position).put("note", note).put("origin",origin).put("matched_tags",JSONArray(matchedTags).toString())
+    companion object { fun decode(j: JSONObject) = CollectionMember(j.getString("collection_id"), j.getInt("link_id"), j.getInt("position"), j.optString("note"),j.optString("origin","manual"),JSONArray(j.optString("matched_tags","[]")).let{a->List(a.length()){a.getString(it)}}) }
 }
 internal data class CollectionPending(val id: String, val collection: String, val body: String, val error: String = "")
 internal data class CollectionState(val collections: List<CollectionRecord> = emptyList(), val members: List<CollectionMember> = emptyList(),
@@ -41,6 +42,7 @@ internal fun applyCollectionIntent(state: CollectionState, collection: String, b
             description = if(body.has("description")) body.getString("description") else record.description,
             pinned = if(body.has("pinned")) body.getBoolean("pinned") else record.pinned,
             archived = if(body.has("archived")) body.getBoolean("archived") else record.archived)
+        "rule" -> record=record.copy(ruleEnabled=body.getBoolean("enabled"),ruleMode=body.getString("mode"),ruleTags=body.getJSONArray("tag_refs").let{a->List(a.length()){a.getString(it)}})
         "delete" -> record = record.copy(deleted = true)
         "restore" -> record = record.copy(deleted = false)
         "add", "remove" -> {
@@ -160,7 +162,31 @@ internal class CollectionStore(context: Context) {
     };updates.tryEmit(account) }
     suspend fun organizingDraft(account:String,key:String):String?=access{db->db.rawQuery("SELECT body FROM collection_organizing_drafts WHERE account=? AND key=?",arrayOf(account,key)).use{if(it.moveToFirst())it.getString(0)else null}}
     suspend fun saveOrganizingDraft(account:String,key:String,body:String?)=access{db->if(body==null)db.delete("collection_organizing_drafts","account=? AND key=?",arrayOf(account,key))else db.execSQL("INSERT OR REPLACE INTO collection_organizing_drafts(account,key,body) VALUES(?,?,?)",arrayOf(account,key,body))}
-    private class Database(context: Context) : SQLiteOpenHelper(context,"collections.db",null,2) {
+    suspend fun tagManagement(account:String):TagManagementState=access{db->db.rawQuery("SELECT payload,pending,error FROM tag_management WHERE account=?",arrayOf(account)).use{c->if(c.moveToFirst())TagManagementState(if(c.isNull(0))null else JSONObject(c.getString(0)),if(c.isNull(1))null else JSONObject(c.getString(1)),c.getString(2))else TagManagementState()}}
+    suspend fun cacheTags(account:String,payload:JSONObject)=access{db->
+        // Keep API 26 SQLite compatibility and preserve any pending human intent.
+        db.execSQL("INSERT OR IGNORE INTO tag_management(account) VALUES(?)",arrayOf(account))
+        db.execSQL("UPDATE tag_management SET payload=? WHERE account=?",arrayOf(payload.toString(),account))
+    }
+    suspend fun enqueueTagManagement(account:String,body:JSONObject)=access{db->
+        require(account.startsWith("v2:"))
+        val current=db.rawQuery("SELECT pending FROM tag_management WHERE account=?",arrayOf(account)).use{if(it.moveToFirst()&&!it.isNull(0))it.getString(0)else null}
+        if(current!=null&&current!=body.toString())throw IOException("已有一项标签修改待同步，请先核对。")
+        db.execSQL("INSERT OR IGNORE INTO tag_management(account) VALUES(?)",arrayOf(account))
+        db.execSQL("UPDATE tag_management SET pending=?,error='' WHERE account=?",arrayOf(body.toString(),account))
+    }
+    suspend fun tagManagementError(account:String,error:String)=access{db->db.execSQL("UPDATE tag_management SET error=? WHERE account=?",arrayOf(error,account))}
+    suspend fun acknowledgeTags(account:String,operation:String,payload:JSONObject)=access{db->
+        val pending=db.rawQuery("SELECT pending FROM tag_management WHERE account=?",arrayOf(account)).use{if(it.moveToFirst()&&!it.isNull(0))JSONObject(it.getString(0))else null}
+        if(pending?.optString("operation_key")==operation)db.execSQL("UPDATE tag_management SET payload=?,pending=NULL,error='' WHERE account=?",arrayOf(payload.toString(),account))
+    }
+    suspend fun resolveTags(account:String,retry:Boolean)=access{db->
+        val state=db.rawQuery("SELECT payload,pending,error FROM tag_management WHERE account=?",arrayOf(account)).use{if(it.moveToFirst())Triple(it.getString(0),it.getString(1),it.getString(2))else null}?:return@access
+        if(!state.third.startsWith("rejected:"))throw IOException("结果尚未确认，请先重试同步。")
+        if(!retry)db.execSQL("UPDATE tag_management SET pending=NULL,error='' WHERE account=?",arrayOf(account))
+        else {val envelope=JSONObject(state.second);val body=envelope.optJSONObject("body")?:envelope;val catalog=JSONObject(state.first);val path=envelope.optString("path");val revision=if(path.startsWith("/api/custom-tags/")){val id=path.substringAfterLast('/');val tags=catalog.optJSONArray("custom_tags");(0 until (tags?.length()?:0)).map{tags!!.getJSONObject(it)}.find{it.getString("id")==id}?.getLong("revision")?:throw IOException("个人标签已不存在")}else catalog.getLong("revision");val operation=UUID.randomUUID().toString();body.put("operation_key",operation).put("expected_revision",revision);envelope.put("operation_key",operation);db.execSQL("UPDATE tag_management SET pending=?,error='' WHERE account=?",arrayOf(envelope.toString(),account))}
+    }
+    private class Database(context: Context) : SQLiteOpenHelper(context,"collections.db",null,3) {
         init { setWriteAheadLoggingEnabled(true) }
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("CREATE TABLE collection_defs(account TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(account,id))")
@@ -169,8 +195,10 @@ internal class CollectionStore(context: Context) {
             db.execSQL("CREATE TABLE collection_done(account TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(account,id))")
             db.execSQL("CREATE TABLE collection_sync(account TEXT PRIMARY KEY,cursor INTEGER NOT NULL,epoch TEXT NOT NULL,message TEXT NOT NULL)")
             drafts(db)
+            tagManagement(db)
         }
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {if(oldVersion<2)drafts(db)}
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {if(oldVersion<2)drafts(db);if(oldVersion<3)tagManagement(db)}
+        private fun tagManagement(db:SQLiteDatabase){db.execSQL("CREATE TABLE tag_management(account TEXT PRIMARY KEY,payload TEXT,pending TEXT,error TEXT NOT NULL DEFAULT '')")}
         private fun drafts(db:SQLiteDatabase){db.execSQL("CREATE TABLE collection_organizing_drafts(account TEXT NOT NULL,key TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,key))")}
     }
     companion object { private val lock=Mutex();private val helpers=mutableMapOf<String,Database>();val updates=MutableSharedFlow<String>(extraBufferCapacity=32) }

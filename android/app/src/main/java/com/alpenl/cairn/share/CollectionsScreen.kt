@@ -2,6 +2,8 @@ package com.alpenl.cairn.share
 
 import android.content.Context
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -98,6 +100,7 @@ internal class CollectionController(val context:Context,val base:String,val toke
     var query by rememberSaveable(selected,c.account){mutableStateOf("")}
     var mode by rememberSaveable(c.account){mutableStateOf("active")}
     var organizing by remember{mutableStateOf(false)}
+    var tagRules by remember{mutableStateOf(false)}
     var editor by remember{mutableStateOf(false)};var creating by remember{mutableStateOf(false)}
     var showAdd by remember{mutableStateOf(false)};var note by remember{mutableStateOf<CollectionMember?>(null)}
     var deleting by remember{mutableStateOf(false)};var filters by remember{mutableStateOf(BookmarkFilters())};var showFilters by remember{mutableStateOf(false)}
@@ -123,6 +126,7 @@ internal class CollectionController(val context:Context,val base:String,val toke
             Text("${members.size} 条",Modifier.weight(1f),style=MaterialTheme.typography.labelMedium)
             if(!record.deleted){TextButton(onClick={showAdd=true}){Text("添加")};TextButton(onClick={selecting=!selecting;checked=emptySet()}){Text(if(selecting)"完成" else "选择")};TextButton(onClick={showFilters=true}){Text("筛选")}}
         }
+        if(record!=null&&!record.deleted)TextButton(onClick={tagRules=true},modifier=Modifier.testTag("collection_tag_rules")){Text(if(record.ruleEnabled)"自动收录 · 匹配"+(if(record.ruleMode=="all")"全部"else"任一")+"标签" else "设置自动收录标签")}
         if(checked.isNotEmpty())CollectionMembershipButton(base,token,checked.toList())
         val errors=c.state.pending.filter{it.error.isNotBlank()&&(selected==null||it.collection==selected)}
         errors.firstOrNull()?.let{p->
@@ -144,6 +148,7 @@ internal class CollectionController(val context:Context,val base:String,val toke
                     if(selecting)Checkbox(member.link in checked,{value->if(!value||checked.size<100)checked=if(value)checked+member.link else checked-member.link})
                     Column(Modifier.weight(1f).clickable{onOpen(member.link)}){
                         Text(catalog[member.link]?.displayTitle()?:"收藏 #${member.link}（正文尚未下载）",style=MaterialTheme.typography.titleMedium,maxLines=2,overflow=TextOverflow.Ellipsis)
+                        if(member.origin=="rule")Text("按标签自动收录",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                         if(member.note.isNotBlank())Text(member.note,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Box{TextButton(onClick={menu=true}){Text("⋯")};DropdownMenu(menu,{menu=false}){
@@ -166,11 +171,12 @@ internal class CollectionController(val context:Context,val base:String,val toke
             }
         }
     }
+    if(tagRules&&record!=null)CollectionTagRulesDialog(c,record,{tagRules=false})
     if(organizing)CollectionOrganizingDialog(base,token,c.state.collections,{organizing=false}){c.refresh();onRefreshLibrary()}
     reviewing?.let { pending ->
         val latest=c.remote.collections.find{it.id==pending.collection}
         val body=JSONObject(pending.body)
-        val action=mapOf("create" to "新建合集","edit" to "修改合集","add" to "加入收藏","remove" to "移出收藏","note" to "修改备注","move" to "调整顺序","delete" to "删除合集","restore" to "恢复合集")[body.optString("type")].orEmpty()
+        val action=mapOf("create" to "新建合集","edit" to "修改合集","add" to "加入收藏","remove" to "移出收藏","note" to "修改备注","move" to "调整顺序","delete" to "删除合集","restore" to "恢复合集","rule" to "修改自动收录规则","backfill" to "按规则补收收藏")[body.optString("type")].orEmpty()
         val member=c.remote.members.find{it.collection==pending.collection&&it.link==body.optInt("link_id")}
         AlertDialog(onDismissRequest={reviewing=null},title={Text("核对合集修改")},text={Column(verticalArrangement=Arrangement.spacedBy(12.dp)){
             Text("远端："+(latest?.name?:"尚不存在")+(if(latest?.deleted==true)"（已删除）" else ""))
@@ -197,4 +203,27 @@ internal class CollectionController(val context:Context,val base:String,val toke
         LazyColumn(Modifier.heightIn(max=360.dp)){items(links.filter{it.id !in existing&&(it.displayTitle()+it.note).contains(query,true)},key={it.id}){link->Row(verticalAlignment=Alignment.CenterVertically){Checkbox(link.id in selected,{value->if(!value||selected.size<100)selected=if(value)selected+link.id else selected-link.id});Text(link.displayTitle(),maxLines=2,overflow=TextOverflow.Ellipsis)}}}
         Text("一次最多选择 100 条；缺少内容可先更新本地资料库。",style=MaterialTheme.typography.labelSmall)
     }},confirmButton={TextButton(onClick={onDone(selected)},enabled=selected.isNotEmpty()){Text("加入 ${selected.size} 条")}},dismissButton={TextButton(onClick=onDismiss){Text("取消")}})
+}
+
+@Composable private fun CollectionTagRulesDialog(controller:CollectionController,record:CollectionRecord,onDismiss:()->Unit){
+ val context=LocalContext.current.applicationContext;val scope=rememberCoroutineScope();val store=remember{CollectionStore(context)}
+ var enabled by rememberSaveable(record.id){mutableStateOf(record.ruleEnabled)};var all by rememberSaveable(record.id){mutableStateOf(record.ruleMode=="all")};var selected by remember(record.id){mutableStateOf(record.ruleTags.toSet())};var query by rememberSaveable{mutableStateOf("")}
+ var tags by remember{mutableStateOf(listOf<ManagedTag>())};var preview by remember{mutableStateOf<org.json.JSONObject?>(null)};var previewRevision by remember{mutableStateOf<Long?>(null)};var message by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var confirmFill by remember{mutableStateOf(false)}
+ LaunchedEffect(record.id){tags=catalogTags(store.tagManagement(controller.account).payload);try{TagManagementSync.run(context,controller.base,controller.token);tags=catalogTags(store.tagManagement(controller.account).payload)}catch(e:Exception){if(e is kotlinx.coroutines.CancellationException)throw e;message="当前显示本地目录"}}
+ fun previewExisting(){scope.launch{busy=true;try{val result=com.alpenl.cairn.share.network.CollectionsClient(controller.base).request(controller.token,"/${record.id}/rules/preview");preview=result;previewRevision=result.getLong("revision");message=if(result.getBoolean("rule_valid"))"已保存规则可补收 ${result.getJSONArray("items").length()}"+(if(result.getBoolean("has_more"))"+"else"")+" 条"else"规则标签尚未保存或已停用，请先保存。"}catch(e:Exception){if(e is kotlinx.coroutines.CancellationException)throw e;message="暂时无法预览，请联网重试。"}finally{busy=false}}}
+ AlertDialog(onDismissRequest=onDismiss,title={Text("合集自动收录")},text={Column(Modifier.verticalScroll(rememberScrollState())){
+  Row(verticalAlignment=Alignment.CenterVertically){Switch(enabled,{enabled=it});Text("自动加入新收藏")}
+  Row(verticalAlignment=Alignment.CenterVertically){Switch(all,{all=it});Text(if(all)"匹配全部标签"else"匹配任一标签")}
+  OutlinedTextField(query,{query=it},placeholder={Text("查找标签")},singleLine=true)
+  LazyColumn(Modifier.heightIn(max=230.dp)){items(tags.filter{it.active&&(it.label+it.definition.stringList("aliases").joinToString()).contains(query,true)},key={it.ref}){tag->Row(Modifier.fillMaxWidth().clickable{selected=if(tag.ref in selected)selected-tag.ref else if(selected.size<20)selected+tag.ref else selected},verticalAlignment=Alignment.CenterVertically){Checkbox(tag.ref in selected,{checked->if(!checked||selected.size<20)selected=if(checked)selected+tag.ref else selected-tag.ref});Column{Text(tag.label);Text(tagDimensionLabels[tag.dimension].orEmpty(),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}}}}
+  val missing=selected-tags.filter{it.active}.map{it.ref}.toSet();if(missing.isNotEmpty())Column{Text("以下标签已停用或尚未加载：",style=MaterialTheme.typography.labelSmall);missing.forEach{ref->TextButton(onClick={selected=selected-ref}){Text("移除 $ref")}}}
+  Text("保存后作用于新收藏。手动移出后不会再次自动加入；停用规则会保留已有成员。",style=MaterialTheme.typography.bodySmall)
+  TextButton(onClick=::previewExisting,enabled=!busy&&controller.state.pending.none{it.collection==record.id}){Text("预览已保存规则的已有收藏")}
+  if(message.isNotBlank())Text(message,style=MaterialTheme.typography.bodySmall)
+  preview?.let{result->val rows=result.optJSONArray("items");if(rows!=null&&rows.length()>0){LazyColumn(Modifier.heightIn(max=120.dp)){items(rows.length()){i->Text(rows.getJSONObject(i).getString("title"),style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=4.dp))}};TextButton(onClick={confirmFill=true},enabled=!busy){Text("补收这 ${rows.length()} 条")}}}
+ }},confirmButton={TextButton(onClick={controller.action{controller.write(record.id,"rule",JSONObject().put("enabled",enabled).put("mode",if(all)"all"else"any").put("tag_refs",JSONArray(selected.toList())));onDismiss()}},enabled=!enabled||selected.isNotEmpty()){Text("保存规则")}},dismissButton={TextButton(onClick=onDismiss){Text("取消")}})
+ if(confirmFill)AlertDialog(onDismissRequest={confirmFill=false},title={Text("按已保存规则补收？")},text={Text("匹配的已有收藏会加入合集，手动排除的条目会跳过。")},confirmButton={TextButton(onClick={controller.action{
+  controller.reload();val latest=controller.remote.collections.find{it.id==record.id};if(latest?.revision!=previewRevision){message="合集已变化，请重新预览。";confirmFill=false;return@action}
+  controller.write(record.id,"backfill");confirmFill=false;onDismiss()
+ }}){Text("补收")}},dismissButton={TextButton(onClick={confirmFill=false}){Text("取消")}})
 }

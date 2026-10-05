@@ -65,6 +65,8 @@ internal fun SettingsScreen(
     onClearOffline: () -> Unit,
     onFlushPersonal: () -> Unit,
     onOpenOffline: () -> Unit,
+    onOpenTags: () -> Unit = {},
+    onOpenCollections: () -> Unit = {},
     onDownloadLibrary: () -> Unit = {},
     onCancelDownload: () -> Unit = {},
     onAutomaticSync: (Boolean) -> Unit = {},
@@ -133,6 +135,11 @@ internal fun SettingsScreen(
             SettingsDivider()
             SettingsSwitchRow(CairnIcons.External, "保留完整链接", "保留链接中的参数与页面定位", state.preferences.preserveCompleteUrl,
                 onPreserveCompleteUrlChange, Modifier.testTag("settings_preserve_url"))
+        }
+        SettingsGroup("分类管理") {
+            SettingsRow(CairnIcons.Filter, "标签管理", "名称、含义、粒度与 AI 开关", onOpenTags, Modifier.testTag("settings_tag_manager"))
+            SettingsDivider()
+            SettingsRow(CairnIcons.Library, "合集管理", "分类与按标签自动收录", onOpenCollections)
         }
         SettingsGroup("应用") {
             SettingsRow(Icons.Default.Refresh, "检查更新", updateSettingSubtitle(state), onOpenUpdate)

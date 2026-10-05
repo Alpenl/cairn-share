@@ -18,6 +18,8 @@ export interface TermDefinition {
   id: string;
   label: string;
   active: boolean;
+  /** AI participation is independent from human selectability. */
+  ai_enabled?: boolean;
   deprecated?: boolean;
   aliases: string[];
   description: string;
@@ -226,13 +228,13 @@ export function normalizeTerm(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, "");
 }
 
-export function findTerm(dimension: string, id: string): TermDefinition | undefined {
-  const terms = (v2 as unknown as Record<string, TermDefinition[]>)[dimension] ?? [];
+export function findTerm(dimension: string, id: string, catalog: Taxonomy = v2): TermDefinition | undefined {
+  const terms = (catalog as unknown as Record<string, TermDefinition[]>)[dimension] ?? [];
   return terms.find((term) => term.id === id);
 }
 
-export function validV2Term(dimension: string, id: string): boolean {
-  const term = findTerm(dimension, id);
+export function validV2Term(dimension: string, id: string, catalog: Taxonomy = v2): boolean {
+  const term = findTerm(dimension, id, catalog);
   // Legacy endpoints may preserve old manual values. New tag actions separately
   // enforce selectable status; no old meaning is mapped to a nearby new label.
   return term !== undefined && ((term.active && !term.deprecated) ||
@@ -242,7 +244,7 @@ export function validV2Term(dimension: string, id: string): boolean {
 // A v2 selection is valid when every selected ID exists and is active, the
 // single-valued dimensions hold at most one value, and no field is abused to
 // smuggle an unknown tag.
-export function validateV2Selection(value: unknown): V2Selection | null {
+export function validateV2Selection(value: unknown, catalog: Taxonomy = v2): V2Selection | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   const stringArray = (entries: unknown): string[] | null =>
@@ -262,13 +264,13 @@ export function validateV2Selection(value: unknown): V2Selection | null {
     if (ids.length > max) return null;
     if (new Set(ids).size !== ids.length) return null;
     for (const id of ids) {
-      if (!validV2Term(name, id)) return null;
+      if (!validV2Term(name, id, catalog)) return null;
     }
   }
   const form = typeof record.form === "string" ? record.form : "";
   const use = typeof record.use === "string" ? record.use : "";
-  if (form !== "" && !validV2Term("forms", form)) return null;
-  if (use !== "" && !validV2Term("uses", use)) return null;
+  if (form !== "" && !validV2Term("forms", form, catalog)) return null;
+  if (use !== "" && !validV2Term("uses", use, catalog)) return null;
   return { topics, content_functions: functions, carriers, affordances, form, use,
     ...(resources ? { resource_kinds: resources } : {}) };
 }

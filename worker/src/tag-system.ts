@@ -1,3 +1,5 @@
+import { managedCatalog, filterCatalog } from "./tag-catalog";
+import type { Taxonomy } from "./taxonomy-v2";
 import { encodeCursor, decodeCursor } from "./cursor";
 import { readJSONObject } from "./json-body";
 import { tagQuality } from "./tag-quality";
@@ -27,16 +29,16 @@ async function hash(value: unknown) {
   return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, "0")).join("");
 }
 function normalizeName(label: string) { return normalizeTerm(label.normalize("NFKC")); }
-function systemRef(raw: unknown): { field: OverrideField; term: string } | null {
+function systemRef(raw: unknown, catalog?: Taxonomy): { field: OverrideField; term: string } | null {
   if (typeof raw !== "string") return null;
   const match = raw.match(/^system\/(topics|resource_kinds|content_functions|carriers|affordances|form|use|forms|uses)\/([a-z][a-z0-9_]{0,39})$/);
   if (!match) return null;
   const field = normalizeField(match[1] === "forms" ? "form" : match[1] === "uses" ? "use" : match[1]);
-  if (!field || !findTerm(field === "form" ? "forms" : field === "use" ? "uses" : field, match[2])) return null;
+  if (!field || (catalog && !findTerm(field === "form" ? "forms" : field === "use" ? "uses" : field, match[2], catalog))) return null;
   return { field, term: match[2] };
 }
-function selectable(value: { field: OverrideField; term: string }) {
-  const term = findTerm(value.field === "form" ? "forms" : value.field === "use" ? "uses" : value.field, value.term);
+function selectable(value: { field: OverrideField; term: string }, catalog?: Taxonomy) {
+  const term = findTerm(value.field === "form" ? "forms" : value.field === "use" ? "uses" : value.field, value.term, catalog);
   return term?.active === true && !term.deprecated;
 }
 async function customOf(env: Env, id: number) {
@@ -116,7 +118,7 @@ export async function tagPayload(env: Env, id: number) {
   const evidence = snapshot.state.evidence;
   const sourceStatus = evidence ? evidence.completeness === "empty" ? "empty" :
     evidence.truncated || ["partial", "truncated"].includes(evidence.completeness) ? "partial" : "available" : row.source_available ? "available" : "empty";
-  return { ...payload, content_revision: snapshot.contentRevision, decision_id: snapshot.decisionId,
+  return { ...payload, taxonomy_version:row.tag_catalog_version,definition_version:row.tag_definition_version, content_revision: snapshot.contentRevision, decision_id: snapshot.decisionId,
     source_state: { status: sourceStatus, basis: evidence ? "evidence_snapshot" : "archive", content_revision: snapshot.contentRevision, evidence_snapshot_id: evidence?.id ?? null },
     custom_tags: tagSummaryFromRow(row).custom_tags.map(tagged) };
 }
@@ -145,6 +147,7 @@ async function applyActions(request: Request, env: Env, id: number) {
   }
   if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 1000)) return fail("invalid_reason");
   const now = new Date().toISOString(), revision = snapshot.link.personal_revision + 1;
+  const catalog = (await managedCatalog(env)).catalog;
   const changes: Override[] = [], customBefore = await customOf(env, id), customAfter = new Set(customBefore.map(t => t.id));
   const customBasis = new Map<string, { revision: number; status: string }>();
   let undo: string | null = null;
@@ -154,14 +157,14 @@ async function applyActions(request: Request, env: Env, id: number) {
   for (const action of actions) {
     const name = String(action.action);
     if (["accept", "confirm", "reject", "reset"].includes(name)) {
-      const target = systemRef(action.tag_ref);
+      const target = systemRef(action.tag_ref, catalog);
       if (!target) return fail("invalid_tag_ref");
-      if (["accept", "confirm"].includes(name) && !selectable(target)) return fail("tag_deprecated", 409);
+      if (["accept", "confirm"].includes(name) && !selectable(target, catalog)) return fail("tag_deprecated", 409);
       if (name === "confirm" && !((snapshot.view[target.field] ?? []) as string[]).includes(target.term)) return fail("tag_not_effective", 409);
       add(target.field, target.term, name === "confirm" ? "accept" : name as OverrideAction);
     } else if (name === "replace") {
-      const from = systemRef(action.from_tag_ref), to = systemRef(action.to_tag_ref);
-      if (!from || !to || !selectable(to) || (from.field === to.field && from.term === to.term)) return fail("invalid_replacement");
+      const from = systemRef(action.from_tag_ref, catalog), to = systemRef(action.to_tag_ref, catalog);
+      if (!from || !to || !selectable(to, catalog) || (from.field === to.field && from.term === to.term)) return fail("invalid_replacement");
       add(from.field, from.term, "reject"); add(to.field, to.term, "accept");
     } else if (["set_empty", "reset_group"].includes(name)) {
       const field = normalizeField(action.dimension);
@@ -296,10 +299,11 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
   if (id && !current) return fail("not_found", 404);
   if (current && body.expected_revision !== current.revision) return fail("revision_conflict", 409, { tag: tagged(current) });
   const deleting = request.method === "DELETE";
+  if(body.archived!==undefined&&(typeof body.archived!=="boolean"||!current||request.method!=="PATCH"))return fail("invalid_tag_operation");
   if (!deleting && !text(body.label, 80)) return fail("invalid_label");
   const label = deleting ? current!.label : String(body.label).trim(), normalized = normalizeName(label);
   if (!deleting) {
-    const collision = Object.entries(taxonomyV2()).filter(([, v]) => Array.isArray(v)).flatMap(([dimension, terms]) =>
+    const collision = Object.entries((await managedCatalog(env)).catalog).filter(([, v]) => Array.isArray(v)).flatMap(([dimension, terms]) =>
       (terms as Array<{ id: string; label: string; aliases?: string[] }>).filter(t => [t.label, ...(t.aliases ?? [])].some(s => normalizeName(s) === normalized))
         .map(t => ({ tag_ref: `system/${dimension}/${t.id}`, label: t.label })));
     const displays = await env.DB.prepare(`SELECT dimension,term_id,label FROM taxonomy_display_overrides`).all<{ dimension: string; term_id: string; label: string }>();
@@ -319,7 +323,7 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
   const links = current ? (await env.DB.prepare(`SELECT link_id FROM custom_tag_links WHERE tag_id=?`).bind(current.id).all<{ link_id: number }>()).results.map(r => r.link_id) : [];
   if (deleting && links.length && body.detach_all !== true) return fail("tag_in_use", 409, { link_count: links.length });
   const now = new Date().toISOString(), tagID = current?.id ?? crypto.randomUUID();
-  const next: Custom = { id: tagID, owner_id: owner, label, revision: (current?.revision ?? 0) + 1, status: deleting ? "deprecated" : "active" };
+  const next: Custom = { id: tagID, owner_id: owner, label, revision: (current?.revision ?? 0) + 1, status: deleting || body.archived===true ? "deprecated" : "active" };
   let guard = current ? `EXISTS(SELECT 1 FROM custom_tags WHERE id=? AND revision=?)` : `NOT EXISTS(SELECT 1 FROM custom_tags WHERE owner_id=? AND normalized_label=?)`;
   const bindings = current ? [tagID, current.revision] : [owner, normalized];
   if (deleting) {
@@ -371,7 +375,7 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
 }
 
 async function queryTags(request: Request, env: Env, mode: "counts" | "export") {
-  const url = new URL(request.url), query = url.searchParams.get("q")?.trim(), filters = bookmarkFilters(url, query);
+  const url = new URL(request.url), query = url.searchParams.get("q")?.trim(), filters = bookmarkFilters(url, query, await filterCatalog(env,url));
   if (filters instanceof Response) return filters;
   const includeContentFunctions = contentFunctionsAware(request);
   const visibleFields = includeContentFunctions ? ["topics", "resource_kinds", "content_functions"] as const : ["topics", "resource_kinds"] as const;

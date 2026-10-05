@@ -1,3 +1,4 @@
+import type { Taxonomy } from "./taxonomy-v2";
 import { findTerm } from "./taxonomy-v2";
 
 // Correlated with the outer links row. Every source is read in the same SQLite
@@ -84,7 +85,7 @@ export const entityStateSQL = `COALESCE((SELECT CASE WHEN e.state<>'not_run' AND
 
 export const SELECTION_FILTER_KEYS = ["filter_contract_version", "topic", "form", "use", ...dimensions, "entity_state", "custom_tags", "topics_mode", "resource_mode", "custom_mode", "functions_mode", "resource_kind", "custom_tag", "topic_mode", "topic_refinements"];
 
-export function selectionFilters(params: URLSearchParams): { clauses: string[]; bindings: string[] } | null {
+export function selectionFilters(params: URLSearchParams, catalog?: Taxonomy): { clauses: string[]; bindings: string[] } | null {
   params = new URLSearchParams(params);
   for (const [alias, canonical] of [["resource_kind", "resource_kinds"], ["custom_tag", "custom_tags"], ["topic_mode", "topics_mode"]]) {
     if (params.has(alias)) { if (params.has(canonical)) return null; params.set(canonical, params.get(alias)!); }
@@ -105,7 +106,7 @@ export function selectionFilters(params: URLSearchParams): { clauses: string[]; 
     const legacy = ["topic", "form", "use"].includes(key);
     const field = key === "topic" ? "topics" : key;
     const dimension = key === "form" ? "forms" : key === "use" ? "uses" : field;
-    if ((legacy && terms.length !== 1) || terms.length > 64 || terms.some(term => !findTerm(dimension, term))) return null;
+    if ((legacy && terms.length !== 1) || terms.length > 64 || terms.some(term => !findTerm(dimension, term, catalog))) return null;
     const existing = groups.find(group => group.field === field);
     if (existing) existing.terms = [...new Set([...existing.terms, ...terms])];
     else groups.push({ field, terms: [...new Set(terms)], mode: params.get(field === "topics" ? "topics_mode" : field === "resource_kinds" ? "resource_mode" : field === "content_functions" ? "functions_mode" : "") ?? "any" });
@@ -114,7 +115,7 @@ export function selectionFilters(params: URLSearchParams): { clauses: string[]; 
     const entries = params.getAll("topic_refinements");
     if (entries.length !== 1 || entries[0].length > 1024) return null;
     const terms = entries[0].split(',');
-    if (terms.length > 64 || terms.some(id => findTerm("topics", id)?.granularity !== "specific")) return null;
+    if (terms.length > 64 || terms.some(id => findTerm("topics", id, catalog)?.granularity !== "specific")) return null;
     // A second topics group is intentional: (A OR B) AND C must not turn into
     // A OR B OR C or change the user's original group from ANY to ALL.
     groups.push({ field: "topics", terms: [...new Set(terms)], mode: "all" });

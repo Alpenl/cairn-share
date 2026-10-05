@@ -1,3 +1,4 @@
+import { managedCatalog } from "./tag-catalog";
 import { readJSONObject } from "./json-body";
 import { readSelectionSnapshot } from "./selection-state";
 import type { Env } from "./index";
@@ -158,7 +159,7 @@ async function generateProposals(env: Env): Promise<Response> {
 // display-only renames applied to labels. Definitions, ids and relations are
 // unchanged, so the model input and every stored decision stay valid.
 export async function taxonomyWithDisplayOverrides(env: Env, tags = false, granularity = false): Promise<Record<string, unknown>> {
-  const vocabulary = (tags ? taxonomyV2() : legacyTaxonomyV2()) as unknown as Record<string, unknown>;
+  const vocabulary = (tags ? (await managedCatalog(env)).catalog : legacyTaxonomyV2()) as unknown as Record<string, unknown>;
   const rows = await env.DB.prepare(`SELECT term_id, dimension, label,display_revision FROM taxonomy_display_overrides`).all<{ term_id: string; dimension: string; label: string; display_revision: number }>();
   const overlays = new Map(rows.results.map((row) => [`${row.dimension}:${row.term_id}`, row]));
   const result: Record<string, unknown> = { ...vocabulary };
@@ -270,7 +271,7 @@ async function patchSelection(request: Request, env: Env, id: number): Promise<R
     form: body.form === undefined ? existing.form : String(body.form),
     use: body.use === undefined ? existing.use : String(body.use),
   };
-  const validated = validateV2Selection(candidate);
+  const validated = validateV2Selection(candidate, (await managedCatalog(env)).catalog);
   if (!validated) return fail("invalid_selection");
   // The write is recorded as field-level human overrides and the effective view
   // is rebuilt from them, so a later read (or a second client) sees exactly
@@ -313,7 +314,7 @@ async function patchSelectionV1(request: Request, env: Env, id: number): Promise
   if (body.form !== undefined) payload.form = String(body.form);
   if (body.use !== undefined) payload.use = String(body.use);
   const { selection } = applyV1Write(existing, payload);
-  const validated = validateV2Selection(selection);
+  const validated = validateV2Selection(selection, (await managedCatalog(env)).catalog);
   if (!validated) return fail("invalid_v1_selection");
   const result = await persistSelectionOverrides(env, id, validated, {
     source: "legacy_unknown", operationPrefix: typeof body.operation_key === "string" ? body.operation_key : `patch-v1-${id}-${Date.now()}`,

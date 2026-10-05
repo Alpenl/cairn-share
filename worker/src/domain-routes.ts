@@ -1,3 +1,4 @@
+import { historicalCatalog, managedCatalog } from "./tag-catalog";
 import { readJSONObject } from "./json-body";
 import { entityCacheRoute } from "./entity-cache";
 import {validEntityObservations,type EntityBlock} from "./entity-judgments";
@@ -828,7 +829,7 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
   if (policyReplay && (!target || body.expected_target_generation !== target.generation)) return fail("target_changed", 409);
   if (policyReplay && target && (primary.spec_id !== target.spec_id || primary.spec_hash !== target.spec_hash ||
     primary.requested_model !== target.requested_model)) return fail("run_identity_mismatch", 409);
-  if (policyReplay && target && !validReplayAutomatic(automatic, target.taxonomy_version)) return fail("invalid_automatic");
+  if (policyReplay && target && !await validReplayAutomatic(env, automatic, target.taxonomy_version)) return fail("invalid_automatic");
   const rawRuns = runs.results.map(run => parseJSON(run.raw_judgments ?? "null", null));
   const judged = new Set<string>();
   for (const raw of rawRuns) if (record(raw) && record(raw.judgments)) {
@@ -927,8 +928,8 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
     ...(policyReplay ? { policy_hash: body.policy_hash, target_generation: target!.generation } : {}) });
 }
 
-function validReplayAutomatic(automatic: AutomaticView, version: string): boolean {
-  const catalog = classificationTaxonomy(version);
+async function validReplayAutomatic(env: Env, automatic: AutomaticView, version: string): Promise<boolean> {
+  const catalog = await historicalCatalog(env, version);
   if (!catalog) return false;
   for (const field of ["topics", "resource_kinds", "content_functions", "carriers", "affordances"] as const) {
     const terms = catalog[field] ?? [], values = automatic[field] ?? [];
@@ -980,7 +981,7 @@ async function applyOverride(request: Request, env: Env, id: number): Promise<Re
   const action = body.action as OverrideAction;
   const term = typeof body.term === "string" ? body.term : "";
   if (!text(operationKey, 200)) return fail("invalid_operation_key");
-  if (!field || !validOverride(field, action, term)) return fail("invalid_override");
+  if (!field || !validOverride(field, action, term, (await managedCatalog(env)).catalog)) return fail("invalid_override");
   return recordOverride(env, id, field, action, term, operationKey, body.expected_revision);
 }
 
