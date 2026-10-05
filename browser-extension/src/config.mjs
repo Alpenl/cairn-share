@@ -39,6 +39,11 @@ export async function tokenIdentity(token) {
 }
 
 export const ERROR_TEXT = {
+  revision_conflict:"收藏已保存；合集在其他设备更新。点击重试会按最新版本加入。",
+  collection_deleted:"收藏已保存；选中的合集已归档或删除，请在网页/APP核对。",
+  collection_limit:"收藏已保存；合集容量已满，请在网页/APP调整。",
+  invalid_collection:"合集选择无效，请重新打开插件。",
+  collections_unsupported:"收藏已保存；服务尚未支持合集，请更新后重试。",
   not_configured: "请先在设置中填写访问令牌。",
   invalid_url: "请填写完整的 HTTP(S) 链接，不能包含用户名或密码。",
   invalid_note: "备注最多 2000 个字符。",

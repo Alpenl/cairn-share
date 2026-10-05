@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CaptureError, MAX_QUEUE, submissionUrl, validateCapture } from "../src/config.mjs";
+import { CaptureError, MAX_QUEUE, tokenIdentity, submissionUrl, validateCapture } from "../src/config.mjs";
 import { createClient } from "../src/api.mjs";
 import { createController } from "../src/controller.mjs";
 
@@ -184,4 +184,19 @@ test("URL stripping preference changes submission only, and queue is bounded", a
   await Promise.all(Array.from({ length: MAX_QUEUE }, () => h.controller.enqueue(capture())));
   assert.equal((await h.controller.snapshot()).queue[0].url, "https://example.com/a%2fb");
   await assert.rejects(h.controller.enqueue(capture()), { kind: "queue_full" });
+});
+
+
+test("collection selections survive restart and lost membership response without another capture",async()=>{
+ const cid=crypto.randomUUID(),seen=[];let uploads=0,lose=true;
+ const h=harness({upload:async(_token,job)=>{if(job.savedLink)return job.savedLink;uploads++;return record(job);},collections:async()=>[{id:cid,name:"设计",revision:1,deleted:0,archived:0}],addCollection:async(_token,id,body)=>{seen.push(structuredClone(body));if(lose){lose=false;throw new CaptureError("network");}return {revision:2};}});
+ await connect(h.controller);await h.controller.enqueue(capture({collection_ids:[cid],binding:await tokenIdentity("test-token")}));await h.controller.flush();assert.equal(h.raw().queue[0].savedLink.id,1);
+ await h.recreate().flush({force:true});assert.equal(uploads,1);assert.equal(seen.length,2);assert.deepEqual(seen[0],seen[1]);assert.equal(h.raw().queue.length,0);
+});
+test("collection version conflicts require human retry, and moving accounts clears stale selections",async()=>{
+ const cid=crypto.randomUUID();let conflicts=true,revision=1,calls=0;const seen=[];
+ const h=harness({collections:async()=>[{id:cid,revision,deleted:0,archived:0}],addCollection:async(_token,_id,body)=>{calls++;seen.push(body);if(conflicts)throw new CaptureError("revision_conflict");return {revision:revision+1};}});
+ await connect(h.controller);await h.controller.enqueue(capture({collection_ids:[cid],binding:await tokenIdentity("test-token")}));await h.controller.flush();h.tick(3600000);await h.controller.flush();assert.equal(calls,1);conflicts=false;revision=2;await h.controller.flush({force:true});assert.equal(seen[1].expected_revision,2);assert.notEqual(seen[1].operation_key,seen[0].operation_key);
+ await h.controller.enqueue(capture({collection_ids:[cid],binding:await tokenIdentity("test-token")}));await connect(h.controller,"second-token",{movePending:true});assert.deepEqual(h.raw().queue[0].collection_ids,[]);
+ await assert.rejects(h.controller.enqueue(capture({collection_ids:[cid],binding:await tokenIdentity("test-token")})),{kind:"queue_connection"});
 });

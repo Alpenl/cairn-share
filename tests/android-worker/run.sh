@@ -74,5 +74,13 @@ for phase in persistBaselineWithRealWorker resumeRealCursorApplyUpdatesAndDelete
     com.alpenl.cairn.share.test/androidx.test.runner.AndroidJUnitRunner | tee "$work/$phase.log"
   grep -Eq '^OK \(1 test\)' "$work/$phase.log"
 done
+for phase in persistOfflineCollectionAndLoseCommittedCreateResponse recoverAfterProcessDeathAndExplicitlyResolveRemoteConflict; do
+  "$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
+  "$adb" -s "$serial" shell am instrument -w -r \
+    -e class "com.alpenl.cairn.share.CollectionsWorkerIntegrationTest#$phase" \
+    -e cairnWorkerUrl http://127.0.0.1:18978 \
+    com.alpenl.cairn.share.test/androidx.test.runner.AndroidJUnitRunner | tee "$work/$phase.log"
+  grep -Eq '^OK \(1 test\)' "$work/$phase.log"
+done
 curl -fsS "http://127.0.0.1:$proxy_port/__test/control" > "$work/transport-history.json"
-echo "PASS: sixteen phases ran in separate Android processes against actual authenticated Worker/D1"
+echo "PASS: eighteen phases ran in separate Android processes against actual authenticated Worker/D1"

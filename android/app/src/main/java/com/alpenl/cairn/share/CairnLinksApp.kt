@@ -134,6 +134,7 @@ private object Routes {
     const val Console = "console"
     const val About = "about"
     const val Offline = "offline"
+    const val Collections = "collections"
 
     fun detail(id: Int): String = "detail/$id"
     fun edit(id: Int): String = "edit/$id"
@@ -250,9 +251,14 @@ internal fun CairnLinksApp(
                     onRefresh = viewModel::refreshLinks,
                     onOpenSettings = { navController.navigateTop(Routes.Settings) },
                     onOpenSearch = { navController.navigate(Routes.Search) },
+                    onOpenCollections = { navController.navigate(Routes.Collections) },
                     onOpenOffline = { navController.navigate(Routes.Offline) },
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
+            }
+            composable(Routes.Collections) {
+                CollectionsScreen(state.apiBaseUrl,state.preferences.apiToken,state.links,state.v2Taxonomy ?: state.taxonomy,
+                    onBack={navController.popBackStack()},onOpen={navController.navigate(Routes.detail(it))},onRefreshLibrary=viewModel::refreshLinks)
             }
             composable(Routes.Queue) {
                 QueueScreen(
@@ -414,6 +420,7 @@ internal fun CairnLinksApp(
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
             SaveLinkSheetContent(
+                collectionsContent={CollectionDraftSelector(state.apiBaseUrl,state.preferences.apiToken,state.manualAdd.collectionIds,viewModel::setAddCollections,!state.manualAdd.submitting)},
                 title = "收藏链接",
                 subtitle = "把值得留住的内容，放进你的收藏。",
                 candidates = emptyList(),
@@ -495,6 +502,7 @@ private fun LibraryScreen(
     onRefresh: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSearch: () -> Unit,
+    onOpenCollections: () -> Unit,
     onOpenOffline: () -> Unit,
     onOpenLinkDetail: (SavedLink) -> Unit,
 ) {
@@ -514,6 +522,7 @@ private fun LibraryScreen(
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
+                    TextButton(onClick=onOpenCollections,modifier=Modifier.testTag("open_collections")){Text("合集")}
                     HeaderIconButton(Icons.Default.Search, "搜索收藏", onOpenSearch, Modifier.testTag("open_search"))
                     if (state.offlineReads.isNotEmpty()) HeaderIconButton(CairnIcons.Offline, "离线阅读", onOpenOffline, Modifier.testTag("open_offline_reading"))
                     HeaderIconButton(Icons.Default.Refresh, if (querying) "重新筛选" else "刷新收藏", if (querying) onRetryFilters else onRefresh,
@@ -886,6 +895,7 @@ private fun DetailScreen(
                 item(key = "link") {
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         LinkDetailContent(link)
+                        CollectionMembershipButton(state.apiBaseUrl,state.preferences.apiToken,listOf(id))
                     }
                 }
                 item(key = "curation_overview") {

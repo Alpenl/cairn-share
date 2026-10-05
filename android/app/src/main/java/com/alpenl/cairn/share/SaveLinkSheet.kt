@@ -89,6 +89,7 @@ internal fun ShareBottomSheetScreen(
     onNoteChange: (String) -> Unit,
     onSave: () -> Unit,
     onCancel: () -> Unit,
+    collectionsContent: @Composable () -> Unit = {},
 ) {
     val selected = candidates.getOrNull(selectedIndex)
     val submittingNow by rememberUpdatedState(submitting && !completed)
@@ -107,7 +108,7 @@ internal fun ShareBottomSheetScreen(
             statusText = statusText, submitting = submitting, completed = completed,
             submitEnabled = selected != null && settingsLoaded && !submitting && !completed,
             preserveCompleteUrl = preserveCompleteUrl, onCancel = onCancel, onSave = onSave,
-            modifier = Modifier.navigationBarsPadding(),
+            modifier = Modifier.navigationBarsPadding(), collectionsContent = collectionsContent,
         )
     }
 }
@@ -132,6 +133,7 @@ internal fun SaveLinkSheetContent(
     onCancel: () -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier,
+    collectionsContent: @Composable () -> Unit = {},
 ) {
     val focus = LocalFocusManager.current
     val editable = !submitting && !completed
@@ -228,6 +230,7 @@ internal fun SaveLinkSheetContent(
             Column {
                 HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
                 Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    collectionsContent()
                     if (statusText.isNotBlank()) Text(statusText, style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.testTag("status").semantics { liveRegion = LiveRegionMode.Polite })

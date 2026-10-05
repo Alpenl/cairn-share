@@ -34,7 +34,7 @@ export async function extensionBudgetRoute(request: Request, env: Env, path: str
   const limits = body.limits as typeof EXTENSION_LIMITS;
   const ids = body.item_ids;
   if (typeof body.operation_key !== "string" || !/^[a-f0-9]{64}$/.test(body.operation_key) ||
-    typeof body.kind !== "string" || !["entity", "rerank", "evidence"].includes(body.kind) ||
+    typeof body.kind !== "string" || !["entity", "rerank", "evidence", "collection_organize"].includes(body.kind) ||
     !Array.isArray(ids) || ids.length < 1 || ids.length > 20 || new Set(ids).size !== ids.length ||
     ids.some(id => !Number.isSafeInteger(id) || id < 1) ||
     body.tokens !== (body.kind === "evidence" ? 0 : 65536) ||

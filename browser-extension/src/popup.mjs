@@ -10,6 +10,7 @@ let operationId = crypto.randomUUID();
 let saving = false;
 let initialized = false;
 let requestedOrigins = [];
+let selectedCollections=new Set();let definitions=[];
 let draftWrites = Promise.resolve();
 const DRAFT_KEY = "cairn_capture_draft";
 
@@ -25,6 +26,7 @@ function inputsChanged() {
   $("save").disabled = saving || saved || !state?.configured || !valid();
   $("url").readOnly = saving;
   $("note").readOnly = saving;
+  $("collection-choices").querySelectorAll("input").forEach(n=>n.disabled=saving||saved);
   const samePage = activeTab?.id && $("url").value === activeTab.url;
   $("capture-page").disabled = saving || !samePage;
   $("capture-hint").textContent = samePage ? "保存已加载的正文和图片。未展开或未加载的内容不在采集范围内。" : "当前链接不是打开的网页，将仅保存链接。";
@@ -37,7 +39,7 @@ function inputsChanged() {
 }
 
 function persistDraft() {
-  const draft = { url: $("url").value, note: $("note").value, title, client_id: operationId };
+  const draft = { url: $("url").value, note: $("note").value, title, client_id: operationId, collection_ids:[...selectedCollections],binding:state?.binding };
   draftWrites = draftWrites.catch(() => {}).then(() => ext.storage.local.set({ [DRAFT_KEY]: draft }))
     .catch(() => { throw new CaptureError("storage"); });
   return draftWrites;
@@ -53,7 +55,8 @@ for (const id of ["url", "note"]) $(id).addEventListener("input", () => {
 });
 
 async function refresh() {
-  state = await send("snapshot");
+  const next=await send("snapshot");if(state?.binding&&state.binding!==next.binding){selectedCollections.clear();definitions=[];renderCollections();}
+  state=next;
   $("connection").textContent = state.configured ? "已连接到你的收藏库" : "首次使用，请先打开设置填写访问令牌。";
   $("pending-count").textContent = String(state.queue.length);
   $("retry-all").hidden = state.queue.length === 0;
@@ -82,7 +85,7 @@ $("capture-form").addEventListener("submit", async (event) => {
     // this page's media hosts and prepared before the button becomes active.
     if ($("capture-page").checked && $("url").value===activeTab?.url && requestedOrigins.length) await ext.permissions.request({origins:requestedOrigins});
     await persistDraft();
-    const capture = { url: $("url").value, note: $("note").value, title, client_id: operationId };
+    const capture = { url: $("url").value, note: $("note").value, title, client_id: operationId, collection_ids:[...selectedCollections],binding:state?.binding };
     await send("save", { capture, tabId: activeTab?.id, capturePage: $("capture-page").checked && capture.url === activeTab?.url });
     await draftWrites;
     await ext.storage.local.remove(DRAFT_KEY);
@@ -127,6 +130,7 @@ try {
   if (draft && !state.queue.some((job) => job.client_id === draft.client_id) && state.lastResult?.client_id !== draft.client_id) {
     $("url").value = draft.url;
     $("note").value = draft.note;
+    selectedCollections=new Set(draft.binding===state.binding?(draft.collection_ids||[]):[]);
     title = draft.title;
     operationId = draft.client_id;
     if (draft.url !== tab?.url) status($("status"), "已恢复上次未保存的草稿。请确认链接后保存。", "pending");
@@ -145,4 +149,16 @@ try {
   $("page-title").textContent = title;
   initialized = true;
   await refresh();
+  void loadCollections();
 } catch (error) { showError($("status"), error); }
+
+function renderCollections(){
+ const root=$("collection-choices");root.replaceChildren();
+ for(const c of definitions.filter(c=>!c.deleted&&!c.archived).sort((a,b)=>b.pinned-a.pinned||a.name.localeCompare(b.name))){
+  const label=document.createElement("label");label.className="collection-choice";const input=document.createElement("input");input.type="checkbox";input.checked=selectedCollections.has(c.id);input.disabled=saving||saved;
+  input.addEventListener("change",()=>{input.checked?selectedCollections.add(c.id):selectedCollections.delete(c.id);operationId=crypto.randomUUID();void persistDraft();inputsChanged();});
+  const name=document.createElement("span");name.textContent=c.name;label.append(input,name);root.append(label);
+ }
+}
+async function loadCollections(){try{const result=await send("collections");if(result.binding!==state?.binding)return;definitions=result.items;renderCollections();$("collection-status").textContent=result.cached?"离线列表，联网后核对并加入。":definitions.some(c=>!c.deleted&&!c.archived)?"可选多个合集。":"还没有使用中的合集，可在网页或 APP 中新建。";}catch(error){$("collection-status").textContent="合集暂时无法读取，仍可保存收藏。";}}
+$("refresh-collections").addEventListener("click",loadCollections);

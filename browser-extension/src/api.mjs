@@ -2,14 +2,14 @@ import { API_BASE, CaptureError } from "./config.mjs";
 import { localMedia, mediaDigest, forgetMedia } from './media.mjs';
 
 export function createClient({ fetchImpl = fetch, apiBase = API_BASE, timeoutMs = 10000 } = {}) {
-  async function request(token, path, body, {method,raw=false} = {}) {
+  async function request(token, path, body, {method,raw=false,collections=false} = {}) {
     if (!token) throw new CaptureError("not_configured");
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), raw ? 30000 : timeoutMs);
     try {
       const response = await fetchImpl(`${apiBase}${path}`, {
         method: method || (body ? "POST" : "GET"),
-        headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": raw ? 'application/octet-stream' : "application/json" } : {}) },
+        headers: { ...(collections ? {"X-Cairn-Collections":"1"} : {}), Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": raw ? 'application/octet-stream' : "application/json" } : {}) },
         ...(body ? { body: raw ? body : JSON.stringify(body) } : {}),
         credentials: "omit",
         cache: "no-store",
@@ -21,9 +21,10 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, timeoutMs 
       if (response.status >= 500 || response.status === 429) throw new CaptureError("server");
       if (!response.ok) {
         const data = await response.json().catch(() => null);
-        const kind = ["invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete",'media_stale','media_conflict','invalid_media','media_incomplete'].includes(data?.error) ? data.error : "response";
+        const kind = ["revision_conflict","collection_deleted","collection_limit","invalid_collection","collections_unsupported","invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete",'media_stale','media_conflict','invalid_media','media_incomplete'].includes(data?.error) ? data.error : "response";
         throw new CaptureError(kind);
       }
+      if(collections && response.headers.get("X-Cairn-Collections")!=="1") throw new CaptureError("collections_unsupported");
       return await response.json().catch(() => { throw new CaptureError("response"); });
     } catch (error) {
       if (error instanceof CaptureError) throw error;
@@ -34,6 +35,8 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, timeoutMs 
   }
 
   return {
+    async collections(token) {const data=await request(token,"/api/collections",null,{collections:true});if(!Array.isArray(data.items))throw new CaptureError("response");return data.items;},
+    async addCollection(token,id,body){return request(token,`/api/collections/${id}/operations`,body,{collections:true});},
     async test(token) {
       const data = await request(token, "/api/links?limit=1");
       if (!Array.isArray(data?.items)) throw new CaptureError("response");

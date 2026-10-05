@@ -21,6 +21,8 @@ internal data class PendingUpload(
     val attemptCount: Int = 0,
     val lastAttemptAtEpochMillis: Long? = null,
     val lastFailure: FailureKind? = null,
+    val collectionIds: List<String> = emptyList(),
+    val collectionAccount: String = "",
 )
 
 internal class PendingUploadStore(context: Context) {
@@ -35,12 +37,15 @@ internal class PendingUploadStore(context: Context) {
         note: String,
         id: String = UUID.randomUUID().toString(),
         nowEpochMillis: Long = System.currentTimeMillis(),
+        collectionIds: List<String> = emptyList(),
+        collectionAccount: String = "",
     ): PendingUpload {
         val upload = PendingUpload(
             id = id,
             url = url,
             note = note,
             createdAtEpochMillis = nowEpochMillis,
+            collectionIds = collectionIds, collectionAccount = collectionAccount,
         )
         dataStore.edit { values ->
             val current = PendingUploadJson.decode(values[UploadsKey].orEmpty())
@@ -103,7 +108,8 @@ internal object PendingUploadJson {
                         .put("created_at", upload.createdAtEpochMillis)
                         .put("attempt_count", upload.attemptCount)
                         .put("last_attempt_at", upload.lastAttemptAtEpochMillis ?: JSONObject.NULL)
-                        .put("last_failure", upload.lastFailure?.name ?: JSONObject.NULL),
+                        .put("last_failure", upload.lastFailure?.name ?: JSONObject.NULL)
+                        .apply { if(upload.collectionIds.isNotEmpty()) { put("collection_ids",JSONArray(upload.collectionIds));put("collection_account",upload.collectionAccount) } },
                 )
             }
         }.toString()
@@ -124,6 +130,8 @@ internal object PendingUploadJson {
                             id = id,
                             url = url,
                             note = item.optString("note"),
+                            collectionIds = item.optJSONArray("collection_ids")?.let { a -> List(a.length()) { a.getString(it) } }.orEmpty(),
+                            collectionAccount = item.optString("collection_account"),
                             createdAtEpochMillis = createdAt,
                             attemptCount = item.optInt("attempt_count", 0).coerceAtLeast(0),
                             lastAttemptAtEpochMillis = item.optionalLong("last_attempt_at"),
