@@ -38,10 +38,10 @@ internal class CollectionController(val context:Context,val base:String,val toke
     fun action(block:suspend()->Unit){scope.launch{try{error="";block()}catch(e:Exception){if(e is kotlinx.coroutines.CancellationException)throw e;error=e.message?:"合集保存失败"}}}
     suspend fun resolve(p:CollectionPending,retry:Boolean){CollectionSync.exclusive(account){store.resolve(account,p,retry)};reload();CollectionSync.schedule(context,base,token)}
 }
-@Composable internal fun rememberCollections(base:String,token:String):CollectionController {
+@Composable internal fun rememberCollections(base:String,token:String,autoRefresh:Boolean=true):CollectionController {
     val app=LocalContext.current.applicationContext;val scope=rememberCoroutineScope()
     val controller=remember(base,token){CollectionController(app,base,token,scope)}
-    LaunchedEffect(controller){controller.reload();controller.refresh();CollectionStore.updates.collect{if(it==controller.account)controller.reload()}}
+    LaunchedEffect(controller){controller.reload();if(autoRefresh)controller.refresh();CollectionStore.updates.collect{if(it==controller.account)controller.reload()}}
     return controller
 }
 @Composable private fun CollectionStatus(controller:CollectionController){
@@ -72,8 +72,8 @@ internal class CollectionController(val context:Context,val base:String,val toke
     if(creating)CollectionEditor(null,{creating=false}){name,desc->controller.action{val id=UUID.randomUUID().toString();controller.write(id,"create",JSONObject().put("name",name).put("description",desc));selected=selected+id;creating=false}}
 }
 @Composable internal fun CollectionMembershipButton(base:String,token:String,ids:List<Int>){
-    val c=rememberCollections(base,token);var open by remember{mutableStateOf(false)}
-    TextButton(onClick={open=true},enabled=token.isNotBlank(),modifier=Modifier.testTag("add_to_collection")){Text("加入合集")}
+    val c=rememberCollections(base,token,autoRefresh=false);var open by remember{mutableStateOf(false)}
+    TextButton(onClick={open=true;c.refresh()},enabled=token.isNotBlank(),modifier=Modifier.testTag("add_to_collection")){Text("加入合集")}
     if(open){
         val membership=remember(c.state.members){c.state.members.groupBy{it.collection}.mapValues{(_,values)->values.map{it.link}.toSet()}}
         val initial=c.state.collections.filter{definition->ids.all{id->membership[definition.id]?.contains(id)==true}}.map{it.id}.toSet()
@@ -85,8 +85,8 @@ internal class CollectionController(val context:Context,val base:String,val toke
     }
 }
 @Composable internal fun CollectionDraftSelector(base:String,token:String,selected:Set<String>,onSelected:(Set<String>)->Unit,enabled:Boolean=true){
-    val c=rememberCollections(base,token);var open by remember{mutableStateOf(false)}
-    TextButton(onClick={open=true},enabled=enabled&&token.isNotBlank(),contentPadding=PaddingValues(0.dp),modifier=Modifier.testTag("share_collections")){
+    val c=rememberCollections(base,token,autoRefresh=false);var open by remember{mutableStateOf(false)}
+    TextButton(onClick={open=true;c.refresh()},enabled=enabled&&token.isNotBlank(),contentPadding=PaddingValues(0.dp),modifier=Modifier.testTag("share_collections")){
         Text(if(selected.isEmpty())"加入合集，可选" else "合集 · "+c.state.collections.filter{it.id in selected}.joinToString("、"){it.name},maxLines=1,overflow=TextOverflow.Ellipsis)
     }
     if(open)CollectionChooser(c,selected,{open=false}){onSelected(it);open=false}

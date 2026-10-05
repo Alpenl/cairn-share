@@ -62,7 +62,6 @@ internal object LibrarySync {
                 }
             }
             active()
-            CollectionSync.schedule(context, base, token)
             val links = store.catalog(account)
             mediaStore.prune(account, links.associate { link -> link.id to link.enrichment?.imageVersions.orEmpty().toList().toSet() })
             val pending = store.pendingMedia(account)
@@ -114,6 +113,7 @@ class LibrarySyncWorker(context: Context, parameters: WorkerParameters) : Corout
         val prefs = SharePreferencesStore(applicationContext).preferences.first()
         if (!prefs.automaticSync || prefs.apiToken.isBlank() || accountKeyFor(base, prefs.apiToken) != inputData.getString("account")) return Result.success()
         return try {
+            CollectionSync.schedule(applicationContext, base, prefs.apiToken)
             if (!LibrarySync.run(applicationContext, base, prefs.apiToken, background = true)) Result.success()
             else if (OfflineReadStore(applicationContext).pendingMedia(accountKeyFor(base, prefs.apiToken)).any { it.available } &&
                 !(prefs.imagesWifiOnly && (applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).isActiveNetworkMetered)) Result.retry()
