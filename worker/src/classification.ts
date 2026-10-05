@@ -1,3 +1,4 @@
+import { historicalCatalog, managedCatalog } from "./tag-catalog";
 import { CLASSIFICATION_LIMITS, classificationBudgetAvailable, classificationWindow, validClassificationLimits } from "./classification-budget";
 import { validEnrichmentSource } from "./source-validation";
 import { validRunProvenance } from "./run-provenance";
@@ -217,13 +218,13 @@ function automaticView(value: unknown): AutomaticView | null {
 // The legacy fields are a projection of this same automatic decision, never a
 // second model result. Check against the target's vocabulary, including its
 // historical active status, rather than today's display catalog.
-function validAutomaticProjection(classification: Classification, automatic: AutomaticView, version: string): boolean {
+async function validAutomaticProjection(env: Env, classification: Classification, automatic: AutomaticView, version: string): Promise<boolean> {
   if (JSON.stringify(classification.topics) !== JSON.stringify(automatic.topics.slice(0, 3)) ||
     classification.form !== automatic.form || classification.use !== automatic.use) return false;
-  const catalog = classificationTaxonomy(version);
+  const catalog = await historicalCatalog(env, version);
   if (!catalog) return false;
   const active = (terms: TermDefinition[] | undefined, ids: string[]) => ids.every(id =>
-    terms?.some(term => term.id === id && term.active && !term.deprecated));
+    terms?.some(term => term.id === id && term.active && !term.deprecated && term.ai_enabled !== false));
   return active(catalog.topics, automatic.topics) && active(catalog.resource_kinds, automatic.resource_kinds ?? []) &&
     active(catalog.content_functions, automatic.content_functions) && active(catalog.carriers, automatic.carriers) &&
     active(catalog.affordances, automatic.affordances) && active(catalog.forms, automatic.form ? [automatic.form] : []) &&
@@ -245,12 +246,13 @@ type Target = {
   policy_version: string;
   requested_model: string;
   protocol: string;
+  new_items_only: number;
 };
 
 async function activeTarget(env: Env): Promise<Target | null> {
   return env.DB.prepare(
     `SELECT t.generation, t.spec_id, t.spec_hash, t.taxonomy_version, t.policy_version,
-            t.requested_model, t.protocol
+            t.requested_model, t.protocol, t.new_items_only
      FROM classification_target_state s JOIN classification_targets t ON t.generation = s.generation
      WHERE s.id = 1`
   ).first<Target>();
@@ -361,6 +363,8 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     }
     if (body.protocol === "v2" && (!text(body.policy_version, 100) || !text(body.requested_model, 200) ||
       !await registeredTargetSpec(env, body as Target))) return fail("invalid_classification_config");
+    if (body.new_items_only !== undefined && typeof body.new_items_only !== "boolean") return fail("invalid_classification_config");
+    if (body.taxonomy_version.startsWith("managed-") && ((await managedCatalog(env)).catalog.version !== body.taxonomy_version || body.new_items_only !== true)) return fail("invalid_classification_config");
     const current = await activeTarget(env);
     if (!current) return fail("configuration_error");
     if (body.expected_generation !== undefined && body.expected_generation !== current.generation) {
@@ -375,13 +379,15 @@ export async function classificationRoute(request: Request, env: Env, path: stri
     const now = new Date().toISOString();
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO classification_targets(generation, spec_id, spec_hash, taxonomy_version, policy_version, requested_model, protocol, created_at, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO classification_targets(generation, spec_id, spec_hash, taxonomy_version, policy_version, requested_model, protocol, created_at, note, new_items_only)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (SELECT generation FROM classification_target_state WHERE id=1)=?`
       ).bind(generation, body.spec_id, body.spec_hash, body.taxonomy_version, body.policy_version,
-        body.requested_model, body.protocol, now, typeof body.note === "string" ? body.note.slice(0, 500) : null),
-      env.DB.prepare(`UPDATE classification_target_state SET generation = ?, updated_at = ? WHERE id = 1`)
-        .bind(generation, now)
+        body.requested_model, body.protocol, now, typeof body.note === "string" ? body.note.slice(0, 500) : null, body.new_items_only === true ? 1 : 0, current.generation),
+      env.DB.prepare(`UPDATE classification_target_state SET generation = ?, updated_at = ? WHERE id = 1 AND generation=? AND EXISTS(SELECT 1 FROM classification_targets WHERE generation=?)`)
+        .bind(generation, now, current.generation, generation)
     ]);
+    const saved = await activeTarget(env);
+    if (saved?.generation !== generation || saved.spec_id !== body.spec_id) return fail("target_changed", { generation: saved?.generation });
     return reply({ generation, spec_id: body.spec_id, protocol: body.protocol });
   }
 
@@ -464,7 +470,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
           AND EXISTS (SELECT 1 FROM json_each(s.payload,'$.blocks') b
             WHERE json_extract(b.value,'$.role')='primary' AND json_extract(b.value,'$.text')=l.original_text)))
         AND (j.status<>'processing' OR j.lease_until<=?)
-        AND (j.target_generation<>?
+        AND (j.target_generation<>? AND (?=0 OR j.status<>'completed')
           OR (j.attempts<5 AND (j.status='pending' OR (j.status='failed' AND j.next_retry_at<=?)
             OR (j.status='processing' AND j.lease_until<=?))))
         ORDER BY COALESCE(j.updated_at,''), j.link_id LIMIT 1)
@@ -480,7 +486,7 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       .bind(target.generation, token, until,
         target.generation, target.spec_id, boundTaxonomy, boundPolicy, boundModel, now,
         budgetWindow.start, budgetWindow.end, budgetLimits.max_calls_per_item, budgetWindow.start, budgetWindow.end, budgetLimits.max_tokens_per_item,
-        isLegacy ? 1 : 0, now, target.generation, now, now, target.generation,
+        isLegacy ? 1 : 0, now, target.generation, target.new_items_only ?? 0, now, now, target.generation,
         budgetWindow.start, budgetWindow.end, budgetLimits.max_calls_total, budgetWindow.start, budgetWindow.end, budgetLimits.max_tokens,
         now, now);
     // D1 batch is one SQLite transaction: a half-open job claim and its probe
@@ -581,10 +587,10 @@ export async function classificationRoute(request: Request, env: Env, path: stri
         result.spec_id !== target.spec_id || result.spec_hash !== target.spec_hash ||
         (result.requested_model ?? result.model) !== target.requested_model ||
         result.policy_version !== target.policy_version)) return { failure: "target_changed" as const };
-      if (classificationTaxonomy(target.taxonomy_version)?.resource_kinds !== undefined && (!isV2 ||
+      if ((await historicalCatalog(env, target.taxonomy_version))?.resource_kinds !== undefined && (!isV2 ||
         !record(result.raw_judgments) || (result.raw_judgments.metadata_version !== 1 && result.raw_judgments.metadata_version !== 2) ||
         automatic?.resource_kinds === undefined)) return { failure: "invalid_classification" as const };
-      if (isV2 && automatic && !validAutomaticProjection(classification, automatic, target.taxonomy_version)) {
+      if (isV2 && automatic && !await validAutomaticProjection(env, classification, automatic, target.taxonomy_version)) {
         return { failure: "invalid_classification" as const };
       }
       // Reject completions that no longer match the active target *before*

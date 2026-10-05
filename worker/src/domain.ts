@@ -1,3 +1,4 @@
+import type { Taxonomy } from "./taxonomy-v2";
 // B03 domain contracts: replayable evidence, runs, decisions and human
 // overrides. Everything here is shared by the Worker route handlers and the
 // cross-language golden vectors, so the canonicalisation rules live in one
@@ -170,19 +171,19 @@ export function normalizeField(value: unknown): OverrideField | null {
 // A field cannot be set empty or reset a specific term at the same time; the
 // distinction matters because `set []` is an explicit empty and `reset` returns
 // to the automatic suggestion.
-export function validOverride(field: OverrideField, action: OverrideAction, term: string): boolean {
+export function validOverride(field: OverrideField, action: OverrideAction, term: string, catalog?: Taxonomy): boolean {
   if (!OVERRIDE_FIELDS.includes(field) || !OVERRIDE_ACTIONS.includes(action)) return false;
   if (action === "set_empty") return term === "";
   if (action === "reset") return term === "" || TERM_FIELDS.includes(field);
   if (action === "accept" || action === "reject") {
     if (term === "") return false;
-    if (field === "topics") return validV2Term("topics", term);
-    if (field === "content_functions") return validV2Term("content_functions", term);
-    if (field === "carriers") return validV2Term("carriers", term);
-    if (field === "affordances") return validV2Term("affordances", term);
-    if (field === "resource_kinds") return validV2Term("resource_kinds", term);
-    if (field === "form") return validV2Term("forms", term);
-    if (field === "use") return validV2Term("uses", term);
+    if (field === "topics") return validV2Term("topics", term, catalog);
+    if (field === "content_functions") return validV2Term("content_functions", term, catalog);
+    if (field === "carriers") return validV2Term("carriers", term, catalog);
+    if (field === "affordances") return validV2Term("affordances", term, catalog);
+    if (field === "resource_kinds") return validV2Term("resource_kinds", term, catalog);
+    if (field === "form") return validV2Term("forms", term, catalog);
+    if (field === "use") return validV2Term("uses", term, catalog);
     return term.length > 0 && term.length <= 80;
   }
   return false;

@@ -135,6 +135,7 @@ private object Routes {
     const val About = "about"
     const val Offline = "offline"
     const val Collections = "collections"
+    const val Tags = "tags"
 
     fun detail(id: Int): String = "detail/$id"
     fun edit(id: Int): String = "edit/$id"
@@ -186,7 +187,10 @@ internal fun CairnLinksApp(
         }
     }
     val showBottomBar = currentRoute in TopDestinations.map { it.route }
-    val startDestination = restorableRoute(state.preferences.lastRoute) ?: Routes.Library
+    // Restoring preferences is only an initial navigation decision. Changing
+    // lastRoute after opening settings must not rebuild the graph and pop a
+    // newly opened management screen.
+    val startDestination = remember { restorableRoute(state.preferences.lastRoute) ?: Routes.Library }
 
     LaunchedEffect(state.message?.id) {
         val message = state.message ?: return@LaunchedEffect
@@ -256,6 +260,9 @@ internal fun CairnLinksApp(
                     onOpenLinkDetail = { navController.navigate(Routes.detail(it.id)) },
                 )
             }
+            composable(Routes.Tags) {
+                TagManagerScreen(state.apiBaseUrl,state.preferences.apiToken,{navController.popBackStack()},viewModel::refreshLinks)
+            }
             composable(Routes.Collections) {
                 CollectionsScreen(state.apiBaseUrl,state.preferences.apiToken,state.links,state.v2Taxonomy ?: state.taxonomy,
                     onBack={navController.popBackStack()},onOpen={navController.navigate(Routes.detail(it))},onRefreshLibrary=viewModel::refreshLinks)
@@ -280,6 +287,8 @@ internal fun CairnLinksApp(
                     onOpenConsole = { navController.navigate(Routes.Console) },
                     onOpenUpdate = { navController.navigate(Routes.Update) },
                     onOpenAbout = { navController.navigate(Routes.About) },
+                    onOpenTags = { navController.navigate(Routes.Tags) },
+                    onOpenCollections = { navController.navigate(Routes.Collections) },
                     onClearOffline = viewModel::clearOfflineReading,
                     onDownloadLibrary = viewModel::downloadLibrary,
                     onAutomaticSync = viewModel::setAutomaticSync,

@@ -78,6 +78,27 @@ class CollectionStoreInstrumentedTest {
         recreated.saveOrganizingDraft(a,"start",null);assertNull(recreated.organizingDraft(a,"start"))
     }
 
+    @Test fun managedTagIntentAndRuleMetadataSurviveOfflineAndRequireExplicitConflictResolution()=runBlocking<Unit>{
+        val a=account();val other=account();val store=CollectionStore(context);val operation=UUID.randomUUID().toString()
+        val catalog=JSONObject().put("revision",2).put("catalog",JSONObject().put("version","managed-fixture").put("topics",JSONArray()))
+        store.cacheTags(a,catalog)
+        val body=JSONObject().put("operation_key",operation).put("expected_revision",2).put("type","create").put("dimension","topics").put("definition",JSONObject().put("label","LoRA").put("description","适配器").put("ai_enabled",true))
+        store.enqueueTagManagement(a,body)
+        val recreated=CollectionStore(context);assertEquals(body.toString(),recreated.tagManagement(a).pending.toString());assertNull(recreated.tagManagement(other).payload)
+        try{recreated.resolveTags(a,true);fail("unknown response was rebased")}catch(_:java.io.IOException){}
+        recreated.cacheTags(a,catalog.put("revision",3));recreated.tagManagementError(a,"rejected:revision_conflict");recreated.resolveTags(a,true)
+        val next=recreated.tagManagement(a).pending!!;assertNotEquals(operation,next.getString("operation_key"));assertEquals(3L,next.getLong("expected_revision"))
+        recreated.acknowledgeTags(a,operation,catalog);assertNotNull(recreated.tagManagement(a).pending)
+        recreated.acknowledgeTags(a,next.getString("operation_key"),catalog.put("revision",4));assertNull(recreated.tagManagement(a).pending)
+        val record=CollectionRecord(UUID.randomUUID().toString(),"AIGC",revision=1,ruleEnabled=true,ruleMode="all",ruleTags=listOf("system/topics/lora"),ruleAfterId=59,ruleRevision=2)
+        assertEquals(record,CollectionRecord.decode(record.json()))
+        val member=CollectionMember(record.id,60,0,origin="rule",matchedTags=record.ruleTags);assertEquals(member,CollectionMember.decode(member.json()))
+        assertTrue(recreated.applyPage(a,recreated.remote(a),page(1,definition(1,record))))
+        recreated.enqueue(a,record.id,"rule",JSONObject().put("enabled",false).put("mode","any").put("tag_refs",JSONArray(record.ruleTags)))
+        assertFalse(CollectionStore(context).snapshot(a).collections.single().ruleEnabled)
+        assertTrue(CollectionStore(context).remote(a).collections.single().ruleEnabled)
+    }
+
     @Test fun syncPageAndCursorCommitAtomicallyWhilePendingDraftsRemainIndependent() = runBlocking<Unit> {
         val a=account(); val id=UUID.randomUUID().toString(); val store=CollectionStore(context)
         val original=CollectionRecord(id,"原名称",revision=1)
