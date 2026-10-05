@@ -41,7 +41,7 @@ async function sync(request:Request,env:Env) {
   changes:rows.map(r=>({...r,value:r.link_id===null?defs.get(r.collection_id)??null:lookup.get(`${r.collection_id}/${r.link_id}`)??null}))});
 }
 
-export async function collectionsRoute(request:Request,env:Env,path:string):Promise<Response> {
+export async function collectionsRoute(request:Request,env:Env,path:string, eligibility?:{runID:string;linkIDs:number[];actionID?:string}):Promise<Response> {
  if(request.headers.get("X-Cairn-Collections")!=="1") return error("capability_mismatch",409);
  if(path==="/api/collections/sync") return request.method==="GET"?sync(request,env):error("method_not_allowed",405);
  if(path==="/api/collections") {
@@ -110,6 +110,7 @@ export async function collectionsRoute(request:Request,env:Env,path:string):Prom
   if(type==="add") condition=" AND (SELECT COUNT(*) FROM collection_items WHERE collection_id=collections.id)+(SELECT COUNT(*) FROM json_each(?) j WHERE NOT EXISTS(SELECT 1 FROM collection_items i WHERE i.collection_id=collections.id AND i.link_id=j.value))<=1000",values.push(JSON.stringify(b.link_ids));
   if(type==="note"||type==="move") condition=" AND EXISTS(SELECT 1 FROM collection_items WHERE collection_id=collections.id AND link_id=?)",values.push(b.link_id);
   if(type==="move"&&b.before_id!==null) condition+=" AND EXISTS(SELECT 1 FROM collection_items WHERE collection_id=collections.id AND link_id=?)",values.push(b.before_id);
+  if(eligibility){condition+=" AND NOT EXISTS(SELECT 1 FROM json_each(?) j LEFT JOIN links l ON l.id=j.value LEFT JOIN collection_organizing_items i ON i.link_id=j.value AND i.run_id=? WHERE l.id IS NULL OR i.content_revision IS NOT l.content_revision OR i.status NOT IN('ready','applied'))";values.push(JSON.stringify(eligibility.linkIDs),eligibility.runID);if(eligibility.actionID){condition+=" AND EXISTS(SELECT 1 FROM collection_organizing_actions WHERE id=? AND status='pending')";values.push(eligibility.actionID);}}
   // Patch bindings precede the admission bindings. Conditions follow them.
   const patchValues=type==="edit"?values:[];const conditionValues=type==="edit"?[]:values;
   statements.push(env.DB.prepare(`UPDATE collections SET ${patch.length?patch.join(',')+',':""}revision=revision+1,last_operation=?,updated_at=? WHERE id=? AND revision=? AND deleted=? AND NOT EXISTS(SELECT 1 FROM collection_operations WHERE operation_key=?)${condition}`)

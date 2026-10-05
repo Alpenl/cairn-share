@@ -97,6 +97,7 @@ internal class CollectionController(val context:Context,val base:String,val toke
     var selected by rememberSaveable(c.account){mutableStateOf<String?>(null)}
     var query by rememberSaveable(selected,c.account){mutableStateOf("")}
     var mode by rememberSaveable(c.account){mutableStateOf("active")}
+    var organizing by remember{mutableStateOf(false)}
     var editor by remember{mutableStateOf(false)};var creating by remember{mutableStateOf(false)}
     var showAdd by remember{mutableStateOf(false)};var note by remember{mutableStateOf<CollectionMember?>(null)}
     var deleting by remember{mutableStateOf(false)};var filters by remember{mutableStateOf(BookmarkFilters())};var showFilters by remember{mutableStateOf(false)}
@@ -115,6 +116,7 @@ internal class CollectionController(val context:Context,val base:String,val toke
         if(record?.description?.isNotBlank()==true)Text(record.description,style=MaterialTheme.typography.bodySmall,maxLines=3,overflow=TextOverflow.Ellipsis)
         OutlinedTextField(query,{query=it},placeholder={Text(if(record==null)"查找合集" else "搜索合集内标题、正文或备注")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("collection_search"))
         CollectionStatus(c)
+        if(record==null)TextButton(onClick={organizing=true},modifier=Modifier.testTag("organize_collections")){Text("自动整理")}
         if(record==null)Row {
             listOf("active" to "使用中","archived" to "已归档","deleted" to "已删除").forEach{(value,label)->TextButton(onClick={mode=value}){Text(if(mode==value)"· $label" else label)}}
         } else Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
@@ -164,6 +166,7 @@ internal class CollectionController(val context:Context,val base:String,val toke
             }
         }
     }
+    if(organizing)CollectionOrganizingDialog(base,token,c.state.collections,{organizing=false}){c.refresh();onRefreshLibrary()}
     reviewing?.let { pending ->
         val latest=c.remote.collections.find{it.id==pending.collection}
         val body=JSONObject(pending.body)

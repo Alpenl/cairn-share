@@ -37,6 +37,12 @@ class CollectionsUiInstrumentedTest {
                 compose.onNodeWithTag("collection_name").performTextInput("我的设计项目")
                 compose.onNodeWithText("保存").performClick()
                 compose.waitUntil(20000){compose.onAllNodesWithText("我的设计项目").fetchSemanticsNodes().isNotEmpty()}
+                compose.onNodeWithTag("organize_collections").performClick()
+                compose.onNodeWithTag("organizing_review_mode").assertIsSelected()
+                compose.onNodeWithTag("organizing_direct_mode").assertIsNotSelected()
+                compose.onNodeWithTag("organizing_direct_mode").performClick()
+                compose.onNodeWithTag("organizing_direct_mode").assertIsSelected()
+                compose.onNodeWithText("关闭").performClick()
                 compose.onNodeWithText("我的设计项目").performClick()
                 compose.onNodeWithText("归档",useUnmergedTree=true).performClick()
                 compose.waitUntil(20000){compose.onAllNodesWithText("取消归档").fetchSemanticsNodes().isNotEmpty()}

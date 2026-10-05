@@ -42,6 +42,7 @@ function handleFailure(error) {
 async function dispatch(message) {
   switch (message?.type) {
     case "snapshot": return controller.snapshot();
+    case "collections": return controller.collections();
     case "save": {
       const capture = message.capture;
       const known = await controller.snapshot();

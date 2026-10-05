@@ -165,7 +165,10 @@ it("atomically deletes populated private tables, references, budgets and cached 
   const collection=crypto.randomUUID();
   await insert("collections",{id:collection,name:"Project",created_at:"t",updated_at:"t",last_operation:"fixture"});
   await insert("collection_items",{collection_id:collection,link_id:id,position:0,note:"private collection note",added_at:"t"});
-  const tables=["collection_items","archived_media","content_presentations","entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links","custom_tag_links","tag_operations","tag_change_facts"];
+  await insert("collection_organizing_runs",{id:"organizing-private",mode:"review",definitions:"[]",create_request_hash:"hash",created_at:"t"});
+  await insert("collection_organizing_items",{run_id:"organizing-private",link_id:id,content_revision:1});
+  await insert("collection_organizing_actions",{id:"action-private",run_id:"organizing-private",request_hash:"hash",payload:JSON.stringify({link_ids:[id]}),actor:"review",created_at:"t"});
+  const tables=["collection_organizing_items","collection_items","archived_media","content_presentations","entity_cache","enrichment_sources","enrichment_completion_receipts","enrichment_provider_attempts","enrichment_provider_reconciliations","enrichment_provider_source_recoveries","enrichment_provider_reading_recoveries","classification_jobs","evidence_snapshots","classification_runs","classification_run_tombstones","classification_decisions","curation_overrides","curation_events","current_projections","entity_states","entity_operations","evidence_requests","link_selections_v2","classification_operations","manual_source_operations","manual_request_operations","selection_operations","legacy_curation_history","budget_ledger","rerank_cache_links","custom_tag_links","tag_operations","tag_change_facts"];
   tables.push("effective_tag_memberships","classification_reservations","classification_attempt_operations","classification_provider_attempts");
   tables.push("effective_entity_memberships","bookmark_search_documents","bookmark_search_grams","bookmark_search_fields","bookmark_search_field_grams");
   await env.DB.prepare("INSERT OR IGNORE INTO effective_entity_memberships(link_id,term) VALUES(?,'private derived entity')").bind(id).run();
@@ -198,6 +201,7 @@ it("atomically deletes populated private tables, references, budgets and cached 
   expect((await request(`links/${id}`,"DELETE")).status).toBe(204);
   expect(await env.DB.prepare("SELECT payload_hash FROM browser_captures WHERE link_id=?").bind(id).first("payload_hash")).toBe("");
   for(const table of tables) expect(await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE link_id=?`).bind(id).first("n"),table).toBe(0);
+  expect(await env.DB.prepare("SELECT COUNT(*) n FROM collection_organizing_actions").first("n")).toBe(0);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM collection_changes WHERE link_id=?").bind(id).first<number>("n")).toBeGreaterThan(0);
   expect(await env.DB.prepare("SELECT revision FROM collections WHERE id=?").bind(collection).first("revision")).toBe(2);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM bookmark_search_gram_counts").first("n")).toBe(0);

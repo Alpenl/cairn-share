@@ -1,3 +1,4 @@
+import { collectionOrganizingRoute } from "./collection-organizing";
 import { collectionsRoute, collectionID } from "./collections";
 import { librarySyncRoute, maintainLibrarySync } from "./library-sync";
 import { presentationColumns, presentationRoute } from "./presentations";
@@ -446,7 +447,9 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const internal = path.startsWith("/api/enrichment/");
     const auth = internal ? requireEnricherToken(request, env) : requireApiToken(request, env);
     if (auth) return auth;
-    return collectionsRoute(request, env, path.replace("/api/enrichment/collections", "/api/collections"));
+    const collectionPath=path.replace("/api/enrichment/collections", "/api/collections");
+    if(collectionPath.startsWith("/api/collections/organizing")) return collectionOrganizingRoute(request,env,collectionPath,internal);
+    return collectionsRoute(request, env, collectionPath);
   }
 
   if (path === "/api/sync") {

@@ -84,3 +84,5 @@ body.popup { width: 380px; height: 580px; max-height: 600px; display: flex; flex
 .save-dock .primary { margin:0; }
 .shortcut { display:block; text-align:center; margin-top:5px; font-size:10px; }
 .popup footer { padding:7px 18px; flex:none; }
+
+.collection-choices{display:flex;flex-wrap:wrap;gap:8px;max-height:144px;overflow:auto;margin-top:8px}.collection-choice{display:flex;align-items:center;gap:6px;border:1px solid var(--border,#dce3e6);border-radius:8px;padding:6px 9px;max-width:100%;margin:0}.collection-choice span{overflow-wrap:anywhere}

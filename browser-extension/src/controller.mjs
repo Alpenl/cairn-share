@@ -4,7 +4,7 @@ export function emptyState() {
   return { settings: { token: "", keepFullUrl: true }, queue: [], lastResult: null };
 }
 
-const PAUSED_ERRORS = new Set(["invalid_token", "invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete", "upgrade_required",'media_stale','media_conflict','invalid_media','media_permission','media_too_large','media_protected','media_unsupported','media_unavailable','media_live_or_unsupported']);
+const PAUSED_ERRORS = new Set(["revision_conflict","collection_deleted","collection_limit","collections_unsupported","invalid_token", "invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete", "upgrade_required",'media_stale','media_conflict','invalid_media','media_permission','media_too_large','media_protected','media_unsupported','media_unavailable','media_live_or_unsupported']);
 
 // Only this background controller writes storage. A mutex prevents independent
 // popup/menu/alarm events from overwriting one another's persisted changes.
@@ -32,6 +32,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
     // Never send the saved token to the popup, content pages, or queue views.
     return {
       configured: Boolean(state.settings.token),
+      binding:state.settings.token?await tokenIdentity(state.settings.token):"",
       keepFullUrl: state.settings.keepFullUrl,
       queue: state.queue.map(({ binding, capture, ...job }) => job),
       lastResult: state.lastResult
@@ -53,7 +54,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
       await update((state) => {
         if (candidate !== state.settings.token && state.queue.length && !movePending) throw new CaptureError("queue_connection");
         if (candidate !== state.settings.token) {
-          state.queue.forEach((job) => { job.binding = binding; job.errorKind = null; job.nextAttemptAt = 0; });
+          state.queue.forEach((job) => { job.binding = binding; job.collection_ids=[];job.collectionOperations={};job.collectionIndex=0;delete job.savedLink;delete job.mediaIndex;delete job.mediaProgress; job.errorKind = null; job.nextAttemptAt = 0; });
         }
         state.settings = { token: candidate, keepFullUrl };
       });
@@ -61,7 +62,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
     return snapshot();
   }
 
-  async function enqueue({ url, note = "", title = "", client_id, capture: pageCapture }) {
+  async function enqueue({ url, note = "", title = "", client_id, capture: pageCapture, collection_ids = [], binding: captureBinding }) {
     // The popup persists this UUID before messaging background, so closing
     // it during an upload and re-opening cannot create a second operation.
     if (typeof client_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(client_id)) {
@@ -72,10 +73,12 @@ export function createController({ store, client, now = Date.now, uuid = () => c
       if (existing) return existing;
       if (state.lastResult?.client_id === client_id) return state.lastResult;
       if (!state.settings.token) throw new CaptureError("not_configured");
+      if(collection_ids.length && captureBinding!==await tokenIdentity(state.settings.token))throw new CaptureError("queue_connection");
       if (state.queue.length >= MAX_QUEUE) throw new CaptureError("queue_full");
+      if(!Array.isArray(collection_ids)||collection_ids.length>100||new Set(collection_ids).size!==collection_ids.length||collection_ids.some(id=>typeof id!=="string"||!/^[a-f0-9-]{36}$/.test(id)))throw new CaptureError("invalid_collection");
       const capture = validateCapture(submissionUrl(url, state.settings.keepFullUrl), note);
       if (pageCapture && JSON.stringify(state.queue).length + JSON.stringify(pageCapture).length > 24000000) throw new CaptureError("queue_full");
-      const job = { ...capture, ...(pageCapture ? { capture: pageCapture } : {}), title: typeof title === "string" ? title.slice(0, 300) : "", client_id,
+      const job = { ...capture, collection_ids, collectionOperations:{}, collectionIndex:0, ...(pageCapture ? { capture: pageCapture } : {}), title: typeof title === "string" ? title.slice(0, 300) : "", client_id,
         binding: await tokenIdentity(state.settings.token), createdAt: now(), attempts: 0, nextAttemptAt: 0, errorKind: null };
       state.queue.push(job);
       state.lastResult = { client_id, url: job.url, title: job.title, status: "queued", at: now() };
@@ -113,6 +116,20 @@ export function createController({ store, client, now = Date.now, uuid = () => c
             attempted.delete(job.client_id);
             continue;
           }
+          if(job.collection_ids?.length){
+            await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);if(pending)pending.savedLink=link;});
+            for(let index=job.collectionIndex||0;index<job.collection_ids.length;index++){
+              const id=job.collection_ids[index];let body=job.collectionOperations?.[id];
+              if(!body || (force && job.errorKind==="revision_conflict")){
+                const definitions=await client.collections(state.settings.token),c=definitions.find(c=>c.id===id&&!c.deleted&&!c.archived);
+                if(!c)throw new CaptureError("collection_deleted");
+                body={operation_key:uuid(),expected_revision:c.revision,type:"add",link_ids:[link.id]};
+                await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);if(pending)(pending.collectionOperations??={})[id]=body;});
+              }
+              await client.addCollection(state.settings.token,id,body);
+              await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);if(pending)pending.collectionIndex=index+1;});
+            }
+          }
           await update((current) => {
             if (!current.queue.some((item) => item.client_id === job.client_id && item.binding === binding)) return;
             current.queue = current.queue.filter((item) => item.client_id !== job.client_id);
@@ -144,5 +161,6 @@ export function createController({ store, client, now = Date.now, uuid = () => c
     return snapshot();
   }
 
-  return { snapshot, saveSettings, enqueue, flush, remove, newId: uuid };
+  async function collections(){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await tokenIdentity(state.settings.token);try{const items=await client.collections(state.settings.token);if((await read()).settings.token!==state.settings.token)throw new CaptureError("queue_connection");await update(current=>{current.collectionCatalog={binding,items,at:now()}});return {items,cached:false,binding};}catch(error){if(state.collectionCatalog?.binding===binding)return {items:state.collectionCatalog.items,cached:true,binding};throw error;}}
+  return { snapshot, saveSettings, enqueue, flush, remove, collections, newId: uuid };
 }

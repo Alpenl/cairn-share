@@ -14,11 +14,19 @@ let offline = false, holdResponse = false, releaseResponse;
 const posts = [];
 const records = new Map();
 const errors = [];
+let collectionEnabled=false,loseCollection=false;const collectionId=crypto.randomUUID();const collectionPosts=[];const collectionReceipts=new Set();
 
 test.beforeAll(async () => {
   mediaServer=createServer((req,res)=>{const bytes=req.url==='/movie.mp4'?movie:picture;res.writeHead(200,{'Content-Type':req.url==='/movie.mp4'?'video/mp4':'image/png','Content-Length':bytes.length});res.end(bytes);});
   await new Promise(resolve=>mediaServer.listen(0,'127.0.0.1',resolve));mediaOrigin=`http://localhost:${mediaServer.address().port}`;
   server = createServer(async (request, response) => {
+    if(collectionEnabled&&request.url.startsWith('/api/collections')){
+      if(request.headers.authorization!=='Bearer browser-test-token'){response.writeHead(401);response.end();return;}
+      response.setHeader('Content-Type','application/json');response.setHeader('X-Cairn-Collections','1');
+      if(request.method==='GET'){response.end(JSON.stringify({items:[{id:collectionId,name:'设计参考',revision:1,deleted:0,archived:0,pinned:1}]}));return;}
+      let raw='';for await(const part of request)raw+=part;const body=JSON.parse(raw);collectionPosts.push(body);collectionReceipts.add(body.operation_key);
+      if(loseCollection){loseCollection=false;response.writeHead(200);response.write('{"revision":');setTimeout(()=>response.destroy(),100);return;}response.end(JSON.stringify({revision:2}));return;
+    }
     if(request.url.startsWith('/api/media/uploads/')) {
       if(request.headers.authorization!=='Bearer browser-test-token'){response.writeHead(401);response.end();return;}
       const [,id,action]=request.url.match(/uploads\/([a-f0-9]+)(?:\/(.+))?$/);const chunks=[];for await(const c of request)chunks.push(c);const raw=Buffer.concat(chunks);
@@ -213,4 +221,15 @@ test('library extractor isolates the selected X post and keeps paragraphs, links
  expect(result.text).toContain('第一段正文。');expect(result.text).toContain('第二段正文');expect(result.text).not.toMatch(/翻译自|评价此翻译|推荐广告|9万|@Example/);
  expect(result.text).toContain('https://example.org/paper');expect(result.media).toHaveLength(1);expect(result.media[0].url).toBe('https://video.twimg.com/example.mp4');
  await page.close();
+});
+
+
+test("choose a collection during capture and resume its committed lost response without recapturing",async()=>{
+ collectionEnabled=true;loseCollection=true;const before=posts.length;
+ const popup=await context.newPage();await popup.goto(`${extensionURL}/popup.html`);await popup.locator('#url').fill('https://example.com/collection-capture');
+ await expect(popup.locator('#collection-choices')).toContainText('设计参考');await popup.getByRole('checkbox',{name:'设计参考'}).check();await popup.locator('#save').click();
+ await expect(popup.locator('#queue')).toContainText('服务器响应异常');await popup.close();
+ const retry=await context.newPage();await retry.goto(`${extensionURL}/options.html`);await retry.locator('#retry-all').click();await expect(retry.locator('#pending-count')).toHaveText('0');
+ expect(posts.length-before).toBe(1);expect(collectionPosts.length).toBe(2);expect(collectionPosts[0]).toEqual(collectionPosts[1]);expect(collectionReceipts.size).toBe(1);expect(collectionPosts[0].link_ids).toEqual([records.get(posts.at(-1).client_id).id]);
+ collectionEnabled=false;
 });

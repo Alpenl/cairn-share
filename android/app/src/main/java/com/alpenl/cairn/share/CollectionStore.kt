@@ -158,7 +158,9 @@ internal class CollectionStore(context: Context) {
             db.execSQL("UPDATE collection_pending SET id=?,body=?,error='' WHERE account=? AND id=?",arrayOf(body.getString("operation_key"),body.toString(),account,p.id))
         }
     };updates.tryEmit(account) }
-    private class Database(context: Context) : SQLiteOpenHelper(context,"collections.db",null,1) {
+    suspend fun organizingDraft(account:String,key:String):String?=access{db->db.rawQuery("SELECT body FROM collection_organizing_drafts WHERE account=? AND key=?",arrayOf(account,key)).use{if(it.moveToFirst())it.getString(0)else null}}
+    suspend fun saveOrganizingDraft(account:String,key:String,body:String?)=access{db->if(body==null)db.delete("collection_organizing_drafts","account=? AND key=?",arrayOf(account,key))else db.execSQL("INSERT OR REPLACE INTO collection_organizing_drafts(account,key,body) VALUES(?,?,?)",arrayOf(account,key,body))}
+    private class Database(context: Context) : SQLiteOpenHelper(context,"collections.db",null,2) {
         init { setWriteAheadLoggingEnabled(true) }
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("CREATE TABLE collection_defs(account TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(account,id))")
@@ -166,8 +168,10 @@ internal class CollectionStore(context: Context) {
             db.execSQL("CREATE TABLE collection_pending(seq INTEGER PRIMARY KEY AUTOINCREMENT,account TEXT NOT NULL,id TEXT NOT NULL,collection_id TEXT NOT NULL,body TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',UNIQUE(account,id))")
             db.execSQL("CREATE TABLE collection_done(account TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(account,id))")
             db.execSQL("CREATE TABLE collection_sync(account TEXT PRIMARY KEY,cursor INTEGER NOT NULL,epoch TEXT NOT NULL,message TEXT NOT NULL)")
+            drafts(db)
         }
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {if(oldVersion<2)drafts(db)}
+        private fun drafts(db:SQLiteDatabase){db.execSQL("CREATE TABLE collection_organizing_drafts(account TEXT NOT NULL,key TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(account,key))")}
     }
     companion object { private val lock=Mutex();private val helpers=mutableMapOf<String,Database>();val updates=MutableSharedFlow<String>(extraBufferCapacity=32) }
 }

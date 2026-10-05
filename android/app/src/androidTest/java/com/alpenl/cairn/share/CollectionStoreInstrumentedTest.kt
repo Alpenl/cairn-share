@@ -1,5 +1,10 @@
 package com.alpenl.cairn.share
 
+import android.content.Context
+import android.content.ContextWrapper
+import android.database.DatabaseErrorHandler
+import android.database.sqlite.SQLiteDatabase
+import java.io.File
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.util.UUID
@@ -40,6 +45,37 @@ class CollectionStoreInstrumentedTest {
         catch (_: java.io.IOException) { }
         recreated.enqueue(a,id,"restore")
         assertEquals(3,recreated.snapshot(a).members.size)
+    }
+
+    @Test fun versionOneUpgradeRetainsCollectionsQueueAndIsolatesDurableOrganizingDrafts() = runBlocking<Unit> {
+        val name="collection-upgrade-${UUID.randomUUID()}.db"
+        val isolated=object:ContextWrapper(context) {
+            override fun getApplicationContext():Context=this
+            override fun getDatabasePath(n:String):File=super.getDatabasePath(name)
+            override fun openOrCreateDatabase(n:String,mode:Int,factory:SQLiteDatabase.CursorFactory?):SQLiteDatabase=super.openOrCreateDatabase(name,mode,factory)
+            override fun openOrCreateDatabase(n:String,mode:Int,factory:SQLiteDatabase.CursorFactory?,handler:DatabaseErrorHandler?):SQLiteDatabase=super.openOrCreateDatabase(name,mode,factory,handler)
+        }
+        val a=account();val other=account();val id=UUID.randomUUID().toString()
+        val definition=CollectionRecord(id,"已有合集",revision=1)
+        val pending=JSONObject().put("operation_key",UUID.randomUUID().toString()).put("type","edit").put("name","旧版未提交草稿").put("expected_revision",1)
+        SQLiteDatabase.openOrCreateDatabase(isolated.getDatabasePath("collections.db"),null).use {db->
+            db.execSQL("CREATE TABLE collection_defs(account TEXT NOT NULL,id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(account,id))")
+            db.execSQL("CREATE TABLE collection_members(account TEXT NOT NULL,collection_id TEXT NOT NULL,link_id INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(account,collection_id,link_id))")
+            db.execSQL("CREATE TABLE collection_pending(seq INTEGER PRIMARY KEY AUTOINCREMENT,account TEXT NOT NULL,id TEXT NOT NULL,collection_id TEXT NOT NULL,body TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',UNIQUE(account,id))")
+            db.execSQL("CREATE TABLE collection_done(account TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(account,id))")
+            db.execSQL("CREATE TABLE collection_sync(account TEXT PRIMARY KEY,cursor INTEGER NOT NULL,epoch TEXT NOT NULL,message TEXT NOT NULL)")
+            db.execSQL("INSERT INTO collection_defs VALUES(?,?,?)",arrayOf(a,id,definition.json().toString()))
+            db.execSQL("INSERT INTO collection_pending(account,id,collection_id,body) VALUES(?,?,?,?)",arrayOf(a,pending.getString("operation_key"),id,pending.toString()))
+            db.execSQL("INSERT INTO collection_sync VALUES(?,7,'old-epoch','')",arrayOf(a))
+            db.version=1
+        }
+        val store=CollectionStore(isolated)
+        val before=store.remote(a);assertEquals(7L,before.cursor);assertEquals("已有合集",before.collections.single().name);assertEquals(pending.toString(),before.pending.single().body)
+        store.saveOrganizingDraft(a,"start",pending.toString())
+        val recreated=CollectionStore(isolated)
+        assertEquals(pending.toString(),recreated.organizingDraft(a,"start"));assertNull(recreated.organizingDraft(other,"start"))
+        assertEquals("旧版未提交草稿",recreated.snapshot(a).collections.single().name)
+        recreated.saveOrganizingDraft(a,"start",null);assertNull(recreated.organizingDraft(a,"start"))
     }
 
     @Test fun syncPageAndCursorCommitAtomicallyWhilePendingDraftsRemainIndependent() = runBlocking<Unit> {
