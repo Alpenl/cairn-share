@@ -27,6 +27,11 @@ export function catalogTerm(catalog:Taxonomy,dimension:string,id:string):TermDef
 }
 async function displayedCatalog(env:Env) {
  const current=await managedCatalog(env);
+ // Legacy seed/snapshots predate ai_enabled. Opposition has always been a
+ // human-only tag; expose that invariant before editing/archive validation.
+ // Leave immutable source and historical snapshots untouched.
+ const opposition=catalogTerm(current.catalog,'uses','contra');
+ if(opposition)opposition.ai_enabled=false;
  const rows=await env.DB.prepare("SELECT dimension,term_id,label,display_revision FROM taxonomy_display_overrides").all<{dimension:string;term_id:string;label:string;display_revision:number}>();
  for(const row of rows.results){const term=catalogTerm(current.catalog,row.dimension,row.term_id);if(term&&row.display_revision>(term.display_revision??0)){term.label=row.label;term.display_revision=row.display_revision;}}
  return current;
