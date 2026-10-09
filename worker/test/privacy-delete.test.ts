@@ -15,7 +15,9 @@ async function request(path: string, method = "GET", body?: unknown, token = "ap
 async function create() {
   const r = await request("links", "POST", { url: "https://x.com/privacy/status/123", note: "synthetic private note" });
   expect(r.status).toBe(201);
-  return (await r.json() as {id: number}).id;
+  const {id}=await r.json() as {id:number};
+  await env.DB.prepare("UPDATE links SET original_text='archived source' WHERE id=?").bind(id).run();
+  return id;
 }
 function bucket(overrides: Partial<R2Bucket>): R2Bucket {
   return new Proxy(env.ENRICHMENT_IMAGES, { get(target, property) {

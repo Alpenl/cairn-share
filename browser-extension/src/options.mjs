@@ -3,7 +3,7 @@ import { $, ext, renderQueue, send, showError, status } from "./ui.mjs";
 
 let state;
 let initialized = false;
-$("server").value = API_BASE;
+$("server").textContent = new URL(API_BASE).host;
 $("version").textContent = ext.runtime.getManifest().version;
 $("show-token").addEventListener("click", () => {
   const show = $("token").type === "password";
@@ -18,8 +18,8 @@ async function refresh() {
   $("pending-count").textContent = String(state.queue.length);
   $("retry-all").hidden = !state.queue.length;
   $("move-pending-label").hidden = !state.queue.length;
-  $("move-pending-text").textContent = `更换令牌时，用新令牌上传这 ${state.queue.length} 条待上传收藏`;
-  renderQueue($("queue"), state, refresh, (error) => showError($("status"), error));
+  $("move-pending-text").textContent = `更换令牌时，用新令牌上传这 ${state.queue.length} 条待同步收藏`;
+  renderQueue($("queue"), state.queue, refresh, (error) => showError($("status"), error), "所有收藏已同步。");
 }
 
 $("settings-form").addEventListener("submit", async (event) => {
@@ -44,7 +44,14 @@ $("settings-form").addEventListener("submit", async (event) => {
     if (message) status($("status"), message, "error");
     else showError($("status"), error);
   }
-  finally { $("connect").disabled = false; $("connect").textContent = "测试并保存连接"; }
+  finally { $("connect").disabled = false; $("connect").textContent = "测试并保存"; }
+});
+
+$("image-permission").addEventListener("click", async () => {
+  try {
+    const granted = await ext.permissions.request({ origins: ["http://*/*", "https://*/*"] });
+    status($("status"), granted ? "已允许读取图片站点。" : "未开启额外权限。", granted ? "success" : "pending");
+  } catch (error) { showError($("status"), error); }
 });
 
 $("retry-all").addEventListener("click", async () => {

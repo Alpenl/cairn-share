@@ -76,6 +76,9 @@ async function reserve(request: Request, env: Env,
   const value = await readBody(request);
   if (value instanceof Response) return value;
   if (!validReserve(value)) return fail("invalid_reservation");
+  // Never issue a new source-fetch permit, even to a legacy consumer. Settlement
+  // and recovery of historical attempts remain available for accounting.
+  if (value.stage === "fetch") return fail("capture_required", 410);
   const payloadHash = await digest(canonicalJSON(value));
   const old = await env.DB.prepare("SELECT reservation_hash FROM enrichment_provider_attempts WHERE operation_key=?")
     .bind(value.operation_key).first<{ reservation_hash: string }>();
@@ -135,7 +138,7 @@ async function reserve(request: Request, env: Env,
       .bind(value.operation_key, leaseHash, value.stage, value.variant, value.attempt_number,
         value.request_hash, payloadHash, value.model, nowISO,
         value.link_id, value.content_revision, value.lease_token, deadline, value.stage,
-        value.stage === "fetch" ? "source" : "reading", nowISO,
+        "reading", nowISO,
         day, PROVIDER_ATTEMPT_LIMITS.daily_total,
         start, end, PROVIDER_ATTEMPT_LIMITS.daily_item,
         value.attempt_number, leaseHash, value.stage,
@@ -179,7 +182,7 @@ async function reserve(request: Request, env: Env,
   {
     const gate = await env.DB.prepare(`SELECT state,probe_token,probe_until,retry_at
       FROM enrichment_component_gates WHERE component=?`)
-      .bind(value.stage === "fetch" ? "source" : "reading")
+      .bind("reading")
       .first<{ state: string; probe_token: string | null; probe_until: string | null; retry_at: string | null }>();
     if (gate && gate.state !== "closed" &&
         !(gate.state === "probing" && gate.probe_token === value.lease_token &&
@@ -249,37 +252,11 @@ async function settle(request: Request, env: Env,
   return fail("operation_conflict", 409);
 }
 
-async function authorizeFallback(request: Request, env: Env,
-  onResolved: (event: AttemptEvent) => void): Promise<Response> {
-  const value = await readBody(request);
-  if (value instanceof Response) return value;
-  if (Object.keys(value).length !== 1 || !hex(value.operation_key)) return fail("invalid_operation");
-  const result = await env.DB.prepare(`UPDATE enrichment_provider_attempts SET fallback_authorized=1
-    WHERE operation_key=? AND stage='fetch' AND attempt_number=1
-      AND state='responded' AND http_status=200 AND fallback_authorized=0
-    RETURNING stage`)
-    .bind(value.operation_key).run();
-  if (result.results.length === 1) {
-    onResolved({ kind: "provider_attempt", action: "authorize_fallback", stage: "fetch",
-      outcome: "authorized", status: 200 });
-    return json({ authorized: true });
-  }
-  const old = await env.DB.prepare(`SELECT stage,attempt_number,state,http_status,fallback_authorized
-    FROM enrichment_provider_attempts WHERE operation_key=?`).bind(value.operation_key)
-    .first<{ stage: string; attempt_number: number; state: string;
-      http_status: number | null; fallback_authorized: number }>();
-  if (old?.stage === "fetch" && old.attempt_number === 1 && old.state === "responded" &&
-      old.http_status === 200 && old.fallback_authorized === 1) {
-    onResolved({ kind: "provider_attempt", action: "authorize_fallback", stage: "fetch",
-      outcome: "replay", status: 200 });
-    return json({ authorized: true });
-  }
-  return fail("attempt_not_eligible", 409);
+async function authorizeFallback(_request: Request, _env: Env,
+  _onResolved: (event: AttemptEvent) => void): Promise<Response> {
+  return fail("capture_required", 410);
 }
 
-// This is deliberately an operator-only decision, never a background retry.
-// A missing response, elapsed time or provider GET failure is not evidence of
-// non-billing. The audit row, queue transition and old permit remain durable.
 async function reconcile(request: Request, env: Env,
   onResolved: (event: AttemptEvent) => void): Promise<Response> {
   const value = await readBody(request);

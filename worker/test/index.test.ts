@@ -314,7 +314,7 @@ describe("cairn-share worker", () => {
       attempts: 0,
       related_links: []
     });
-    expect(firstPageBody.items[0]).toMatchObject({ original_text: null, processable: true });
+    expect(firstPageBody.items[0]).toMatchObject({ original_text: "fixture archived original", processable: true });
     expect(firstPageBody.items[0]).not.toHaveProperty("lease_token");
     expect(firstPageBody.next_before_id).toBe(pending.id);
     expect(firstPageBody.counts).toEqual({
@@ -868,7 +868,11 @@ interface LinkRecord {
 async function create(url: string, note?: string): Promise<LinkRecord> {
   const response = await postJson(note === undefined ? { url } : { url, note });
   expect(response.status).toBe(201);
-  return await response.json();
+  const item = await response.json() as LinkRecord;
+  if (/^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\//i.test(url)) {
+    await env.DB.prepare("UPDATE links SET original_text='fixture archived original' WHERE id=?").bind(item.id).run();
+  }
+  return item;
 }
 
 async function postJson(body: unknown): Promise<Response> {

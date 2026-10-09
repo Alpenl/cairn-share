@@ -23,11 +23,12 @@ function call(path: string, body: unknown, token = "internal", method = "POST") 
 async function fixture(sourceText = "saved source") {
   const created = await call("links", { url: "https://x.com/u/status/1" }, "app");
   const { id } = await created.json() as { id: number };
+ await env.DB.prepare("UPDATE links SET original_text=? WHERE id=?").bind(sourceText,id).run();
   const claimed = await call(`enrichment/jobs/${id}/claim`, {});
   expect(claimed.status).toBe(200);
   const { lease_token } = await claimed.json() as { lease_token: string };
   const source = { original_text: sourceText, original_language: "en", context_text: "",
-    related_links: [], image_urls: [], model: "fixture" };
+    related_links: [], image_urls: [], model: "manual" };
   expect((await call(`enrichment/jobs/${id}/source`, { lease_token, source })).status).toBe(200);
   expect((await call(`enrichment/jobs/${id}/lease-admit`, {
     lease_token, stage: "reading", min_remaining_ms: 210_000

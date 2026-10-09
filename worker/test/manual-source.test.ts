@@ -109,6 +109,7 @@ it("logs source acceptance only after durable evidence and distinguishes replay"
 
 it("rejects an active lease, then fences an expired one without losing curation", async () => {
   const id = await link();
+  await env.DB.prepare("UPDATE links SET original_text='archived original' WHERE id=?").bind(id).run();
   const leased = await call(`enrichment/jobs/${id}/claim`, {});
   const { lease_token } = await leased.json() as { lease_token: string };
   await env.DB.prepare("UPDATE links SET why='human note',curation_status='kept' WHERE id=?").bind(id).run();
@@ -122,7 +123,7 @@ it("rejects an active lease, then fences an expired one without losing curation"
   expect(await state(id)).toEqual(before);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM manual_source_operations").first("n")).toBe(0);
   expect((await call(`enrichment/jobs/${id}/lease-admit`, {
-    lease_token, stage: "fetch", min_remaining_ms: 210_000
+    lease_token, stage: "reading", min_remaining_ms: 210_000
   })).status).toBe(200);
   await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
     .bind(new Date(Date.now() - 1000).toISOString(), id).run();
@@ -130,7 +131,7 @@ it("rejects an active lease, then fences an expired one without losing curation"
   expect(await env.DB.prepare("SELECT enrichment_paid_uncertain,enrichment_paid_stage FROM links WHERE id=?")
     .bind(id).first()).toEqual({ enrichment_paid_uncertain: 0, enrichment_paid_stage: null });
   expect((await call(`enrichment/jobs/${id}/source`, { lease_token, source: {
-    original_text: "stale text", original_language: "en", context_text: "", related_links: [], image_urls: [], model: "fixture"
+    original_text: "stale text", original_language: "en", context_text: "", related_links: [], image_urls: [], model: "manual"
   } })).status).toBe(409);
   expect(await env.DB.prepare("SELECT why,curation_status FROM links WHERE id=?").bind(id).first()).toEqual({
     why: "human note", curation_status: "kept"
@@ -138,39 +139,26 @@ it("rejects an active lease, then fences an expired one without losing curation"
   expect((await state(id))?.original_text).toBe("manual text");
 });
 
-it("sets a one-shot fetch intent only for an explicit refresh", async () => {
-  const id = await link();
-  const refreshed = await call(`enrichment/jobs/${id}/refresh-source`, {});
-  expect(refreshed.status).toBe(200);
-  const claim = await call(`enrichment/jobs/${id}/claim`, {});
-  expect(claim.status).toBe(200);
-  const job = await claim.json() as { refresh_epoch: number; lease_token: string };
-  expect(job.refresh_epoch).toBe(1);
-  expect((await call(`enrichment/jobs/${id}/refresh-source`, {})).status).toBe(409);
-  const ack = await call(`enrichment/jobs/${id}/refresh-source/ack`, {
-    epoch: job.refresh_epoch, status: "completed"
-  });
-  expect(ack.status).toBe(200);
-  await env.DB.prepare(`UPDATE links SET enrichment_status='pending',enrichment_lease_token=NULL,
-    enrichment_lease_until=NULL WHERE id=?`).bind(id).run();
-  const retry = await call(`enrichment/jobs/${id}/claim`, {});
-  expect(await retry.json()).toMatchObject({ id, refresh_epoch: 0 });
+it("rejects source refresh without changing the saved bookmark", async () => {
+ const id=await link();const before=await state(id);
+ expect((await call(`enrichment/jobs/${id}/refresh-source`,{})).status).toBe(410);
+ expect(await state(id)).toEqual(before);
 });
 
-it("consumes a refresh intent in the successful source checkpoint transaction", async () => {
+it("ignores a legacy refresh intent while atomically saving a manual checkpoint", async () => {
   const id = await link();
-  expect((await call(`enrichment/jobs/${id}/refresh-source`, {})).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET original_text='archived original',refresh_epoch=1,refresh_requested_at=? WHERE id=?").bind(new Date().toISOString(),id).run();
   const claimed = await call(`enrichment/jobs/${id}/claim`, {});
   expect(claimed.status).toBe(200);
   const job = await claimed.json() as { lease_token: string; refresh_epoch: number };
-  expect(job.refresh_epoch).toBe(1);
+  expect(job.refresh_epoch).toBe(0);
   const body = { lease_token: job.lease_token, source: { original_text: "new source text",
-    original_language: "en", context_text: "", related_links: [], image_urls: [], model: "fixture" } };
+    original_language: "en", context_text: "", related_links: [], image_urls: [], model: "manual" } };
   await env.DB.prepare(`CREATE TRIGGER reject_refresh_source BEFORE INSERT ON enrichment_sources
     BEGIN SELECT RAISE(ABORT, 'synthetic source insert failure'); END`).run();
   await expect(call(`enrichment/jobs/${id}/source`, body)).rejects.toThrow("synthetic source insert failure");
   expect(await env.DB.prepare("SELECT original_text,refresh_requested_at FROM links WHERE id=?")
-    .bind(id).first()).toMatchObject({ original_text: null, refresh_requested_at: expect.any(String) });
+    .bind(id).first()).toMatchObject({ original_text: "archived original", refresh_requested_at: expect.any(String) });
   await env.DB.prepare("DROP TRIGGER reject_refresh_source").run();
   expect((await call(`enrichment/jobs/${id}/source`, body)).status).toBe(200);
   expect(await env.DB.prepare("SELECT original_text,refresh_requested_at FROM links WHERE id=?")
@@ -178,7 +166,7 @@ it("consumes a refresh intent in the successful source checkpoint transaction", 
   // A late failure ack from an older Go process must not mark this saved
   // source as a failed refresh.
   const late = await call(`enrichment/jobs/${id}/refresh-source/ack`, {
-    epoch: job.refresh_epoch, status: "failed", reason: "snapshot unavailable"
+    epoch: 1, status: "failed", reason: "snapshot unavailable"
   });
   expect(late.status).toBe(200);
   expect(await late.json()).toMatchObject({ status: "already_consumed" });
@@ -195,9 +183,10 @@ it("consumes a refresh intent in the successful source checkpoint transaction", 
 
 it("replays a failed refresh ack without changing its first result", async () => {
   const id = await link("https://x.com/source/status/43");
-  expect((await call(`enrichment/jobs/${id}/refresh-source`, {})).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET original_text='archived original',refresh_epoch=1,refresh_requested_at=? WHERE id=?").bind(new Date().toISOString(),id).run();
   const claimed = await call(`enrichment/jobs/${id}/claim`, {});
-  const { refresh_epoch } = await claimed.json() as { refresh_epoch: number };
+  expect(await claimed.json()).toMatchObject({ refresh_epoch: 0 });
+  const refresh_epoch = 1;
   const path = `enrichment/jobs/${id}/refresh-source/ack`;
   expect((await call(path, { epoch: refresh_epoch, status: "failed", reason: "fetch unavailable" })).status).toBe(200);
   expect(await env.DB.prepare("SELECT refresh_requested_at,enrichment_error FROM links WHERE id=?")
@@ -216,6 +205,7 @@ it("claims a newer manual source ahead of an older routine retrieval", async () 
   expect((await call(`enrichment/jobs/${manual}/manual-source`, {
     operation_key: "manual-priority", expected_revision: revision, original_text: "pasted post"
   })).status).toBe(200);
+  await env.DB.prepare("UPDATE links SET original_text='routine archived source' WHERE id=?").bind(routine).run();
   const first = await call("enrichment/jobs/claim", {});
   expect(await first.json()).toMatchObject({ id: manual, refresh_epoch: 0 });
   const second = await call("enrichment/jobs/claim", {});
@@ -238,6 +228,7 @@ it("requires current content revision and internal credentials", async () => {
 
 it("rolls back the source, lease fence and receipt when snapshot storage fails", async () => {
   const id = await link();
+  await env.DB.prepare("UPDATE links SET original_text='archived original' WHERE id=?").bind(id).run();
   const lease = await (await call(`enrichment/jobs/${id}/claim`, {})).json() as { lease_token: string };
   await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
     .bind(new Date(Date.now() - 1000).toISOString(), id).run();
@@ -254,10 +245,11 @@ it("rolls back the source, lease fence and receipt when snapshot storage fails",
 
 it("accepts concurrent replays once and advances provenance when primary bytes are unchanged", async () => {
   const id = await link();
+  await env.DB.prepare("UPDATE links SET original_text='archived original' WHERE id=?").bind(id).run();
   const lease = await (await call(`enrichment/jobs/${id}/claim`, {})).json() as { lease_token: string };
   const text = "same primary bytes";
   expect((await call(`enrichment/jobs/${id}/source`, { lease_token: lease.lease_token, source: {
-    original_text: text, original_language: "en", context_text: "", related_links: [], image_urls: [], model: "fixture"
+    original_text: text, original_language: "en", context_text: "", related_links: [], image_urls: [], model: "manual"
   } })).status).toBe(200);
   await env.DB.prepare("UPDATE links SET enrichment_lease_until=? WHERE id=?")
     .bind(new Date(Date.now() - 1000).toISOString(), id).run();
