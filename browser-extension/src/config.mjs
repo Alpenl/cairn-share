@@ -50,6 +50,8 @@ export const ERROR_TEXT = {
   invalid_token: "访问令牌不可用，请在设置中重新连接。",
   invalid_client_id: "收藏标识无效，请更新扩展后重试。",
   network: "暂时无法连接，收藏已保留在本机。",
+  invalid_image: "图片文件不符合归档要求，请重新采集或检查文件大小。",
+  capture_incomplete: "正文尚未确认保存，请重试。",
   timeout: "上传超时，收藏已保留在本机。",
   server: "服务暂时不可用，稍后会自动重试。",
   response: "服务器响应异常，收藏已保留，请稍后重试。",

@@ -1,3 +1,4 @@
+import {keepImageFallback} from './images.mjs';
 // Parsing libraries run only after the user invokes capture/preview.
 export function extractPage(expectedURL, preview=false) {
  if(typeof globalThis.__cairnExtractPage!=="function")throw new Error("capture_unavailable");
@@ -7,49 +8,22 @@ async function prepareExtractor(ext,tabId){
  await ext.scripting.executeScript({target:{tabId},files:["capture-extractor.js"]});
 }
 
-export async function captureTab(ext, tabId, expectedURL) {
+export async function captureTab(ext, tabId, expectedURL, clientID) {
   await prepareExtractor(ext,tabId);
-  const [{result}] = await ext.scripting.executeScript({target:{tabId}, func:extractPage, args:[expectedURL]});
-  if (!result?.text) throw new Error('capture_unavailable');
-  const deadline = Date.now() + 22000;
-  let bytes = 0;
-  const images = [];
-  let missing = 0;
-  for (let i=0;i<result.images.length;i++) {
-    const source = result.images[i];
-    let data;
-    try {
-      if (Date.now() > deadline) throw new Error();
-      if (images.length < 24) {
-        let response;
-        try { response = await fetch(source.url, {credentials:'omit',cache:'force-cache',signal:AbortSignal.timeout(6000)}); }
-        catch { if (!source.data) throw new Error('image_fetch_failed'); }
-        if (!response?.ok || !/^image\/(png|jpeg|webp|gif|avif)(;|$)/i.test(response.headers.get('content-type') || '')) {
-          if (!source.data) throw new Error('image_fetch_failed');
-          data = source.data;
-        } else {
-        if (!response.ok || Number(response.headers.get('content-length')) > 1048576) throw new Error();
-        const reader = response.body.getReader(); const chunks=[]; let size=0;
-        for (;;) { const {value,done}=await reader.read(); if(done)break; size+=value.length; if(size>1048576){await reader.cancel();throw new Error();} chunks.push(value); }
-        const blob = new Blob(chunks,{type:response.headers.get('content-type')?.split(';')[0]});
-        const raw = new Uint8Array(await blob.arrayBuffer());
-        let binary=''; for(const b of raw) binary+=String.fromCharCode(b);
-        data = `data:${blob.type};base64,${btoa(binary)}`;
-        }
-      }
-      const match = data?.match(/^data:(image\/(?:png|jpeg|webp|gif|avif));base64,([A-Za-z0-9+/=]+)$/);
-      if(!match || match[2].length>1400000 || bytes+match[2].length>5600000 || images.length>=24) throw new Error();
-      bytes += match[2].length;
-      result.text = result.text.replace(`(cairn-image:${i})`, `(cairn-asset:${images.length})`);
-      images.push({content_type:match[1],data:match[2]});
-    } catch {
+  const [{result}]=await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[expectedURL]});
+  if(!result?.text)throw new Error('capture_unavailable');
+  const images=[];let missing=0;
+  for(let i=0;i<result.images.length;i++){
+    const source=result.images[i];
+    if(i<24){
+      await keepImageFallback(clientID,i,source.data);
+      images.push({url:source.url});
+    }else{
       missing++;
-      result.text = result.text.replace(`![${source.alt}](cairn-image:${i})`, `[图片未归档：${source.alt}](${source.url.replace(/\)/g,'%29')})`);
+      result.text=result.text.replace(`![${source.alt}](cairn-image:${i})`,`[图片未归档：${source.alt}](${source.url.replace(/\)/g,'%29')})`);
     }
   }
-  while (new TextEncoder().encode(result.text).length > 99000) { result.text=result.text.slice(0,-1000);result.truncated=true; }
-  const media = await discoverMedia(expectedURL, result.media || []);
-  return {...result, text:result.text.replace(/cairn-asset:/g,'cairn-image:'), images, media, missing_images:missing};
+  return {...result,images,media:result.media||[],missing_images:missing,protocol:2};
 }
 
 // This public embed response binds media to the selected post ID. It avoids

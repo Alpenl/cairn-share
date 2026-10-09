@@ -1,3 +1,4 @@
+import { captureUploads } from './capture-uploads';
 import { drainCollectionRules } from "./collection-rules";
 import { managedCatalog, filterCatalog, tagCatalogRoute } from "./tag-catalog";
 import { collectionOrganizingRoute } from "./collection-organizing";
@@ -429,6 +430,11 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   const newTagFilter = ["resource_kinds", "resource_kind", "custom_tags", "custom_tag", "topics_mode", "topic_mode", "resource_mode", "custom_mode"].some(key => url.searchParams.has(key));
   if (newTagFilter && request.headers.get("X-Cairn-Tag-System") !== "1") return error("capability_mismatch", 409);
   if (url.searchParams.has("functions_mode") && !contentFunctionsAware(request)) return error("capability_mismatch", 409);
+
+  if (path === '/api/captures/v2' || path.startsWith('/api/captures/v2/')) {
+    const auth = requireApiToken(request,env); if(auth) return auth;
+    return captureUploads(request,env,path);
+  }
 
   if (path === "/api/internal/observability") {
     const authError = requireEnricherToken(request, env);

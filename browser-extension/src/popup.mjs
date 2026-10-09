@@ -1,5 +1,5 @@
 import { API_BASE, STATE_KEY, CaptureError, submissionUrl, validateCapture } from "./config.mjs";
-import { $, ext, renderQueue, send, showError, status } from "./ui.mjs";
+import { $, ext, renderQueue, queueStatus, send, showError, status } from "./ui.mjs";
 import { mediaPermissions } from './capture.mjs';
 
 let state;
@@ -67,7 +67,7 @@ async function refresh() {
     const warning = result.missingImages ? ` ${result.missingImages} 张图片未归档，保留了来源链接。` : "";
     const truncated = result.truncated ? " 正文过长，仅保存了部分内容。" : "";
     const pending = state.queue.find(j => j.client_id === operationId);
-    if (pending?.errorKind) showError($("status"), {kind: pending.errorKind});
+    if (pending) status($("status"),queueStatus(pending),pending.errorKind?"error":"pending");
     else status($("status"), result.status === "uploaded" ? (result.captured ? `${result.action==='updated'?'已更新原收藏':'正文已同步'} · ${result.imagesSaved || 0} 张图片、${result.mediaSaved || 0} 个视频/音频已归档。` : "已上传，Android 收藏中也能看到。") + warning + truncated : result.status==='media' ? `正文已同步，正在归档媒体${pending?.mediaProgress ? `（${Math.round(100*pending.mediaProgress.uploaded/pending.mediaProgress.size)}%）` : ''}；可以关闭窗口。` : "已保存在本机，正在上传；可以关闭窗口。", result.status === "uploaded" && !warning && !truncated ? "success" : "pending");
   }
   inputsChanged();
