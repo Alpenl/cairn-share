@@ -109,16 +109,17 @@ export function createController({ store, client, now = Date.now, uuid = () => c
         try {
           const link = await client.upload(state.settings.token, job, patch=>update(current=>{
             const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);
-            if(pending)Object.assign(pending,patch,{errorKind:null,nextAttemptAt:0});
+            if(!pending)return;
+            Object.assign(pending,patch,{errorKind:null,nextAttemptAt:0});
             if(patch.savedLink)current.lastResult={client_id:job.client_id,url:job.url,title:job.title,status:'media',linkId:patch.savedLink.id,at:now()};
           }),{round});
           if(link.media_pending){
-            await update(current=>{current.lastResult={client_id:job.client_id,url:job.url,title:job.title,status:'media',linkId:link.id,at:now()};});
+            await update(current=>{if(current.queue.some(j=>j.client_id===job.client_id&&j.binding===binding))current.lastResult={client_id:job.client_id,url:job.url,title:job.title,status:'media',linkId:link.id,at:now()};});
             attempted.delete(job.client_id);
             continue;
           }
           if(job.collection_ids?.length){
-            await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id);if(pending)pending.stage="collections";});
+            await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);if(pending)pending.stage="collections";});
             await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);if(pending)pending.savedLink=link;});
             for(let index=job.collectionIndex||0;index<job.collection_ids.length;index++){
               const id=job.collection_ids[index];let body=job.collectionOperations?.[id];
@@ -132,12 +133,13 @@ export function createController({ store, client, now = Date.now, uuid = () => c
               await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);if(pending)pending.collectionIndex=index+1;});
             }
           }
-          await update((current) => {
+          const finished=await update((current) => {
             if (!current.queue.some((item) => item.client_id === job.client_id && item.binding === binding)) return;
             current.queue = current.queue.filter((item) => item.client_id !== job.client_id);
             current.lastResult = { client_id: job.client_id, url: job.url, title: job.title, captured: Boolean(job.capture), action:link.capture_result?.action, imagesSaved:link.capture_result?.images_saved ?? job.capture?.images?.length ?? 0, mediaSaved:link.media_saved || 0, missingImages: job.capture?.missing_images || 0, truncated: Boolean(job.capture?.truncated), status: "uploaded", linkId: link.id, at: now() };
+            return true;
           });
-          try { await onUploaded(job); } catch { /* Startup pruning retries local cleanup. */ }
+          try { if(finished)await onUploaded(job); } catch { /* Startup pruning retries local cleanup. */ }
         } catch (error) {
           const kind = error.kind ?? "network";
           await update((current) => {
