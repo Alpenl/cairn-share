@@ -4,14 +4,16 @@ import { CaptureError } from "./config.mjs";
 import { createClient } from "./api.mjs";
 import { createController } from "./controller.mjs";
 import { pruneMedia,forgetMedia } from './media.mjs';
+import { createBatch, BATCH_ALARM } from './batch.mjs';
 
 const ext = globalThis.browser ?? chrome;
+const client = createClient();
 const controller = createController({
   store: {
     async read() { return (await ext.storage.local.get(STATE_KEY))[STATE_KEY]; },
     async write(state) { await ext.storage.local.set({ [STATE_KEY]: state }); }
   },
-  client: createClient(),
+  client,
   async onUploaded(job) {
     for(let i=0;i<(job.capture?.images?.length||0);i++) {
       await forgetMedia(`${job.client_id}:image:${i}`);
@@ -28,6 +30,7 @@ const controller = createController({
     if(Number.isFinite(next))await ext.alarms.create(RETRY_ALARM+'-soon',{when:next});
   }
 });
+const batch = createBatch({ext,controller,client});
 
 async function ensureAlarm() {
   if (!(await ext.alarms.get(RETRY_ALARM))) await ext.alarms.create(RETRY_ALARM, { periodInMinutes: 1 });
@@ -50,6 +53,9 @@ function handleFailure(error) {
 async function dispatch(message) {
   switch (message?.type) {
     case "snapshot": return controller.snapshot();
+    case "batch-snapshot": return batch.snapshot();
+    case "batch-start": return batch.start(message.mode);
+    case "batch-pause": return batch.pause();
     case "collections": return controller.collections();
     case "save": {
       const capture = message.capture;
@@ -65,6 +71,7 @@ async function dispatch(message) {
       return controller.snapshot();
     }
     case "settings": {
+      await batch.pause();
       const result = await controller.saveSettings(message.settings);
       void controller.flush({ force: true }).catch(handleFailure);
       return result;
@@ -80,7 +87,7 @@ async function dispatch(message) {
 }
 
 ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  const allowed = ["popup.html", "options.html"].map((path) => ext.runtime.getURL(path));
+  const allowed = ["popup.html", "options.html", "batch.html"].map((path) => ext.runtime.getURL(path));
   if (sender.id !== ext.runtime.id || !allowed.includes(sender.url)) return false;
   dispatch(message).then((state) => sendResponse({ ok: true, state }),
     (error) => sendResponse({ ok: false, error: error.kind ?? "unexpected" }));
@@ -114,10 +121,12 @@ ext.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 ext.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === BATCH_ALARM) void batch.tick().catch(handleFailure);
   if (alarm.name === RETRY_ALARM || alarm.name === RETRY_ALARM+'-soon') void controller.flush().catch(handleFailure);
 });
-ext.runtime.onStartup.addListener(() => { void initialize().catch(handleFailure); });
+ext.runtime.onStartup.addListener(() => { void batch.pause('batch_restart').catch(handleFailure);void initialize().catch(handleFailure); });
 // Restoring an MV3 worker should also restore its alarm if the browser removed it.
 void ensureAlarm().catch(handleFailure);
+if(ext.storage.session)void batch.tick().catch(handleFailure);
 
 export { API_BASE };
