@@ -17,7 +17,9 @@ async function call(path: string, body: unknown = {}, token = "internal") {
 async function link(url: string) {
   const response = await call("links", { url }, "app");
   expect(response.status).toBe(201);
-  return (await response.json() as { id: number }).id;
+  const { id } = await response.json() as {id:number};
+  await env.DB.prepare("UPDATE links SET original_text='fixture archived original' WHERE id=?").bind(id).run();
+  return id;
 }
 
 const enqueue = (id: number, key = `manual-process-${id}`) =>
@@ -86,8 +88,7 @@ it("returns 429 before adding more pending work and preserves a pasted source", 
   expect(queued.headers.get("Retry-After")).toBe("5");
   expect(await queued.json()).toEqual({ error: "manual_queue_full" });
   const refresh = await call(`enrichment/jobs/${id}/refresh-source`);
-  expect(refresh.status).toBe(429);
-  expect(refresh.headers.get("Retry-After")).toBe("5");
+  expect(refresh.status).toBe(410);
   const revision = await env.DB.prepare("SELECT content_revision FROM links WHERE id=?")
     .bind(id).first<number>("content_revision");
   const pasted = await call(`enrichment/jobs/${id}/manual-source`, {
@@ -96,9 +97,10 @@ it("returns 429 before adding more pending work and preserves a pasted source", 
   expect(pasted.status).toBe(429);
   expect(pasted.headers.get("Retry-After")).toBe("5");
   expect(await env.DB.prepare("SELECT original_text,manual_priority,refresh_requested_at FROM links WHERE id=?")
-    .bind(id).first()).toMatchObject({ original_text: null, manual_priority: 0,
+    .bind(id).first()).toMatchObject({ original_text: "fixture archived original", manual_priority: 0,
       refresh_requested_at: null });
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM manual_source_operations").first<number>("n")).toBe(0);
+  await env.DB.prepare("UPDATE links SET original_text='existing original' WHERE id=1").run();
   expect((await enqueue(1)).status).toBe(200);
 });
 
@@ -126,19 +128,11 @@ it("marks queue-limit rejection without a false accepted event", async () => {
   }
 });
 
-it("rejects active leases without changing state and coalesces an already queued refresh", async () => {
-  const id = await link("https://x.com/u/status/42");
-  const refresh = await call(`enrichment/jobs/${id}/refresh-source`);
-  expect(refresh.status).toBe(200);
-  const before = await env.DB.prepare("SELECT refresh_epoch,refresh_requested_at FROM links WHERE id=?")
-    .bind(id).first();
-  expect((await call(`enrichment/jobs/${id}/refresh-source`)).status).toBe(200);
-  expect(await env.DB.prepare("SELECT refresh_epoch,refresh_requested_at FROM links WHERE id=?")
-    .bind(id).first()).toEqual(before);
-  expect((await call(`enrichment/jobs/${id}/claim`)).status).toBe(200);
-  const busy = await enqueue(id);
-  expect(busy.status).toBe(409);
-  expect(await busy.json()).toEqual({ error: "lease_conflict" });
+it("rejects active processing leases while source refresh remains retired", async()=>{
+ const id=await link("https://x.com/u/status/20");
+ expect((await call(`enrichment/jobs/${id}/refresh-source`)).status).toBe(410);
+ expect((await call(`enrichment/jobs/${id}/claim`)).status).toBe(200);
+ expect((await enqueue(id)).status).toBe(409);
 });
 
 it("replays an accepted operation after completion without starting a second paid run", async () => {
@@ -155,24 +149,13 @@ it("replays an accepted operation after completion without starting a second pai
   expect((await enqueue(other, "one-logical-request")).status).toBe(409);
   expect((await call(`enrichment/jobs/${id}/refresh-source`, {
     operation_key: "one-logical-request"
-  })).status).toBe(409);
+  })).status).toBe(410);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM manual_request_operations")
     .first<number>("n")).toBe(1);
 });
 
-it("replays a source refresh after the retrieval completed without fetching again", async () => {
-  const id = await link("https://x.com/u/status/77");
-  const body = { operation_key: "refresh-once" };
-  const accepted = await call(`enrichment/jobs/${id}/refresh-source`, body);
-  expect(accepted.status).toBe(200);
-  const receipt = await accepted.json();
-  const claimed = await (await call(`enrichment/jobs/${id}/claim`)).json() as { refresh_epoch: number };
-  expect(claimed.refresh_epoch).toBe(1);
-  await env.DB.prepare("UPDATE links SET enrichment_status='completed',manual_priority=0,refresh_requested_at=NULL WHERE id=?")
-    .bind(id).run();
-  const replay = await call(`enrichment/jobs/${id}/refresh-source`, body);
-  expect(replay.status).toBe(200);
-  expect(await replay.json()).toEqual(receipt);
-  expect(await env.DB.prepare("SELECT enrichment_status,refresh_epoch FROM links WHERE id=?")
-    .bind(id).first()).toEqual({ enrichment_status: "completed", refresh_epoch: 1 });
+it("rejects both new and replayed source refresh requests",async()=>{
+ const id=await link("https://x.com/u/status/30");const body={operation_key:"refresh-once"};
+ for(let i=0;i<2;i++)expect((await call(`enrichment/jobs/${id}/refresh-source`,body)).status).toBe(410);
+ expect(await env.DB.prepare("SELECT refresh_requested_at FROM links WHERE id=?").bind(id).first("refresh_requested_at")).toBeNull();
 });

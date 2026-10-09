@@ -13,11 +13,10 @@ export const X_LINK_SQL = `(
   OR lower(url) LIKE 'http://www.twitter.com/%'
 )`;
 
-// A refresh always fetches again. Otherwise the staged Go processor uses a
-// current source snapshot or adopts already stored legacy text before reading.
-// This expression must stay aligned with processStages' source decision.
-export const SOURCE_NEXT_COMPONENT_SQL = `CASE WHEN refresh_requested_at IS NOT NULL
-  OR COALESCE(original_text,'')='' THEN 'source' ELSE 'reading' END`;
+// The source belongs to the browser capture path. Queue consumers only process
+// an already archived original; historical refresh intents never trigger fetches.
+export const CAPTURED_SOURCE_SQL = "original_text IS NOT NULL AND original_text<>''";
+export const SOURCE_NEXT_COMPONENT_SQL = "'reading'";
 export const SOURCE_GATE_READY_SQL = `EXISTS(SELECT 1 FROM enrichment_component_gates g
   WHERE g.component=(${SOURCE_NEXT_COMPONENT_SQL})
     AND (g.state='closed' OR (?=1 AND ((g.state='open' AND g.retry_at<=?)
@@ -30,6 +29,7 @@ function sourceClaimCandidateSQL(index: string, stagePredicate: string): string 
   return `SELECT id
   FROM links INDEXED BY ${index}
   WHERE ${X_LINK_SQL}
+    AND ${CAPTURED_SOURCE_SQL}
     AND (curation_status <> 'drop' OR manual_priority = 1)
     AND enrichment_status IN ('pending', 'failed', 'processing')
     AND enrichment_paid_uncertain=0
@@ -63,10 +63,10 @@ function sourceClaimCandidateSQL(index: string, stagePredicate: string): string 
 // uses a stage-leading index, so a long queue of the excluded stage is not
 // scanned on every scheduler tick.
 export const SOURCE_CLAIM_CANDIDATE_SQL = sourceClaimCandidateSQL(
-  "links_manual_priority_idx", "1=1"
+  "links_captured_reading_priority_idx", "1=1"
 );
 export const SOURCE_CLAIM_STAGE_CANDIDATE_SQL = sourceClaimCandidateSQL(
-  "links_source_stage_priority_idx", `(${SOURCE_NEXT_COMPONENT_SQL})=?`
+  "links_captured_reading_priority_idx", `(${SOURCE_NEXT_COMPONENT_SQL})=?`
 );
 
 export function sourceClaimSQL(stageMask: "both" | "source" | "reading"): string {

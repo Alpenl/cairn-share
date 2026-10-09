@@ -766,84 +766,10 @@ export async function classificationRoute(request: Request, env: Env, path: stri
   return fail("not_found");
 }
 
-// refreshSource explicitly re-arms the *retrieval* queue for a link. It is
-// deliberately different from a classification retry and from a policy replay:
-// it schedules a bounded fetch, keeps the old readable content and all human
-// curation until a new source actually arrives, and does not call a model
-// itself (F13).
-export async function refreshSource(request: Request, env: Env, id: number): Promise<Response> {
-  const body = await bodyOf(request);
-  if (body?.operation_key !== undefined && !text(body.operation_key, 200)) return fail("invalid_operation_key");
-  const key = body?.operation_key as string | undefined;
-  const response = (revision: number) => reply({
-    id, status: "pending", action: "refresh_source", content_revision: revision,
-    preserves: ["original_text", "translated_text", "summary", "images", "curation", "why", "classification"]
-  });
-  const readReceipt = async () => key ? env.DB.prepare(`SELECT link_id,kind,result_revision
-    FROM manual_request_operations WHERE operation_key=?`).bind(key)
-    .first<{ link_id: number; kind: string; result_revision: number | null }>() : null;
-  const replay = (receipt: { link_id: number; kind: string; result_revision: number | null } | null) => receipt
-    ? receipt.link_id === id && receipt.kind === "refresh" && receipt.result_revision !== null
-      ? response(receipt.result_revision) : fail("operation_conflict")
-    : null;
-  const prior = replay(await readReceipt());
-  if (prior) return prior;
-  const now = new Date().toISOString();
-  const admission = `id=? AND ${X_LINK_SQL}
-    AND enrichment_paid_uncertain=0
-    AND NOT (enrichment_status='processing' AND enrichment_lease_token IS NOT NULL
-      AND enrichment_lease_until>?)
-    AND (manual_priority=1 OR (${pendingManualCount})<?)`;
-  const update = `UPDATE links SET enrichment_status='pending', enrichment_attempts=0, enrichment_next_retry_at=NULL,
-       enrichment_lease_token=NULL, enrichment_lease_until=NULL, enrichment_error=NULL, enrichment_updated_at=?,
-       refresh_epoch=CASE WHEN enrichment_status='pending' AND refresh_requested_at IS NOT NULL
-         THEN refresh_epoch ELSE refresh_epoch+1 END,
-       refresh_requested_at=CASE WHEN enrichment_status='pending' AND refresh_requested_at IS NOT NULL
-         THEN refresh_requested_at ELSE ? END,manual_priority=1
-     WHERE ${admission}${key ? ` AND EXISTS (SELECT 1 FROM manual_request_operations
-       WHERE operation_key=? AND link_id=? AND kind='refresh')` : ""}
-     RETURNING content_revision`;
-  let link: { content_revision: number } | null;
-  if (key) {
-    try {
-      const results = await env.DB.batch([
-        env.DB.prepare(`INSERT INTO manual_request_operations(operation_key,link_id,kind,created_at)
-          SELECT ?,id,'refresh',? FROM links WHERE ${admission} RETURNING operation_key`)
-          .bind(key, now, id, now, MAX_PENDING_MANUAL),
-        env.DB.prepare(update).bind(now, now, id, now, MAX_PENDING_MANUAL, key, id),
-        env.DB.prepare(`UPDATE manual_request_operations SET result_revision=
-          (SELECT content_revision FROM links WHERE id=?)
-          WHERE operation_key=? AND link_id=? AND kind='refresh' RETURNING result_revision`)
-          .bind(id, key, id)
-      ]);
-      if (results[0].results.length && results[1].results.length && results[2].results.length) {
-        return response((results[2].results[0] as { result_revision: number }).result_revision);
-      }
-      if (results.some(result => result.results.length)) throw Error("refresh transaction was incomplete");
-      link = null;
-    } catch (error) {
-      const raced = replay(await readReceipt());
-      if (raced) return raced;
-      throw error;
-    }
-  } else {
-    link = await env.DB.prepare(update).bind(now, now, id, now, MAX_PENDING_MANUAL)
-      .first<{ content_revision: number }>();
-  }
-  if (!link) {
-    const existing = await env.DB.prepare(`SELECT CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable,
-      enrichment_status,enrichment_lease_token,enrichment_lease_until,enrichment_paid_uncertain FROM links WHERE id=?`)
-      .bind(id).first<{ processable: number; enrichment_status: string;
-        enrichment_lease_token: string | null; enrichment_lease_until: string | null;
-        enrichment_paid_uncertain: number }>();
-    if (!existing) return fail("not_found");
-    if (!existing.processable) return fail("input_changed");
-    if (existing.enrichment_status === "processing" && existing.enrichment_lease_token &&
-      existing.enrichment_lease_until && existing.enrichment_lease_until > now) return fail("lease_conflict");
-    if (existing.enrichment_paid_uncertain === 1) return fail("provider_result_unknown");
-    return manualQueueFull();
-  }
-  return response(link.content_revision);
+// Kept as a tombstone for legacy clients. Source updates must come from a
+// browser capture (or the existing explicit manual repair route).
+export async function refreshSource(_request: Request, _env: Env, _id: number): Promise<Response> {
+  return new Response(JSON.stringify({ error: "capture_required" }), { status: 410, headers });
 }
 
 // ackSourceRefresh consumes an unsuccessful one-shot fetch intent. A successful
@@ -906,6 +832,7 @@ export async function manualEnqueueRoute(request: Request, env: Env, id: number,
     results = await env.DB.batch([
       env.DB.prepare(`INSERT INTO manual_request_operations(operation_key,link_id,kind,created_at)
         SELECT ?,id,'process',? FROM links WHERE id=? AND ${X_LINK_SQL}
+          AND original_text IS NOT NULL AND original_text<>''
           AND enrichment_paid_uncertain=0
           AND NOT (enrichment_status='processing' AND enrichment_lease_token IS NOT NULL
             AND enrichment_lease_until>?)
@@ -935,12 +862,13 @@ export async function manualEnqueueRoute(request: Request, env: Env, id: number,
   }
   const link = await env.DB.prepare(`SELECT CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable,
     enrichment_status, enrichment_lease_token, enrichment_lease_until,
-    enrichment_paid_uncertain FROM links WHERE id=?`)
+    enrichment_paid_uncertain,original_text FROM links WHERE id=?`)
     .bind(id).first<{ processable: number; enrichment_status: string;
       enrichment_lease_token: string | null; enrichment_lease_until: string | null;
-      enrichment_paid_uncertain: number }>();
+      enrichment_paid_uncertain: number; original_text: string | null }>();
   if (!link) return fail("not_found");
   if (!link.processable) return fail("input_changed");
+  if (!link.original_text) return new Response(JSON.stringify({error:"capture_required"}), {status:409,headers});
   if (link.enrichment_status === "processing" && link.enrichment_lease_token &&
     link.enrichment_lease_until && link.enrichment_lease_until > now) return fail("lease_conflict");
   if (link.enrichment_paid_uncertain === 1) return fail("provider_result_unknown");
@@ -1072,6 +1000,12 @@ export async function sourceRoute(request: Request, env: Env, id: number,
   const source = body.source;
   if (!validEnrichmentSource(source)) {
     return fail("invalid_source");
+  }
+  const current = await env.DB.prepare("SELECT original_text FROM links WHERE id=?")
+    .bind(id).first<{ original_text: string | null }>();
+  if (!current) return fail("not_found");
+  if (source.model !== "manual" && current.original_text !== source.original_text) {
+    return new Response(JSON.stringify({error:"capture_required"}), {status:410,headers});
   }
   const now = new Date().toISOString();
   const leaseHash = await sha256Hex(body.lease_token);

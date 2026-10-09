@@ -25,7 +25,9 @@ async function request(path: string, method = "GET", body?: unknown, token = app
 
 async function seed(): Promise<number> {
   const response = await request("/api/links", "POST", { url: "https://x.com/example/status/123", note: "测试收藏" });
-  return (await response.json() as { id: number }).id;
+  const id = (await response.json() as { id: number }).id;
+  await env.DB.prepare("UPDATE links SET original_text='fixture archived original' WHERE id=?").bind(id).run();
+  return id;
 }
 
 async function complete(id: number): Promise<void> {

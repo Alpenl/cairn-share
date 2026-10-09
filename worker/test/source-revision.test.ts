@@ -11,9 +11,9 @@ async function call(path:string,body?:unknown,token="internal"){
 }
 async function setup(){
  const created=await(await call("links",{url:"https://x.com/source/status/42"},"app")).json() as {id:number};
+ await env.DB.prepare("UPDATE links SET original_text=? WHERE id=?").bind("fixture archived original",created.id).run();
  const lease=await(await call(`enrichment/jobs/${created.id}/claim`,{})).json() as {lease_token:string};
- await settleFixtureAttempt((path,body)=>call(path,body),created.id,lease.lease_token,"fetch");
- const source={original_text:"synthetic primary",original_language:"en",context_text:"first context",related_links:["https://example.com/first"],image_urls:[],model:"fixture"};
+ const source={original_text:"synthetic primary",original_language:"en",context_text:"first context",related_links:["https://example.com/first"],image_urls:[],model:"manual"};
  const save=async(value=source)=>call(`enrichment/jobs/${created.id}/source`,{lease_token:lease.lease_token,source:value});
  const revision=()=>env.DB.prepare("SELECT content_revision FROM links WHERE id=?").bind(created.id).first<number>("content_revision");
  expect((await save()).status).toBe(200);
