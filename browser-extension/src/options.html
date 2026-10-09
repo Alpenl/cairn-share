@@ -4,6 +4,7 @@
 <body class="options">
   <header class="app-header"><div class="brand"><img src="icons/48.png" alt="" width="24" height="24"><span>Cairn</span></div><span class="muted">设置</span></header>
   <main>
+    <section class="card"><h2>手机收藏，浏览器补正文</h2><p class="muted">一次启动，逐篇打开缺少正文的收藏并采集，支持暂停和继续。</p><a href="batch.html">打开批量采集面板 →</a></section>
     <form id="settings-form" class="card">
       <h2>连接</h2>
       <p class="muted">与 Android 使用同一份收藏库，填写 Android 设置中的访问令牌。</p>
@@ -14,7 +15,7 @@
       <button id="connect" type="submit" class="primary" disabled>测试并保存</button><p id="status" class="status" role="status" aria-live="polite" hidden></p>
     </form>
     <section class="queue-section card"><div class="section-heading"><h2>待同步 <span id="pending-count">0</span></h2><button id="retry-all" class="text-button" type="button" hidden>全部重试</button></div><p class="muted">关闭弹窗后仍会在后台上传，失败时保留在本机。</p><div id="queue"></div></section>
-    <section class="card"><h2>图片与媒体</h2><p class="muted">保存时只会申请当前文章用到的图片站点。若跨站图片经常缺失，可一次性允许读取所有网站的图片；只在你收藏时使用。</p><button id="image-permission" class="secondary" type="button">允许读取所有网站的图片</button></section>
-    <section class="privacy"><p>点击工具栏图标、按 <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>，或右键页面/链接即可收藏。</p><p>只在你保存时读取当前页已加载的正文和媒体，不读取表单、Cookie 或浏览历史。卸载扩展会清除本机草稿和待同步内容。详见随附的隐私说明。</p></section>
+    <section class="card"><h2>图片与媒体</h2><p class="muted">保存时只会申请当前文章用到的图片站点。若跨站图片经常缺失，可一次性允许读取所有网站的图片；只在你主动保存或启动批量采集时使用。</p><button id="image-permission" class="secondary" type="button">允许读取所有网站的图片</button></section>
+    <section class="privacy"><p>点击工具栏图标、按 <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>，或右键页面/链接即可收藏。</p><p>只在你保存或启动批量采集时读取页面已加载的正文和媒体，不读取表单、Cookie 或浏览历史。卸载扩展会清除本机草稿和待同步内容。详见随附的隐私说明。</p></section>
   </main><footer>Cairn 浏览器扩展 <span id="version"></span></footer><script type="module" src="options.mjs"></script>
 </body></html>
