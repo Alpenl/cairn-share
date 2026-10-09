@@ -39,11 +39,12 @@ test('challenge page is skipped, later tasks proceed, failures can be retried',a
   assert.equal(f.data[BATCH_KEY].tasks[0].status,'captured');assert.equal(f.queued.length,2);
 });
 
-test('pause during extraction never enqueues; taking over a tab leaves it open',async()=>{
-  const f=await setup();let resolve,entered=false;
-  f.deps.capture=()=>{entered=true;return new Promise(r=>{resolve=r;});};f.restart();
+test('pause during extraction never enqueues; taking over a tab leaves it open',{timeout:5000},async()=>{
+  const f=await setup();let resolve,started;
+  const entered=new Promise(r=>{started=r;});
+  f.deps.capture=()=>{started();return new Promise(r=>{resolve=r;});};f.restart();
   await f.batch.start();await f.advance(2);
-  const work=f.advance(10);for(let i=0;i<100&&!entered;i++)await new Promise(r=>setImmediate(r));assert.ok(entered,'capture must start');
+  const work=f.advance(10);await entered;
   await f.batch.pause();resolve({text:'原文',images:[]});await work;
   assert.equal(f.queued.length,0);assert.equal(f.data[BATCH_KEY].status,'paused');
   await f.batch.start('resume');for(let i=0;i<5&&!f.data[BATCH_KEY].tabId;i++)await f.advance();
