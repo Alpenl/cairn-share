@@ -3,7 +3,7 @@ import { captureTab } from "./capture.mjs";
 import { CaptureError } from "./config.mjs";
 import { createClient } from "./api.mjs";
 import { createController } from "./controller.mjs";
-import { pruneMedia } from './media.mjs';
+import { pruneMedia,forgetMedia } from './media.mjs';
 
 const ext = globalThis.browser ?? chrome;
 const controller = createController({
@@ -12,12 +12,20 @@ const controller = createController({
     async write(state) { await ext.storage.local.set({ [STATE_KEY]: state }); }
   },
   client: createClient(),
+  async onUploaded(job) {
+    for(let i=0;i<(job.capture?.images?.length||0);i++) {
+      await forgetMedia(`${job.client_id}:image:${i}`);
+      await forgetMedia(`${job.client_id}:image:${i}:fallback`);
+    }
+  },
   async onChange(state) {
     await ext.action.setBadgeBackgroundColor({ color: "#a66c21" });
     await ext.action.setBadgeText({ text: state.queue.length ? String(state.queue.length) : "" });
     await ext.action.setTitle({ title: state.queue.length ? `Cairn · ${state.queue.length} 条待上传` :
       state.lastResult?.status === "uploaded" ? "Cairn · 收藏已上传" : "收藏到 Cairn" });
     await ensureAlarm();
+    const next=state.queue.filter(j=>j.nextAttemptAt>Date.now()).reduce((n,j)=>Math.min(n,j.nextAttemptAt),Infinity);
+    if(Number.isFinite(next))await ext.alarms.create(RETRY_ALARM+'-soon',{when:next});
   }
 });
 
@@ -47,7 +55,7 @@ async function dispatch(message) {
       const capture = message.capture;
       const known = await controller.snapshot();
       if (message.tabId && message.capturePage && !known.queue.some(j => j.client_id === capture.client_id) && known.lastResult?.client_id !== capture.client_id) {
-        try { capture.capture = await captureTab(ext, message.tabId, capture.url); }
+        try { capture.capture = await captureTab(ext, message.tabId, capture.url, capture.client_id); }
         catch { throw new CaptureError("capture_unavailable"); }
       }
       await controller.enqueue(capture);
@@ -94,7 +102,7 @@ ext.contextMenus.onClicked.addListener((info, tab) => {
     const url = info.menuItemId === "cairn-link" ? info.linkUrl : info.pageUrl;
     const item = { url, title: info.menuItemId === "cairn-page" ? tab?.title : "", client_id: controller.newId() };
     if (info.menuItemId === "cairn-page" && ext.scripting && tab?.id) {
-      try { item.capture = await captureTab(ext, tab.id, url); }
+      try { item.capture = await captureTab(ext, tab.id, url, item.client_id); }
       catch { throw new CaptureError("capture_unavailable"); }
     }
     await controller.enqueue(item);
@@ -106,7 +114,7 @@ ext.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 ext.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === RETRY_ALARM) void controller.flush().catch(handleFailure);
+  if (alarm.name === RETRY_ALARM || alarm.name === RETRY_ALARM+'-soon') void controller.flush().catch(handleFailure);
 });
 ext.runtime.onStartup.addListener(() => { void initialize().catch(handleFailure); });
 // Restoring an MV3 worker should also restore its alarm if the browser removed it.

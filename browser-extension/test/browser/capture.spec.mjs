@@ -7,6 +7,9 @@ import { build } from "../../scripts/build.mjs";
 
 let context, server, origin, extensionURL, worker, root, mediaServer, mediaOrigin;
 const mediaUploads=new Map();
+const imageUploads=new Map();
+let holdImages=false,failImage=null;
+const imageRequests=[];
 let failSecondPart=false;const partRequests=[];
 const movie=Buffer.alloc(9*1024*1024,42);movie.write("ftypisom",4);
 const picture=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a42kAAAAASUVORK5CYII=","base64");
@@ -26,6 +29,25 @@ test.beforeAll(async () => {
       if(request.method==='GET'){response.end(JSON.stringify({items:[{id:collectionId,name:'设计参考',revision:1,deleted:0,archived:0,pinned:1}]}));return;}
       let raw='';for await(const part of request)raw+=part;const body=JSON.parse(raw);collectionPosts.push(body);collectionReceipts.add(body.operation_key);
       if(loseCollection){loseCollection=false;response.writeHead(200);response.write('{"revision":');setTimeout(()=>response.destroy(),100);return;}response.end(JSON.stringify({revision:2}));return;
+    }
+    if(request.url.startsWith('/api/captures/v2/')) {
+      if(request.headers.authorization!=='Bearer browser-test-token'){response.writeHead(401);response.end();return;}
+      const [,id,ordinal,media]=request.url.match(/v2\/([a-f0-9-]+)(?:\/(?:images\/(\d+)|(media)))?$/);
+      response.setHeader('Content-Type','application/json');
+      const saved=records.get(id);if(!saved){response.writeHead(404);response.end('{}');return;}
+      if(request.method==='GET'){response.end(JSON.stringify({...saved,completed:true,images_ready:[...imageUploads.entries()].filter(([k,v])=>k.startsWith(id+':')&&v.bytes).map(([k])=>Number(k.split(':')[1]))}));return;}
+      const chunks=[];for await(const c of request)chunks.push(c);const raw=Buffer.concat(chunks);
+      if(media){response.end('{}');return;}
+      const key=id+':'+ordinal;
+      if(request.method==='POST'){
+        if(!imageUploads.has(key))imageUploads.set(key,JSON.parse(raw));
+        response.end(JSON.stringify({status:imageUploads.get(key).bytes?'ready':'pending'}));return;
+      }
+      imageRequests.push(key);
+      if(failImage===Number(ordinal)){response.writeHead(503);response.end('{}');return;}
+      imageUploads.get(key).bytes=raw;
+      while(holdImages&&!response.destroyed)await new Promise(r=>setTimeout(r,20));
+      if(!response.destroyed)response.end(JSON.stringify({status:'ready'}));return;
     }
     if(request.url.startsWith('/api/media/uploads/')) {
       if(request.headers.authorization!=='Bearer browser-test-token'){response.writeHead(401);response.end();return;}
@@ -168,14 +190,16 @@ test("capture rendered content with real scripting and keep success visible in a
   await popup.goto(`${extensionURL}/popup.html`);
   await expect(popup.locator('#save')).toBeEnabled();
   await popup.locator('#save').click();
-  await expect(popup.locator('#status')).toContainText('已同步');
+  await expect(popup.locator('#status')).toContainText('张图片');
   const saved=posts.find(p=>p.url===article.url());
   expect(saved.capture.text).toContain('# 已加载文章');
   expect(saved.capture.text).toMatch(/^-\s+第一项$/m);
   expect(saved.capture.text).toContain('![已加载配图](cairn-image:0)');
   expect(saved.capture.images).toHaveLength(1);
-  expect(saved.capture.images[0].content_type).toBe('image/webp');
-  expect(saved.capture.images[0].data.length).toBeGreaterThan(40);
+  expect(saved.capture.images[0].data).toBeUndefined();
+  const archived=imageUploads.get(saved.client_id+':0');
+  expect(archived.content_type).toBe('image/webp');
+  expect(archived.bytes.length).toBeGreaterThan(40);
   expect(saved.capture.text).not.toContain('Navigation noise');
   expect(saved.capture.text).not.toContain('private form');
   expect(saved.capture.text).not.toContain('隐藏内容');
@@ -200,7 +224,7 @@ test('archives lazy cross-origin image bytes and resumes a video using durable m
  await popup.close();const cdp=await context.newCDPSession(article);await cdp.send('ServiceWorker.enable');await cdp.send('ServiceWorker.stopAllWorkers');failSecondPart=false;
  const resumed=await context.newPage();await resumed.goto(`${extensionURL}/options.html`);await resumed.locator('#retry-all').click();await expect(resumed.locator('#pending-count')).toHaveText('0');
  const result=await worker.evaluate(async()=>(await chrome.storage.local.get('cairn_capture_v1')).cairn_capture_v1.lastResult);expect(result.mediaSaved).toBe(1);expect(partRequests.filter(n=>n===1)).toHaveLength(1);await resumed.close();
- const saved=posts.find(p=>p.url===article.url());expect(saved.capture.images).toHaveLength(1);expect(Buffer.from(saved.capture.images[0].data,'base64')).toEqual(picture);expect(saved.capture.missing_images).toBe(0);
+ const saved=posts.find(p=>p.url===article.url());expect(saved.capture.images).toHaveLength(1);expect(imageUploads.get(saved.client_id+':0').bytes).toEqual(picture);expect(saved.capture.missing_images).toBe(0);
  expect(saved.capture.media).toHaveLength(1);const upload=[...mediaUploads.values()].at(-1);expect(upload.parts).toHaveLength(2);expect(Buffer.concat(upload.bytes)).toEqual(movie);
  expect(await worker.evaluate(async()=>new Promise((resolve,reject)=>{const r=indexedDB.open('cairn-media-queue',1);r.onsuccess=()=>{const c=r.result.transaction('files').objectStore('files').count();c.onsuccess=()=>{resolve(c.result);r.result.close();};};r.onerror=reject;}))).toBe(0);
  await article.close();
@@ -232,4 +256,45 @@ test("choose a collection during capture and resume its committed lost response 
  const retry=await context.newPage();await retry.goto(`${extensionURL}/options.html`);await retry.locator('#retry-all').click();await expect(retry.locator('#pending-count')).toHaveText('0');
  expect(posts.length-before).toBe(1);expect(collectionPosts.length).toBe(2);expect(collectionPosts[0]).toEqual(collectionPosts[1]);expect(collectionReceipts.size).toBe(1);expect(collectionPosts[0].link_ids).toEqual([records.get(posts.at(-1).client_id).id]);
  collectionEnabled=false;
+});
+
+
+test('text confirmation stays visible during slow images; background restart confirms saved files instead of reuploading',async()=>{
+ const id=crypto.randomUUID(),url='https://example.com/slow-image';
+ holdImages=true;
+ const options=await context.newPage();await options.goto(`${extensionURL}/options.html`);
+ await options.evaluate(async({id,url,data})=>{
+   const state=(await chrome.storage.local.get('cairn_capture_v1')).cairn_capture_v1;
+   const {keepImageFallback}=await import(chrome.runtime.getURL('images.mjs'));
+   await keepImageFallback(id,0,'data:image/png;base64,'+data);
+   state.queue.push({client_id:id,url,note:'',title:'慢网图片',binding:await (await import(chrome.runtime.getURL('config.mjs'))).tokenIdentity(state.settings.token),createdAt:Date.now(),attempts:0,nextAttemptAt:0,capture:{protocol:2,title:'慢网图片',language:'zh',text:'完整原文 ![图](cairn-image:0)',images:[{url:'',local:true}],media:[]}});
+   state.lastResult={client_id:id,url,title:'慢网图片',status:'queued'};
+   await chrome.storage.local.set({cairn_capture_v1:state});
+ },{id,url,data:picture.toString('base64')});
+ await options.reload();
+ // Don't await the retry message: the image response deliberately remains open.
+ await options.locator('#retry-all').click();
+ await expect(options.locator('#queue')).toContainText('正文已同步');
+ await expect.poll(()=>imageRequests.filter(k=>k===id+':0').length).toBe(1);
+ const cdp=await context.newCDPSession(options);await cdp.send('ServiceWorker.enable');await cdp.send('ServiceWorker.stopAllWorkers');holdImages=false;
+ await options.reload();await options.locator('#retry-all').click();await expect(options.locator('#pending-count')).toHaveText('0');
+ expect(posts.filter(p=>p.client_id===id)).toHaveLength(1);expect(imageRequests.filter(k=>k===id+':0')).toHaveLength(1);
+ await options.close();
+});
+
+test('upgrades a 0.4.0 base64 queue durably and retries only the missing image',async()=>{
+ const id=crypto.randomUUID(),url='https://example.com/legacy-upload';failImage=1;
+ const options=await context.newPage();await options.goto(`${extensionURL}/options.html`);
+ await options.evaluate(async({id,url,data})=>{
+   const state=(await chrome.storage.local.get('cairn_capture_v1')).cairn_capture_v1;
+   state.queue.push({client_id:id,url,note:'旧备注',title:'旧队列',binding:await (await import(chrome.runtime.getURL('config.mjs'))).tokenIdentity(state.settings.token),createdAt:Date.now(),attempts:1,nextAttemptAt:0,capture:{title:'旧队列',language:'zh',text:'旧的完整原文 ![一](cairn-image:0) ![二](cairn-image:1)',images:[{content_type:'image/png',data},{content_type:'image/png',data}],media:[]}});
+   state.lastResult={client_id:id,url,status:'queued'};await chrome.storage.local.set({cairn_capture_v1:state});
+ },{id,url,data:picture.toString('base64')});
+ await options.reload();await options.locator('#retry-all').click();
+ await expect(options.locator('#queue')).toContainText('图片归档暂未完成');
+ const saved=posts.find(p=>p.client_id===id);expect(saved.legacy_hash).toMatch(/^[a-f0-9]{64}$/);expect(JSON.stringify(saved)).not.toContain(picture.toString('base64'));
+ const cdp=await context.newCDPSession(options);await cdp.send('ServiceWorker.enable');await cdp.send('ServiceWorker.stopAllWorkers');failImage=null;
+ await options.reload();await options.locator('#retry-all').click();await expect(options.locator('#pending-count')).toHaveText('0');
+ expect(posts.filter(p=>p.client_id===id)).toHaveLength(1);expect(imageRequests.filter(k=>k===id+':0')).toHaveLength(1);expect(imageUploads.get(id+':1').bytes).toEqual(picture);
+ await options.close();
 });

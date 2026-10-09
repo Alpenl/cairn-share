@@ -4,11 +4,11 @@ export function emptyState() {
   return { settings: { token: "", keepFullUrl: true }, queue: [], lastResult: null };
 }
 
-const PAUSED_ERRORS = new Set(["revision_conflict","collection_deleted","collection_limit","collections_unsupported","invalid_token", "invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete", "upgrade_required",'media_stale','media_conflict','invalid_media','media_permission','media_too_large','media_protected','media_unsupported','media_unavailable','media_live_or_unsupported']);
+const PAUSED_ERRORS = new Set(["invalid_image","capture_incomplete","revision_conflict","collection_deleted","collection_limit","collections_unsupported","invalid_token", "invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete", "upgrade_required",'media_stale','media_conflict','invalid_media','media_permission','media_too_large','media_protected','media_unsupported','media_unavailable','media_live_or_unsupported']);
 
 // Only this background controller writes storage. A mutex prevents independent
 // popup/menu/alarm events from overwriting one another's persisted changes.
-export function createController({ store, client, now = Date.now, uuid = () => crypto.randomUUID(), onChange = async () => {} }) {
+export function createController({ store, client, now = Date.now, uuid = () => crypto.randomUUID(), onChange = async () => {}, onUploaded = async () => {} }) {
   let mutations = Promise.resolve();
   let flushPromise = null;
   let connectionTest = null;
@@ -54,7 +54,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
       await update((state) => {
         if (candidate !== state.settings.token && state.queue.length && !movePending) throw new CaptureError("queue_connection");
         if (candidate !== state.settings.token) {
-          state.queue.forEach((job) => { job.binding = binding; job.collection_ids=[];job.collectionOperations={};job.collectionIndex=0;delete job.savedLink;delete job.mediaIndex;delete job.mediaProgress; job.errorKind = null; job.nextAttemptAt = 0; });
+          state.queue.forEach((job) => { job.binding = binding; job.collection_ids=[];job.collectionOperations={};job.collectionIndex=0;delete job.savedLink;delete job.mediaIndex;delete job.mediaProgress;delete job.legacyHash;delete job.uploadMedia;delete job.mediaRegistered;delete job.imageProgress;delete job.stage; job.errorKind = null; job.nextAttemptAt = 0; });
         }
         state.settings = { token: candidate, keepFullUrl };
       });
@@ -95,6 +95,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
       // Bound work per wakeup below Chrome's fetch lifetime limit. Remaining
       // items are persisted and the alarm resumes them on the next wakeup.
       const attempted = new Set();
+      const round=crypto.randomUUID();
       const startedAt = now();
       for (let count = 0; count < MAX_QUEUE && now() - startedAt < 15000; count++) {
         await mutations;
@@ -108,15 +109,17 @@ export function createController({ store, client, now = Date.now, uuid = () => c
         try {
           const link = await client.upload(state.settings.token, job, patch=>update(current=>{
             const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);
-            if(pending)Object.assign(pending,patch,{errorKind:null,nextAttemptAt:0});
+            if(!pending)return;
+            Object.assign(pending,patch,{errorKind:null,nextAttemptAt:0});
             if(patch.savedLink)current.lastResult={client_id:job.client_id,url:job.url,title:job.title,status:'media',linkId:patch.savedLink.id,at:now()};
-          }));
+          }),{round});
           if(link.media_pending){
-            await update(current=>{current.lastResult={client_id:job.client_id,url:job.url,title:job.title,status:'media',linkId:link.id,at:now()};});
+            await update(current=>{if(current.queue.some(j=>j.client_id===job.client_id&&j.binding===binding))current.lastResult={client_id:job.client_id,url:job.url,title:job.title,status:'media',linkId:link.id,at:now()};});
             attempted.delete(job.client_id);
             continue;
           }
           if(job.collection_ids?.length){
+            await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);if(pending)pending.stage="collections";});
             await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);if(pending)pending.savedLink=link;});
             for(let index=job.collectionIndex||0;index<job.collection_ids.length;index++){
               const id=job.collection_ids[index];let body=job.collectionOperations?.[id];
@@ -130,11 +133,13 @@ export function createController({ store, client, now = Date.now, uuid = () => c
               await update(current=>{const pending=current.queue.find(j=>j.client_id===job.client_id&&j.binding===binding);if(pending)pending.collectionIndex=index+1;});
             }
           }
-          await update((current) => {
+          const finished=await update((current) => {
             if (!current.queue.some((item) => item.client_id === job.client_id && item.binding === binding)) return;
             current.queue = current.queue.filter((item) => item.client_id !== job.client_id);
             current.lastResult = { client_id: job.client_id, url: job.url, title: job.title, captured: Boolean(job.capture), action:link.capture_result?.action, imagesSaved:link.capture_result?.images_saved ?? job.capture?.images?.length ?? 0, mediaSaved:link.media_saved || 0, missingImages: job.capture?.missing_images || 0, truncated: Boolean(job.capture?.truncated), status: "uploaded", linkId: link.id, at: now() };
+            return true;
           });
+          try { if(finished)await onUploaded(job); } catch { /* Startup pruning retries local cleanup. */ }
         } catch (error) {
           const kind = error.kind ?? "network";
           await update((current) => {
@@ -142,8 +147,9 @@ export function createController({ store, client, now = Date.now, uuid = () => c
             if (!pending) return;
             pending.attempts++;
             pending.errorKind = kind;
+            if(error.stage)pending.stage=error.stage;
             if(error.origins)pending.requiredOrigins=error.origins;
-            pending.nextAttemptAt = now() + Math.min(60 * 60 * 1000, 60000 * 2 ** Math.min(pending.attempts - 1, 6));
+            pending.nextAttemptAt = now() + Math.min(60 * 60 * 1000, 5000 * 2 ** Math.min(pending.attempts - 1, 10));
           });
           if (["invalid_token", "network", "timeout", "server"].includes(kind)) break;
         }

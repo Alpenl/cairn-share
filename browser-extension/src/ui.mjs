@@ -19,6 +19,19 @@ export function showError(element, error) {
   status(element, errorText(error.kind), "error");
 }
 
+export function queueStatus(job) {
+  const prefix=job.savedLink ? '正文已同步；' : '已保存在本机；';
+  if(job.errorKind) {
+    const stage=({text:'正文上传',images:'图片归档',media:'视频/音频归档',collections:'加入合集'})[job.stage]||'同步';
+    const reason=job.errorKind==='timeout'?'连接超时，将核对进度后重试。':errorText(job.errorKind);
+    return `${prefix}${stage}暂未完成：${reason}`;
+  }
+  if(job.stage==='images')return `${prefix}图片 ${job.imageProgress?.uploaded||0}/${job.imageProgress?.total||0}，正在后台归档。`;
+  if(job.stage==='media')return `${prefix}正在归档视频/音频${job.mediaProgress?`（${Math.round(100*job.mediaProgress.uploaded/job.mediaProgress.size)}%）`:''}。`;
+  if(job.stage==='collections')return `${prefix}正在加入合集。`;
+  return `${prefix}等待上传，可以关闭窗口。`;
+}
+
 export function renderQueue(container, state, refresh, onError) {
   container.replaceChildren();
   if (!state.queue.length) {
@@ -40,7 +53,7 @@ export function renderQueue(container, state, refresh, onError) {
     url.textContent = job.url;
     const info = document.createElement("p");
     info.className = "muted";
-    info.textContent = job.errorKind ? errorText(job.errorKind) : "已保存在本机，等待上传。";
+    info.textContent = queueStatus(job);
     const actions = document.createElement("div");
     actions.className = "row-actions";
     for (const [label, type] of [["重试", "retry"], ["移除", "remove"]]) {
@@ -49,7 +62,7 @@ export function renderQueue(container, state, refresh, onError) {
       button.className = "text-button";
       button.textContent = label;
       button.addEventListener("click", async () => {
-        if (type === "remove" && !confirm("移除这条尚未上传的收藏？")) return;
+        if (type === "remove" && !confirm("停止这条收藏的后续同步？服务器已保存的内容会保留。")) return;
         button.disabled = true;
         try { await send(type, { client_id: job.client_id }); await refresh(); } catch (error) { onError(error); }
         finally { button.disabled = false; }
