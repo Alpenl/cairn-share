@@ -3,6 +3,7 @@ import { readBoundedJSON, JSONBodyError } from './json-body';
 import { canonicalJSON, contentHash, objectivePayload, type EvidenceSnapshot } from './domain';
 import { resolveURLIdentity } from './url-identity';
 import { registerMedia, validMediaDeclarations } from './archived-media';
+import { MISSING_CAPTURE_SQL } from './pending-captures';
 const reply = (value: unknown, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'private, no-store' } });
 export async function digest(value: string | Uint8Array): Promise<string> {
     const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
@@ -28,6 +29,9 @@ export async function browserCapture(request: Request, env: Env, staged = false)
         return reply({ error: e instanceof JSONBodyError ? e.code : 'invalid_json' }, 400);
     }
     const c = body?.capture;
+    const target = body?.target;
+    if (target !== undefined && (!staged || !target || !Number.isSafeInteger(target.id) || target.id < 1 ||
+        ![target.content_revision,target.app_body_revision].every(n => Number.isSafeInteger(n) && n >= 0))) return reply({error:'invalid_capture'},400);
     if (!safeURL(body?.url) || typeof body.note !== 'string' || body.note.length > 2000 ||
         !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.client_id) ||
         !c || typeof c.text !== 'string' || !c.text.trim() || new TextEncoder().encode(c.text).length > 100000 ||
@@ -74,6 +78,17 @@ export async function browserCapture(request: Request, env: Env, staged = false)
     if (!old) {
         if (await env.DB.prepare('SELECT id FROM links WHERE client_id=?').bind(body.client_id).first())
             return reply({ error: 'capture_conflict' }, 409);
+        if (target) {
+            const existing = await env.DB.prepare('SELECT id FROM links WHERE id=?').bind(target.id).first();
+            if (!existing) return reply({error:'capture_deleted'},410);
+            // Batch capture may only fill this exact, still-empty bookmark.
+            // Never resolve a new identity or resurrect a deleted bookmark.
+            await env.DB.prepare(`INSERT INTO browser_captures(client_id,link_id,payload_hash,created_at,expected_revision,expected_body_revision,was_existing)
+              SELECT ?,id,?,?,content_revision,app_body_revision,1 FROM links
+              WHERE id=? AND url=? AND content_revision=? AND app_body_revision=? AND ${MISSING_CAPTURE_SQL}
+              ON CONFLICT(client_id) DO NOTHING`).bind(body.client_id,hash,now,target.id,body.url,target.content_revision,target.app_body_revision).run();
+            if (!await env.DB.prepare('SELECT client_id FROM browser_captures WHERE client_id=?').bind(body.client_id).first()) return reply({error:'capture_not_pending'},409);
+        } else {
         const identity = await resolveURLIdentity(env, body.url);
         // Both the existence check and insert run in SQLite, so simultaneous
         // captures cannot create two bookmarks. Existing notes/IDs stay intact.
@@ -85,6 +100,7 @@ export async function browserCapture(request: Request, env: Env, staged = false)
               SELECT ?,id,?,?,content_revision,app_body_revision,CASE WHEN client_id IS ? THEN 0 ELSE 1 END
               FROM links WHERE url_identity=? ORDER BY id LIMIT 1 ON CONFLICT(client_id) DO NOTHING`).bind(body.client_id, hash, now, body.client_id, identity)
         ]);
+        }
     }
     const receipt = await env.DB.prepare('SELECT * FROM browser_captures WHERE client_id=?').bind(body.client_id).first<{
         link_id: number;
@@ -97,6 +113,7 @@ export async function browserCapture(request: Request, env: Env, staged = false)
     if (!receipt || receipt.payload_hash !== hash)
         return reply({ error: 'capture_conflict' }, 409);
     const id = receipt.link_id;
+    if (target && id !== target.id) return reply({error:'capture_conflict'},409);
     if (staged) {
         await env.DB.prepare('INSERT INTO capture_upload_sessions(client_id,manifest_hash,request_json) SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM links WHERE id=?) ON CONFLICT(client_id) DO NOTHING').bind(body.client_id,manifestHash,JSON.stringify(body),id).run();
         const session = await env.DB.prepare('SELECT manifest_hash FROM capture_upload_sessions WHERE client_id=?').bind(body.client_id).first('manifest_hash');
@@ -141,7 +158,7 @@ export async function browserCapture(request: Request, env: Env, staged = false)
               enrichment_paid_uncertain=CASE WHEN original_text IS ? THEN enrichment_paid_uncertain ELSE 0 END,
               enrichment_paid_stage=CASE WHEN original_text IS ? THEN enrichment_paid_stage ELSE NULL END,
               enrichment_paid_stage_started=CASE WHEN original_text IS ? THEN enrichment_paid_stage_started ELSE 0 END,
-              enrichment_updated_at=?,last_capture_id=? WHERE id=? AND ${guard} AND content_revision=? AND app_body_revision=?`)
+              enrichment_updated_at=?,last_capture_id=? WHERE id=? AND ${guard} AND content_revision=? AND app_body_revision=? ${target ? `AND ${MISSING_CAPTURE_SQL}` : ''}`)
                 .bind(c.text, c.language || 'und', c.title, JSON.stringify(refs), c.text, c.text, body.note, c.text, c.text, c.text, c.text, now, body.client_id, id, body.client_id, current.url, receipt.expected_revision, receipt.expected_body_revision),
             env.DB.prepare(`INSERT INTO enrichment_sources(link_id,url,original_text,payload,fetched_at) SELECT id,url,original_text,?,? FROM links WHERE id=? AND ${applied} AND original_text=? AND images=?
               ON CONFLICT(link_id) DO UPDATE SET url=excluded.url,original_text=excluded.original_text,payload=excluded.payload,fetched_at=excluded.fetched_at

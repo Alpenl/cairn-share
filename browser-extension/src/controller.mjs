@@ -4,7 +4,7 @@ export function emptyState() {
   return { settings: { token: "", keepFullUrl: true }, queue: [], lastResult: null };
 }
 
-const PAUSED_ERRORS = new Set(["invalid_image","capture_incomplete","revision_conflict","collection_deleted","collection_limit","collections_unsupported","invalid_token", "invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete", "upgrade_required",'media_stale','media_conflict','invalid_media','media_permission','media_too_large','media_protected','media_unsupported','media_unavailable','media_live_or_unsupported']);
+const PAUSED_ERRORS = new Set(["capture_not_pending","invalid_image","capture_incomplete","revision_conflict","collection_deleted","collection_limit","collections_unsupported","invalid_token", "invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete", "upgrade_required",'media_stale','media_conflict','invalid_media','media_permission','media_too_large','media_protected','media_unsupported','media_unavailable','media_live_or_unsupported']);
 
 // Only this background controller writes storage. A mutex prevents independent
 // popup/menu/alarm events from overwriting one another's persisted changes.
@@ -52,6 +52,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
       await client.test(candidate);
       const binding = await tokenIdentity(candidate);
       await update((state) => {
+        if (candidate !== state.settings.token && state.queue.some(job => job.target)) throw new CaptureError("batch_account");
         if (candidate !== state.settings.token && state.queue.length && !movePending) throw new CaptureError("queue_connection");
         if (candidate !== state.settings.token) {
           state.queue.forEach((job) => { job.binding = binding; job.collection_ids=[];job.collectionOperations={};job.collectionIndex=0;delete job.savedLink;delete job.mediaIndex;delete job.mediaProgress;delete job.legacyHash;delete job.uploadMedia;delete job.mediaRegistered;delete job.imageProgress;delete job.stage; job.errorKind = null; job.nextAttemptAt = 0; });
@@ -62,7 +63,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
     return snapshot();
   }
 
-  async function enqueue({ url, note = "", title = "", client_id, capture: pageCapture, collection_ids = [], binding: captureBinding }) {
+  async function enqueue({ url, note = "", title = "", client_id, capture: pageCapture, collection_ids = [], binding: captureBinding, target }) {
     // The popup persists this UUID before messaging background, so closing
     // it during an upload and re-opening cannot create a second operation.
     if (typeof client_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(client_id)) {
@@ -73,12 +74,12 @@ export function createController({ store, client, now = Date.now, uuid = () => c
       if (existing) return existing;
       if (state.lastResult?.client_id === client_id) return state.lastResult;
       if (!state.settings.token) throw new CaptureError("not_configured");
-      if(collection_ids.length && captureBinding!==await tokenIdentity(state.settings.token))throw new CaptureError("queue_connection");
+      if((collection_ids.length || target) && captureBinding!==await tokenIdentity(state.settings.token))throw new CaptureError("queue_connection");
       if (state.queue.length >= MAX_QUEUE) throw new CaptureError("queue_full");
       if(!Array.isArray(collection_ids)||collection_ids.length>100||new Set(collection_ids).size!==collection_ids.length||collection_ids.some(id=>typeof id!=="string"||!/^[a-f0-9-]{36}$/.test(id)))throw new CaptureError("invalid_collection");
-      const capture = validateCapture(submissionUrl(url, state.settings.keepFullUrl), note);
+      const capture = validateCapture(submissionUrl(url, target ? true : state.settings.keepFullUrl), note);
       if (pageCapture && JSON.stringify(state.queue).length + JSON.stringify(pageCapture).length > 24000000) throw new CaptureError("queue_full");
-      const job = { ...capture, collection_ids, collectionOperations:{}, collectionIndex:0, ...(pageCapture ? { capture: pageCapture } : {}), title: typeof title === "string" ? title.slice(0, 300) : "", client_id,
+      const job = { ...capture, ...(target ? {target} : {}), collection_ids, collectionOperations:{}, collectionIndex:0, ...(pageCapture ? { capture: pageCapture } : {}), title: typeof title === "string" ? title.slice(0, 300) : "", client_id,
         binding: await tokenIdentity(state.settings.token), createdAt: now(), attempts: 0, nextAttemptAt: 0, errorKind: null };
       state.queue.push(job);
       state.lastResult = { client_id, url: job.url, title: job.title, status: "queued", at: now() };

@@ -39,6 +39,18 @@ export async function tokenIdentity(token) {
 }
 
 export const ERROR_TEXT = {
+  capture_not_pending: "原收藏已有正文或已变更，本次补采未覆盖。可移除此任务。",
+  batch_account: "请先完成或移除批量补采的待同步任务，再更换令牌。",
+  batch_upgrade: "收藏服务尚未支持批量补采，请更新服务后重试。",
+  batch_permission: "批量采集需要网站访问权限，请允许后继续。",
+  batch_connection: "收藏库连接已变更，请重新开始一轮采集。",
+  batch_restart: "浏览器重新启动，采集已暂停。点击继续即可恢复。",
+  batch_active: "你已切换到采集标签页，本轮暂停，页面保留供手动操作。",
+  batch_closed: "采集标签页已关闭，未保存内容。",
+  batch_blocked: "页面要求登录、验证或访问受限，请打开原链接处理后重试。",
+  batch_empty: "页面未加载出可识别的正文，请打开原链接检查。",
+  batch_navigation: "页面跳转到其他地址，请手动确认后采集。",
+  batch_timeout: "页面加载超时，请检查原链接后重试。",
   revision_conflict:"收藏已保存；合集在其他设备更新。点击重试会按最新版本加入。",
   collection_deleted:"收藏已保存；选中的合集已归档或删除，请在网页/APP核对。",
   collection_limit:"收藏已保存；合集容量已满，请在网页/APP调整。",

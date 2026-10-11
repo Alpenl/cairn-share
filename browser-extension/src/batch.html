@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cairn · 批量补采正文</title><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="batch.css"></head>
+<body class="options batch">
+  <header class="app-header"><div class="brand"><img src="icons/48.png" alt="" width="24" height="24"><span>Cairn</span></div><a href="options.html">设置与待同步</a></header>
+  <main>
+    <section class="card batch-intro"><span class="eyebrow">从手机收藏，到完整阅读</span><h1>批量补采正文</h1><p class="muted">为收藏库中缺少正文的链接，逐篇打开页面、采集正文和媒体，然后关闭采集页。已有正文的收藏会自动跳过。</p><p class="hint">使用当前浏览器的登录状态。首次使用需要允许访问网站；遇到登录、验证或加载失败，会留下原因，继续下一篇。</p></section>
+    <section class="card batch-controls" aria-label="采集进度">
+      <div class="section-heading"><h2 id="phase">准备就绪</h2><span id="count" class="muted"></span></div>
+      <progress id="progress" max="1" value="0" aria-label="本轮采集进度"></progress>
+      <p id="detail" class="muted" aria-live="polite">点击开始，扫描所有缺少正文的收藏。</p>
+      <div class="batch-actions"><button id="start" class="primary" type="button">一键采集所有待办</button><button id="resume" class="primary" type="button" hidden>继续采集</button><button id="pause" class="secondary" type="button" hidden>暂停采集</button><button id="retry-failed" class="secondary" type="button" hidden>重试失败项</button></div>
+      <p id="status" class="status" role="status" aria-live="polite" hidden></p>
+      <p class="hint">关闭此面板后仍会继续。暂停只停止打开和采集页面，已采集的内容继续上传；重启浏览器后需手动继续。</p>
+    </section>
+    <section class="card"><div class="section-heading"><h2>本轮任务</h2><span id="totals" class="muted"></span></div><div id="tasks"><p class="muted">尚未开始</p></div><button id="more" type="button" class="text-button" hidden>显示更多任务</button></section>
+    <section class="card"><div class="section-heading"><h2>待同步 <span id="pending-count">0</span></h2><button id="retry-all" class="text-button" type="button" hidden>全部重试</button></div><p class="muted">“已采集”表示内容已保存在本机。正文、图片与视频的上传进度在这里显示。</p><div id="queue"></div></section>
+  </main><script type="module" src="batch-ui.mjs"></script>
+</body></html>

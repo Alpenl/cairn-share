@@ -18,13 +18,14 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, timeoutMs 
         redirect: "error",
         signal: abort.signal
       });
+      if (path.startsWith("/api/captures/v2/pending") && response.status===404) throw new CaptureError("batch_upgrade");
       if (missing && response.status===404) return null;
       if ((path === "/api/captures" || path === "/api/captures/v2") && response.status === 404) throw new CaptureError("upgrade_required");
       if (response.status === 401 || response.status === 403) throw new CaptureError("invalid_token");
       if (response.status >= 500 || response.status === 429) throw new CaptureError("server");
       if (!response.ok) {
         const data = await response.json().catch(() => null);
-        const kind = ["revision_conflict","collection_deleted","collection_limit","invalid_collection","collections_unsupported","invalid_image","capture_incomplete","invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete",'media_stale','media_conflict','invalid_media','media_incomplete'].includes(data?.error) ? data.error : "response";
+        const kind = ["capture_not_pending","revision_conflict","collection_deleted","collection_limit","invalid_collection","collections_unsupported","invalid_image","capture_incomplete","invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete",'media_stale','media_conflict','invalid_media','media_incomplete'].includes(data?.error) ? data.error : "response";
         throw new CaptureError(kind);
       }
       if(collections && response.headers.get("X-Cairn-Collections")!=="1") throw new CaptureError("collections_unsupported");
@@ -38,6 +39,12 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, timeoutMs 
   }
 
   return {
+    async pending(token, query = "") {
+      const data = await request(token, `/api/captures/v2/pending${query}`);
+      if (data?.batch_version !== 1) throw new CaptureError("batch_upgrade");
+      return data;
+    },
+    async receipt(token, id) { return request(token, `/api/captures/v2/${id}`, null, {missing:true}); },
     async collections(token) {const data=await request(token,"/api/collections",null,{collections:true});if(!Array.isArray(data.items))throw new CaptureError("response");return data.items;},
     async addCollection(token,id,body){return request(token,`/api/collections/${id}/operations`,body,{collections:true});},
     async test(token) {
@@ -52,10 +59,10 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, timeoutMs 
       if(v2){
         if(job.attempts || data)data=await request(token,base,null,{missing:true,stage:'text'});
         if(!data || data.completed===false){
-          data=await request(token,'/api/captures/v2',{url:job.url,note:job.note,client_id:job.client_id,capture:job.capture,...(job.legacyHash?{legacy_hash:job.legacyHash}:{})},{stage:'text'});
+          data=await request(token,'/api/captures/v2',{url:job.url,note:job.note,client_id:job.client_id,capture:job.capture,...(job.target?{target:job.target}:{}),...(job.legacyHash?{legacy_hash:job.legacyHash}:{})},{stage:'text'});
         }
       }else if(!data)data=await request(token,'/api/links',{url:job.url,note:job.note,client_id:job.client_id},{stage:'text'});
-      if (!Number.isSafeInteger(data?.id) || data.id<1 || data.url!==job.url || data.note!==job.note) throw new CaptureError('response');
+      if (!Number.isSafeInteger(data?.id) || data.id<1 || data.url!==job.url || data.note!==job.note || (job.target && data.id!==job.target.id)) throw new CaptureError('response');
       if(v2){
         const images=job.capture.images;
         const ready=new Set(data.images_ready || (data.capture_result?.images_saved===images.length?images.map((_,i)=>i):[]));

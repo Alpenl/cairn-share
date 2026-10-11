@@ -1,0 +1,17 @@
+.batch { max-width: 900px; }
+.batch .app-header a { color: var(--primary); text-decoration: none; }
+.batch h1 { font-size: 28px; margin: 10px 0 14px; letter-spacing: -.6px; }
+.eyebrow { color: var(--accent, #987236); font-size: 12px; font-weight: 600; }
+.batch-intro p { max-width: 660px; line-height: 1.8; }
+.batch-controls { position: sticky; top: 12px; z-index: 1; box-shadow: 0 3px 15px #00000009; }
+.batch progress { display: block; width: 100%; height: 8px; margin: 18px 0; accent-color: #8e692e; }
+.batch-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.batch-actions button { width: auto; margin-top: 0; }
+.batch-task { padding: 14px 0; border-bottom: 1px solid #8882; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px 20px; }
+.batch-task:last-child { border-bottom: 0; }
+.batch-task a { color: inherit; text-decoration: none; overflow-wrap: anywhere; }
+.batch-task a:hover { text-decoration: underline; }
+.batch-task small { grid-column: 1 / -1; color: var(--muted); overflow-wrap: anywhere; }
+.batch-task [data-status="failed"] { color: var(--error); }
+.batch-task [data-status="captured"] { color: var(--success); }
+@media (max-width: 520px) { .batch-controls { position: static; } .batch-task { gap: 8px; } }

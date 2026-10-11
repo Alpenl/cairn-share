@@ -1,4 +1,5 @@
 import { captureUploads } from './capture-uploads';
+import { pendingCaptures } from './pending-captures';
 import { drainCollectionRules } from "./collection-rules";
 import { managedCatalog, filterCatalog, tagCatalogRoute } from "./tag-catalog";
 import { collectionOrganizingRoute } from "./collection-organizing";
@@ -436,6 +437,7 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
 
   if (path === '/api/captures/v2' || path.startsWith('/api/captures/v2/')) {
     const auth = requireApiToken(request,env); if(auth) return auth;
+    if (path === '/api/captures/v2/pending' || path.startsWith('/api/captures/v2/pending/')) return pendingCaptures(request,env,path);
     return captureUploads(request,env,path);
   }
 
