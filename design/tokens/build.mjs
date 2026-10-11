@@ -109,7 +109,7 @@ ${Object.entries(tokens.space).map(([k, v]) => `        val S${k} = ${v}.dp`).jo
 `;
 }
 const outputs = [
-  ["design/tokens/dist/tokens.css", css()],
+  ["design/tokens/generated/tokens.css", css()],
   ["browser-extension/src/tokens.css", css()],
   ["android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnTokens.kt", kotlin()],
 ];
