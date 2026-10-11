@@ -11,7 +11,7 @@ node design/tokens/build.mjs --check  # CI：生成物与提交内容不一致�
 
 | 文件 | 用途 |
 |---|---|
-| `design/tokens/dist/tokens.css` | 网页工作区（cairn-x-enricher `internal/dashboard/web/tokens.css` 按钉住的 Worker 版本拷贝并校验） |
+| `design/tokens/generated/tokens.css` | 网页工作区（cairn-x-enricher `internal/dashboard/web/tokens.css` 按钉住的 Worker 版本拷贝并校验） |
 | `browser-extension/src/tokens.css` | 浏览器插件 |
 | `android/app/src/main/java/com/alpenl/cairn/share/ui/theme/CairnTokens.kt` | Android Compose 主题 |
 
