@@ -1,3 +1,5 @@
+import { computeHolds, holdInsertStatement, withoutHolds, type Hold } from "./ai-holds";
+import { readPreferences } from "./library-extras";
 import { historicalCatalog, managedCatalog } from "./tag-catalog";
 import { readJSONObject } from "./json-body";
 import { entityCacheRoute } from "./entity-cache";
@@ -248,7 +250,7 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
   const inputGuard = projectionInputGuard(id, projection);
   const storedAutomatic = { ...projection.automatic,
     entities: state === "completed_nonempty" ? entities as string[] : [] };
-  const storedView = effectiveView(storedAutomatic, projection.projectionInput.overrides);
+  const storedView = effectiveView({ ...projection.effectiveAutomatic, entities: storedAutomatic.entities }, projection.projectionInput.overrides);
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO entity_operations(operation_key,link_id,request_hash,evidence_snapshot_id,content_revision,content_hash,payload,outcome,created_at)
@@ -861,7 +863,10 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
   if (!snapshot || snapshot.link.content_revision !== link.content_revision ||
       snapshot.link.personal_revision !== link.personal_revision) return fail("run_stale", 409);
   const futureAutomatic = { ...automatic, entities: snapshot.automatic.entities };
-  const futureView = effectiveView(futureAutomatic, snapshot.projectionInput.overrides);
+  // E4: the AI tagging preferences decide which of this decision's terms wait for confirmation.
+  const aiHolds = computeHolds(futureAutomatic, (await readPreferences(env)).value);
+  const futureView = effectiveView(withoutHolds(futureAutomatic, aiHolds), snapshot.projectionInput.overrides);
+  const heldStatement = holdInsertStatement(env, operationKey, id, aiHolds, new Date().toISOString());
   const inputGuard = projectionInputGuard(id, snapshot);
   const guard: WriteGuard = {
     sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND content_revision=? AND personal_revision=?)
@@ -894,7 +899,7 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
     policyVersion: body.policy_version, policy: body.policy ?? {}, automatic, runIDs, personalRevision: link.personal_revision,
     operationKey, createdAt: new Date().toISOString(), payloadHash,
     ...(policyReplay ? { policyHash: String(body.policy_hash), replayTargetGeneration: target!.generation } : {})
-  }, guard), ...projectionWrites(env, id, link.personal_revision, futureView, futureAutomatic, true,
+  }, guard), ...(heldStatement ? [heldStatement] : []), ...projectionWrites(env, id, link.personal_revision, futureView, futureAutomatic, true,
     link.content_revision, false, 0, snapshot.projectionInput.classification,
     decisionProjectionGuard(id, snapshot, operationKey, payloadHash))];
   // A policy experiment is a real decision but does not claim that a different
@@ -1026,7 +1031,7 @@ async function recordOverride(
   const now = new Date().toISOString();
   const revision = snapshot.link.personal_revision + 1;
   const inputGuard = projectionInputGuard(id, snapshot);
-  const futureView = effectiveView(snapshot.automatic, [...snapshot.projectionInput.overrides,
+  const futureView = effectiveView(snapshot.effectiveAutomatic, [...snapshot.projectionInput.overrides,
     { field, term, action, source: "human", confirmed: true, revision }]);
   const projectedGuard = overrideProjectionGuard(id, snapshot, revision, operationKey, payloadHash);
   const accepted = `SELECT 1 FROM curation_overrides WHERE operation_key = ? AND link_id = ? AND revision = ? AND payload_hash = ?`;
@@ -1210,7 +1215,7 @@ export async function persistSelectionOverrides(
   });
   const payload = JSON.stringify(changes);
   const inputGuard = projectionInputGuard(id, snapshot);
-  const futureView = effectiveView(snapshot.automatic, [...snapshot.projectionInput.overrides, ...changes]);
+  const futureView = effectiveView(snapshot.effectiveAutomatic, [...snapshot.projectionInput.overrides, ...changes]);
   const selection = selectionFromView(futureView);
   const projectedGuard = selectionProjectionGuard(id, snapshot, revision, changes.map((entry) => entry.operation_key));
   let results: D1Result[];
@@ -1438,7 +1443,7 @@ export function projectionWrites(
 // projection or completion receipt can be written.
 export async function completionProjectionPlan(
   env: Env, id: number, classification: Classification, automatic: AutomaticView | null,
-  decisionKey: string | null, payloadHash: string, jobGuard: WriteGuard
+  decisionKey: string | null, payloadHash: string, jobGuard: WriteGuard, holds: Hold[] = []
 ): Promise<{ preGuard: WriteGuard; postGuard: WriteGuard; statements: D1PreparedStatement[] } | null> {
   const snapshot = await readSelectionSnapshot(env, id);
   if (!snapshot) return null;
@@ -1468,7 +1473,9 @@ export async function completionProjectionPlan(
     : snapshot.projected ? snapshot.automatic
       : { ...EMPTY_AUTOMATIC, topics: classification.topics, form: classification.form, use: classification.use,
         entities: snapshot.automatic.entities };
-  const view = effectiveView(futureAutomatic, snapshot.projectionInput.overrides);
+  // Held terms (E4) never reach the compatibility projections either.
+  const view = effectiveView(automatic !== null ? withoutHolds(futureAutomatic, holds)
+    : snapshot.projected ? snapshot.effectiveAutomatic : futureAutomatic, snapshot.projectionInput.overrides);
   const statements = projectionWrites(env, id, snapshot.link.personal_revision, view, futureAutomatic,
     projected, snapshot.contentRevision, automatic !== null ? false : snapshot.stale,
     snapshot.decisionId, JSON.stringify(classification), postGuard);

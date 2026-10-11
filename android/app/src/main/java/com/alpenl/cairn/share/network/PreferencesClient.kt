@@ -7,11 +7,14 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 import org.json.JSONObject
 
-/** Cross-device AI tagging preferences (/api/preferences), shared with the web settings page. */
+/**
+ * Cross-device AI tagging preferences (/api/preferences), shared with the web settings page.
+ * Defaults match the Worker: they keep the classifier's existing behaviour until the user changes them.
+ */
 internal data class AiPreferences(
-    val suggestionLimit: Int = 3,
+    val suggestionLimit: Int = 5,
     val confirmBeforeApply: Boolean = false,
-    val lowConfidenceReview: Boolean = true,
+    val lowConfidenceReview: Boolean = false,
 )
 
 internal data class PreferencesSnapshot(val value: AiPreferences, val revision: Long)

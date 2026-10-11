@@ -84,7 +84,9 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         val replacesUnknown = action == "set_empty" || (action == "reset" && term.isEmpty()) ||
             (field in setOf("carriers", "form", "use") && action == "accept")
         return result.copy(unknownResetFields = if (replacesUnknown) result.unknownResetFields - field else result.unknownResetFields,
-            pendingFields = result.pendingFields + field)
+            pendingFields = result.pendingFields + field,
+            // A confirmed or dismissed AI suggestion (E4) leaves the pending list immediately.
+            aiPending = if (action in setOf("accept", "confirm", "reject")) result.aiPending.filterNot { it.field == field && it.term == term } else result.aiPending)
     }
 
     /**

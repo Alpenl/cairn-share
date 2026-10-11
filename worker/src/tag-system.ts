@@ -160,7 +160,9 @@ async function applyActions(request: Request, env: Env, id: number) {
       const target = systemRef(action.tag_ref, catalog);
       if (!target) return fail("invalid_tag_ref");
       if (["accept", "confirm"].includes(name) && !selectable(target, catalog)) return fail("tag_deprecated", 409);
-      if (name === "confirm" && !((snapshot.view[target.field] ?? []) as string[]).includes(target.term)) return fail("tag_not_effective", 409);
+      // E4: a held AI suggestion (ai_pending) can be confirmed just like an applied one.
+      if (name === "confirm" && !((snapshot.view[target.field] ?? []) as string[]).includes(target.term) &&
+        !snapshot.state.ai_pending.some(p => p.field === target.field && p.term === target.term)) return fail("tag_not_effective", 409);
       add(target.field, target.term, name === "confirm" ? "accept" : name as OverrideAction);
     } else if (name === "replace") {
       const from = systemRef(action.from_tag_ref, catalog), to = systemRef(action.to_tag_ref, catalog);

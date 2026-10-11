@@ -1003,3 +1003,69 @@ it("returns the independent automatic baseline with the effective App selection"
   expect(after.automatic).toEqual(before.automatic);
   expect(after.revision).toBe(3);
 });
+
+// --- E4 confirm-before-apply ------------------------------------------------
+async function setAiPreferences(patch: Record<string, unknown>): Promise<void> {
+  const current = await (await request("preferences", undefined, "GET", "app")).json() as { revision: number };
+  const response = await request("preferences/operations", { operation_key: crypto.randomUUID(), expected_revision: current.revision, patch }, "POST", "app");
+  expect(response.status).toBe(200);
+}
+async function memberships(id: number): Promise<string[]> {
+  const rows = await env.DB.prepare("SELECT field||':'||term AS k FROM effective_tag_memberships WHERE link_id=? AND field IN ('topics','content_functions','resource_kinds') ORDER BY k").bind(id).all<{ k: string }>();
+  return rows.results.map((r) => r.k);
+}
+
+it("E4: confirm-before-apply holds AI tags until a person accepts or dismisses them", async () => {
+  await setAiPreferences({ ai_confirm_before_apply: true });
+  const id = await createLink();
+  const run = await submitRun(id, "e4-confirm");
+  const automatic = { ...emptyAutomatic, topics: ["llm", "eng"], content_functions: ["method"], form: "method", use: "try" };
+  expect((await submitDecision(id, run, automatic, "e4-confirm-decision")).status).toBe(200);
+  // The stored decision is untouched (replayable); only the fold skips held terms.
+  expect(JSON.parse(String(await env.DB.prepare("SELECT automatic FROM classification_decisions WHERE link_id=?").bind(id).first("automatic"))).topics).toEqual(["llm", "eng"]);
+  expect(await memberships(id)).toEqual([]);
+  let snap = (await readSelectionSnapshot(env as unknown as Env, id))!;
+  expect(snap.view.topics).toEqual([]);
+  expect(snap.state.ai_pending.map((p: { field: string; term: string; reason: string }) => `${p.field}:${p.term}:${p.reason}`).sort())
+    .toEqual(["content_functions:method:confirm", "topics:eng:confirm", "topics:llm:confirm"]);
+  expect((await request(`v2/links/${id}/overrides`, { field: "topics", term: "llm", action: "accept", operation_key: "e4-accept", expected_revision: snap.link.personal_revision })).status).toBe(200);
+  snap = (await readSelectionSnapshot(env as unknown as Env, id))!;
+  expect((await request(`v2/links/${id}/overrides`, { field: "topics", term: "eng", action: "reject", operation_key: "e4-reject", expected_revision: snap.link.personal_revision })).status).toBe(200);
+  snap = (await readSelectionSnapshot(env as unknown as Env, id))!;
+  expect(snap.view.topics).toEqual(["llm"]);
+  expect(await memberships(id)).toEqual(["topics:llm"]);
+  expect(snap.state.ai_pending.map((p: { term: string }) => p.term)).toEqual(["method"]);
+  // The SQL fold used by filters agrees with the TypeScript view.
+  const sqlTerms = await env.DB.prepare(`SELECT field||':'||term AS k FROM canonical_effective_tag_terms WHERE link_id=? AND field IN ('topics','content_functions') ORDER BY k`).bind(id).all<{ k: string }>();
+  expect(sqlTerms.results.map((r) => r.k)).toEqual(["topics:llm"]);
+});
+
+it("E4: the suggestion limit keeps the most confident primary tags and low confidence waits for review", async () => {
+  await setAiPreferences({ ai_suggestion_limit: 2, ai_low_confidence_review: true });
+  const id = await createLink();
+  const run = await submitRun(id, "e4-limit");
+  const decision = (term: string, probability: number) => ({ dimension: "topics", term_id: term, verdict: "accepted", reason: "test", probability });
+  const automatic = { ...emptyAutomatic, topics: ["llm", "eng", "eval"], content_functions: ["method"], form: "method", use: "try",
+    assessment: { version: 1, incomplete: [], decisions: [decision("llm", 0.95), decision("eng", 0.82), decision("eval", 0.99)] } } as AutomaticView;
+  expect((await submitDecision(id, run, automatic, "e4-limit-decision")).status).toBe(200);
+  const snap = (await readSelectionSnapshot(env as unknown as Env, id))!;
+  // eng is over the limit (dropped silently); llm and eval are confident enough.
+  expect([...snap.view.topics].sort()).toEqual(["eval", "llm"]);
+  expect(snap.state.ai_pending).toEqual([]);
+  expect(await memberships(id)).toEqual(["content_functions:method", "topics:eval", "topics:llm"]);
+  await setAiPreferences({ ai_suggestion_limit: 5 });
+  // A newer decision re-evaluates holds against the current preferences; 0.82 is low confidence.
+  expect((await submitDecision(id, run, automatic, "e4-limit-decision-2")).status).toBe(200);
+  const next = (await readSelectionSnapshot(env as unknown as Env, id))!;
+  expect([...next.view.topics].sort()).toEqual(["eval", "llm"]);
+  expect(next.state.ai_pending).toEqual([{ field: "topics", term: "eng", reason: "low_confidence", probability: 0.82 }]);
+});
+
+it("E4: default preferences hold nothing, preserving the classifier's behaviour", async () => {
+  const id = await createLink();
+  const run = await submitRun(id, "e4-default");
+  const automatic = { ...emptyAutomatic, topics: ["llm", "eng", "eval", "design"], form: "method", use: "try" };
+  expect((await submitDecision(id, run, automatic, "e4-default-decision")).status).toBe(200);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM ai_suggestion_holds WHERE link_id=?").bind(id).first("n")).toBe(0);
+  expect(await memberships(id)).toEqual(["topics:design", "topics:eng", "topics:eval", "topics:llm"]);
+});

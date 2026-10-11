@@ -190,3 +190,24 @@ it.each(["projection_mismatch", "retired_topic", "unknown_resource"])("independe
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_decisions WHERE link_id=?").bind(id).first("n")).toBe(0);
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM classification_operations WHERE link_id=?").bind(id).first("n")).toBe(0);
 });
+
+it("E4: a held AI suggestion is listed as pending and can be confirmed or dismissed", async () => {
+  const id = await link();
+  const run = await env.DB.prepare(`INSERT INTO classification_runs(link_id,content_revision,spec_id,spec_hash,target_generation,requested_model,policy_version,answers,operation_key,created_at)
+    VALUES (?,1,'s','h',0,'m','p','{}','e4-run',datetime('now'))`).bind(id).run();
+  const automatic = { topics: ["image_creation", "ai_coding"], content_functions: [], carriers: [], affordances: [], form: "", use: "", entities: [] };
+  const decision = await env.DB.prepare(`INSERT INTO classification_decisions(link_id,run_id,content_revision,policy_version,policy,automatic,operation_key,created_at)
+    VALUES (?,?,1,'p','{}',?,'e4-decision',datetime('now'))`).bind(id, Number(run.meta.last_row_id), JSON.stringify(automatic)).run();
+  for (const term of ["image_creation", "ai_coding"]) {
+    await env.DB.prepare(`INSERT INTO ai_suggestion_holds(decision_id,link_id,field,term,reason,created_at) VALUES (?,?,'topics',?,'confirm','t')`)
+      .bind(Number(decision.meta.last_row_id), id, term).run();
+  }
+  const before = await (await call(`bookmarks/${id}/tags`)).json() as { state: { ai_pending: Array<{ term: string }>; fields: { topics: { values: Array<{ term: string }> } } } };
+  expect(before.state.ai_pending.map(p => p.term)).toEqual(["image_creation", "ai_coding"]);
+  expect(before.state.fields.topics.values).toEqual([]);
+  expect((await action(id, [{ action: "confirm", tag_ref: "system/topics/image_creation" }, { action: "reject", tag_ref: "system/topics/ai_coding" }])).status).toBe(200);
+  const after = await (await call(`bookmarks/${id}/tags`)).json() as { state: { ai_pending: unknown[]; fields: { topics: { values: Array<{ term: string; confirmed?: boolean }> } } } };
+  expect(after.state.ai_pending).toEqual([]);
+  expect(after.state.fields.topics.values.map(v => [v.term, v.confirmed])).toEqual([["image_creation", true]]);
+  expect(await env.DB.prepare("SELECT GROUP_CONCAT(term) t FROM effective_tag_memberships WHERE link_id=? AND field='topics'").bind(id).first("t")).toBe("image_creation");
+});
