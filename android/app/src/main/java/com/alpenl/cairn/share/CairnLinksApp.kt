@@ -138,6 +138,7 @@ private object Routes {
     const val Offline = "offline"
     const val Collections = "collections"
     const val Tags = "tags"
+    const val Ai = "settings/ai"
 
     fun detail(id: Int): String = "detail/$id"
     fun edit(id: Int): String = "edit/$id"
@@ -302,7 +303,11 @@ internal fun CairnLinksApp(
                     onCancelDownload = viewModel::cancelLibraryDownload,
                     onFlushPersonal = viewModel::flushPersonalTags,
                     onOpenOffline = { navController.navigate(Routes.Offline) },
+                    onOpenAi = { navController.navigate(Routes.Ai) },
                 )
+            }
+            composable(Routes.Ai) {
+                AiSettingsScreen(state.apiBaseUrl, state.preferences.apiToken, onBack = { navController.popBackStack() })
             }
             composable(Routes.Search) {
                 SearchScreen(
