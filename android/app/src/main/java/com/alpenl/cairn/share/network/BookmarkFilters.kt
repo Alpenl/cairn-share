@@ -25,24 +25,31 @@ internal data class BookmarkFilters(
     val resourceMode: String = "any",
     val customMode: String = "any",
     val functionsMode: String = "any",
+    // 2026-10 tag-chip filter: system and personal tags in one list
+    // (system/<dimension>/<id>, custom/default/<id>), matched ANY or ALL.
+    val tags: List<String> = emptyList(),
+    val tagsMode: String = "any",
 ) {
     init {
-        require(listOf(topicsMode, resourceMode, customMode, functionsMode).all { it in setOf("any", "all") })
+        require(listOf(topicsMode, resourceMode, customMode, functionsMode, tagsMode).all { it in setOf("any", "all") })
     }
 
     fun needsEffectiveFilterContract(): Boolean = topic.isNotEmpty() || topics.isNotEmpty() || topicRefinements.isNotEmpty() ||
         form.isNotEmpty() || use.isNotEmpty() || contentFunctions.isNotEmpty() ||
         carriers.isNotEmpty() || affordances.isNotEmpty() || entityState.isNotEmpty() ||
-        resourceKinds.isNotEmpty() || customTags.isNotEmpty()
+        resourceKinds.isNotEmpty() || customTags.isNotEmpty() || tags.isNotEmpty()
 
     fun needsTagFilterContract(): Boolean = resourceKinds.isNotEmpty() || customTags.isNotEmpty() || topicRefinements.isNotEmpty() ||
-        (topicsMode == "all" && (topics.isNotEmpty() || topic.isNotBlank())) || (functionsMode == "all" && contentFunctions.isNotEmpty())
+        (topicsMode == "all" && (topics.isNotEmpty() || topic.isNotBlank())) || (functionsMode == "all" && contentFunctions.isNotEmpty()) ||
+        tags.isNotEmpty()
 
     fun parameters(now: Instant = Instant.now()): Map<String, String> = buildMap {
         put("curation_status", curationStatus)
         put("topic", topic)
         if (topics.isNotEmpty()) put("topics", topics.joinToString(","))
         if (topicRefinements.isNotEmpty()) put("topic_refinements", topicRefinements.joinToString(","))
+        if (tags.isNotEmpty()) put("tags", tags.distinct().joinToString(","))
+        if (tagsMode == "all" && tags.isNotEmpty()) put("tags_mode", "all")
         if (resourceKinds.isNotEmpty()) put("resource_kinds", resourceKinds.joinToString(","))
         if (customTags.isNotEmpty()) put("custom_tags", customTags.joinToString(","))
         if (topicsMode == "all" && (topics.isNotEmpty() || topic.isNotBlank())) put("topics_mode", topicsMode)
@@ -60,10 +67,37 @@ internal data class BookmarkFilters(
         if (recentDays > 0) put("since", now.minus(recentDays.toLong(), ChronoUnit.DAYS).toString())
     }.filterValues { it.isNotEmpty() }
 
+    /** Local twin of the Worker's `tags` / `tags_mode` clause. */
+    fun matchesTags(link: SavedLink): Boolean {
+        if (tags.isEmpty()) return true
+        val labels = link.enrichment?.classification
+        fun has(ref: String): Boolean {
+            val parts = ref.split('/')
+            if (parts.size != 3) return false
+            val (kind, dimension, id) = parts
+            if (kind == "custom") return link.customTags.any { it.id == id }
+            return when (dimension) {
+                "topics" -> id in labels?.topics.orEmpty()
+                "resource_kinds" -> id in labels?.resourceKinds.orEmpty()
+                "content_functions" -> id in labels?.contentFunctions.orEmpty()
+                "carriers" -> id in labels?.carriers.orEmpty()
+                "affordances" -> id in labels?.affordances.orEmpty()
+                "forms" -> labels?.form == id
+                "uses" -> labels?.use == id
+                else -> false
+            }
+        }
+        val refs = tags.distinct()
+        return if (tagsMode == "all") refs.all(::has) else refs.any(::has)
+    }
+
+    fun toggleTag(ref: String): BookmarkFilters = copy(tags = if (ref in tags) tags - ref else tags + ref)
+
     fun matches(link: SavedLink, now: Instant = Instant.now()): Boolean {
         val data = link.enrichment
         val labels = data?.classification
         return (curationStatus.isBlank() || (data?.curationStatus?.apiValue ?: "inbox") == curationStatus) &&
+            matchesTags(link) &&
             matchesValues(topics + listOf(topic).filter { it.isNotBlank() }, labels?.topics.orEmpty(), topicsMode) &&
             matchesValues(topicRefinements, labels?.topics.orEmpty(), "all") &&
             (form.isBlank() || labels?.form == form) && (use.isBlank() || labels?.use == use) &&
