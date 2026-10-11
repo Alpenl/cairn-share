@@ -18,5 +18,9 @@
 .batch-task [data-status]::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--hairline); }
 .batch-task [data-status="failed"] { color: var(--danger); } .batch-task [data-status="failed"]::before { background: var(--terracotta); }
 .batch-task [data-status="captured"] { color: var(--olive-ink); } .batch-task [data-status="captured"]::before { background: var(--olive); }
-.batch-task [data-status="running"]::before, .batch-task [data-status="opening"]::before { background: var(--clay); }
+.batch-task [data-status="capturing"]::before, .batch-task [data-status="opening"]::before { background: var(--clay); }
 @media (max-width: 520px) { .batch-controls { position: static; } }
+.batch-hint { margin: 0 0 16px; }
+.batch-empty { padding: 12px 0; }
+.batch-sub { margin: 2px 0 8px; }
+.batch .opt-section > .section-heading { margin-bottom: 8px; }

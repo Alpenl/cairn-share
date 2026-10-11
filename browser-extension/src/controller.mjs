@@ -169,5 +169,6 @@ export function createController({ store, client, now = Date.now, uuid = () => c
   }
 
   async function collections(){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await tokenIdentity(state.settings.token);try{const items=await client.collections(state.settings.token);if((await read()).settings.token!==state.settings.token)throw new CaptureError("queue_connection");await update(current=>{current.collectionCatalog={binding,items,at:now()}});return {items,cached:false,binding};}catch(error){if(state.collectionCatalog?.binding===binding)return {items:state.collectionCatalog.items,cached:true,binding};throw error;}}
-  return { snapshot, saveSettings, enqueue, flush, remove, collections, newId: uuid };
+  async function lookup(url){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await tokenIdentity(state.settings.token);const result=await client.lookup(state.settings.token,url);return {binding,result};}
+  return { snapshot, saveSettings, enqueue, flush, remove, collections, lookup, newId: uuid };
 }

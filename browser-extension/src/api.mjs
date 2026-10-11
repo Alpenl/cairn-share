@@ -46,6 +46,9 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, timeoutMs 
     },
     async receipt(token, id) { return request(token, `/api/captures/v2/${id}`, null, {missing:true}); },
     async collections(token) {const data=await request(token,"/api/collections",null,{collections:true});if(!Array.isArray(data.items))throw new CaptureError("response");return data.items;},
+    // Already-saved lookup. Older Workers answer 404; the popup then simply
+    // shows no badge.
+    async lookup(token,url){const data=await request(token,`/api/links/lookup?url=${encodeURIComponent(url)}`,null,{missing:true});if(data===null)return null;if(typeof data?.saved!=="boolean")throw new CaptureError("response");return data;},
     async addCollection(token,id,body){return request(token,`/api/collections/${id}/operations`,body,{collections:true});},
     async test(token) {
       const data = await request(token, "/api/links?limit=1");

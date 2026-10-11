@@ -1,19 +1,37 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cairn · 批量补采正文</title><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="batch.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cairn · 批量补采正文</title><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="batch.css"></head>
 <body class="options batch">
-  <header class="app-header"><div class="brand"><img src="icons/48.png" alt="" width="24" height="24"><span>Cairn</span></div><a href="options.html">设置与待同步</a></header>
-  <main>
-    <section class="card batch-intro"><span class="eyebrow">从手机收藏，到完整阅读</span><h1>批量补采正文</h1><p class="muted">为收藏库中缺少正文的链接，逐篇打开页面、采集正文和媒体，然后关闭采集页。已有正文的收藏会自动跳过。</p><p class="hint">使用当前浏览器的登录状态。首次使用需要允许访问网站；遇到登录、验证或加载失败，会留下原因，继续下一篇。</p></section>
-    <section class="card batch-controls" aria-label="采集进度">
-      <div class="section-heading"><h2 id="phase">准备就绪</h2><span id="count" class="muted"></span></div>
-      <progress id="progress" max="1" value="0" aria-label="本轮采集进度"></progress>
-      <p id="detail" class="muted" aria-live="polite">点击开始，扫描所有缺少正文的收藏。</p>
-      <div class="batch-actions"><button id="start" class="primary" type="button">一键采集所有待办</button><button id="resume" class="primary" type="button" hidden>继续采集</button><button id="pause" class="secondary" type="button" hidden>暂停采集</button><button id="retry-failed" class="secondary" type="button" hidden>重试失败项</button></div>
-      <p id="status" class="status" role="status" aria-live="polite" hidden></p>
-      <p class="hint">关闭此面板后仍会继续。暂停只停止打开和采集页面，已采集的内容继续上传；重启浏览器后需手动继续。</p>
-    </section>
-    <section class="card"><div class="section-heading"><h2>本轮任务</h2><span id="totals" class="muted"></span></div><div id="tasks"><p class="muted">尚未开始</p></div><button id="more" type="button" class="text-button" hidden>显示更多任务</button></section>
-    <section class="card"><div class="section-heading"><h2>待同步 <span id="pending-count">0</span></h2><button id="retry-all" class="text-button" type="button" hidden>全部重试</button></div><p class="muted">“已采集”表示内容已保存在本机。正文、图片与视频的上传进度在这里显示。</p><div id="queue"></div></section>
-  </main><script type="module" src="batch-ui.mjs"></script>
+<div class="opt-shell">
+  <nav class="opt-nav" aria-label="设置分区">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><ellipse cx="12" cy="18.6" rx="7.6" ry="2.7"/><ellipse cx="11.5" cy="12.7" rx="5.4" ry="2.5"/><ellipse cx="12.3" cy="7.4" rx="3.4" ry="2.1"/></svg></span><span class="brand-name">Cairn</span><span class="brand-sub">插件设置</span></div>
+    <div class="nav-label">连接与同步</div>
+    <a href="options.html#connection"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15.5 7.5a3.5 3.5 0 1 1-4.9 3.2L4 17.3V20h2.7l.8-.8V17.5h1.7l.8-.8V15h1.7l1.1-1.1a3.5 3.5 0 0 1 2.7-6.4Z"/></svg><span>连接</span></a>
+    <a href="options.html#queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg><span>待同步队列</span></a>
+    <div class="nav-label">采集</div>
+    <a href="options.html#capture"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v14H4zM8 9h8M8 13h5"/></svg><span>采集</span></a>
+    <a href="options.html#media"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5c0 4.4 3 8.3 7 9.5 4-1.2 7-5.1 7-9.5V6Z"/></svg><span>媒体授权</span></a>
+    <div class="nav-label">工具</div>
+    <a href="batch.html" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5h3M17 5h3v3M20 16v3h-3M7 19H4v-3M8 12h8"/></svg><span>批量补采正文</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-8 8M18 14v5H5V6h5"/></svg></a>
+    <div class="nav-label">系统</div>
+    <a href="options.html#about"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 11v5M12 8h.01"/></svg><span>关于</span></a>
+      </nav>
+  <main class="opt-main">
+    <header class="opt-head"><p class="crumb">工具 / 批量补采正文</p><h1>批量补采正文</h1><p>为收藏库中缺少正文的链接，逐篇打开页面、采集正文和媒体，然后关闭采集页。已有正文的收藏会自动跳过。</p></header>
+    <div class="opt-body">
+      <p class="hint batch-hint">使用当前浏览器的登录状态。首次使用需要允许访问网站；遇到登录、验证或加载失败，会留下原因，继续下一篇。</p>
+      <section class="card batch-controls opt-section" aria-label="采集进度">
+        <div class="section-heading"><h2 id="phase">准备就绪</h2><span id="count" class="muted"></span></div>
+        <progress id="progress" max="1" value="0" aria-label="本轮采集进度"></progress>
+        <p id="detail" class="muted" aria-live="polite">点击开始，扫描所有缺少正文的收藏。</p>
+        <div class="batch-actions"><button id="start" class="primary" type="button">一键采集所有待办</button><button id="resume" class="primary" type="button" hidden>继续采集</button><button id="pause" class="secondary" type="button" hidden>暂停采集</button><button id="retry-failed" class="secondary" type="button" hidden>重试失败项</button></div>
+        <p id="status" class="status" role="status" aria-live="polite" hidden></p>
+        <p class="hint">关闭此页面后仍会继续。暂停只停止打开和采集页面，已采集的内容继续上传；重启浏览器后需手动继续。</p>
+      </section>
+      <section class="opt-section"><div class="section-heading"><h2>本轮任务</h2><span id="totals" class="muted"></span></div><div class="card"><div id="tasks" class="batch-list"><p class="muted batch-empty">尚未开始</p></div></div><button id="more" type="button" class="text-button" hidden>显示更多任务</button></section>
+      <section class="opt-section"><div class="section-heading"><h2>待同步 <span id="pending-count">0</span></h2><button id="retry-all" class="text-button" type="button" hidden>全部重试</button></div><p class="muted batch-sub">「已采集」表示内容已保存在本机。正文、图片与视频的上传进度在这里显示。</p><div class="card"><div id="queue" class="queue-wrap"></div></div></section>
+    </div>
+  </main>
+</div>
+<script type="module" src="batch-ui.mjs"></script>
 </body></html>

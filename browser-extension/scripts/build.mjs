@@ -61,6 +61,9 @@ export async function build({ outputRoot = join(projectRoot, "dist"), apiBase = 
     const folder = join(outputRoot, browser);
     await rm(folder, { recursive: true, force: true });
     await cp(join(projectRoot, "src"), folder, { recursive: true });
+    // Self-hosted fonts come from the shared design system (design/fonts).
+    await mkdir(join(folder, "fonts"), { recursive: true });
+    for (const name of ["dm-sans-latin-wght-normal.woff2", "source-serif-4-latin-wght-normal.woff2", "OFL-DM-Sans.txt", "OFL-Source-Serif-4.txt"]) await cp(join(projectRoot, "../design/fonts", name), join(folder, "fonts", name));
     await bundle({entryPoints:[join(projectRoot,"src/extractor.mjs")],bundle:true,format:"iife",platform:"browser",target:"es2022",minify:true,legalComments:"eof",outfile:join(folder,"capture-extractor.js")});
     await rm(join(folder,"extractor.mjs"));
     const licenses=[];

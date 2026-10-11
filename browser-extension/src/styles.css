@@ -24,7 +24,9 @@ textarea, input[type="password"], input[type="text"], input[type="search"] {
   width: 100%; padding: 9px 11px; border: 1px solid var(--hairline); border-radius: var(--r-field); background: var(--surface); color: var(--ink);
   transition: border-color var(--t-fast), box-shadow var(--t-fast);
 }
-textarea:focus, input:focus { border-color: var(--kraft); box-shadow: 0 0 0 3px rgba(212,162,127,.2); }
+textarea:focus, input:not([type="checkbox"]):focus { border-color: var(--kraft); box-shadow: 0 0 0 3px rgba(212,162,127,.2); }
+/* Text fields show the soft kraft ring instead of the focus outline. */
+textarea:focus-visible, input:not([type="checkbox"]):focus-visible { outline: none; }
 textarea { resize: none; line-height: 1.55; display: block; }
 textarea::placeholder, input::placeholder { color: var(--faint); }
 textarea[readonly] { background: var(--secondary); }
@@ -34,6 +36,7 @@ textarea[readonly] { background: var(--secondary); }
   background: var(--terracotta); color: var(--on-accent); font-size: 14px; font-weight: 600; box-shadow: inset 0 -1px 0 rgba(0,0,0,.08); transition: background var(--t-fast); }
 .primary:hover:not(:disabled) { background: var(--terracotta-deep); }
 .primary:disabled { background: var(--warm); color: var(--tertiary); box-shadow: none; }
+.kbd[data-k]::after { content: attr(data-k); }
 .primary .kbd { background: rgba(255,255,255,.16); border-color: rgba(255,255,255,.22); color: rgba(255,255,255,.88); }
 .primary:disabled .kbd { background: transparent; border-color: rgba(20,20,19,.12); color: var(--tertiary); }
 .secondary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: var(--r-btn);
@@ -139,7 +142,7 @@ body.popup { width: 380px; max-height: 600px; display: flex; flex-direction: col
 
 .reason { border: 1px solid var(--hairline); border-radius: var(--r-field); background: var(--surface); transition: border-color var(--t-fast), box-shadow var(--t-fast); }
 .reason:focus-within { border-color: var(--kraft); box-shadow: 0 0 0 3px rgba(212,162,127,.2); }
-.reason textarea { border: 0; box-shadow: none !important; background: transparent; min-height: 64px; max-height: 168px; padding: 10px 12px 2px; font-size: 14px; field-sizing: content; }
+.reason textarea, .reason textarea:focus { border: 0; box-shadow: none; background: transparent; min-height: 64px; max-height: 168px; padding: 10px 12px 2px; font-size: 14px; field-sizing: content; }
 .reason-foot { display: flex; align-items: center; gap: 6px; padding: 4px 8px 7px 12px; font-size: 11px; color: var(--faint); }
 .character-count { margin-left: auto; font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .character-count.near { color: #a8805f; font-weight: 500; }
@@ -203,3 +206,5 @@ body.options { min-height: 100vh; }
 .privacy { color: var(--tertiary); font-size: 12px; line-height: 1.7; }
 .privacy p + p { margin-top: 8px; }
 @media (max-width: 720px) { .opt-shell { flex-direction: column; } .opt-nav { width: auto; height: auto; position: static; } .opt-head, .opt-body { padding-left: 18px; padding-right: 18px; } }
+.token-field > button { flex: none; white-space: nowrap; height: 38px; }
+.opt-body > .status { margin-bottom: 18px; }
