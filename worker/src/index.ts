@@ -1,6 +1,8 @@
 import { captureUploads } from './capture-uploads';
 import { pendingCaptures } from './pending-captures';
 import { drainCollectionRules } from "./collection-rules";
+import { drainTagMerges, tagMergeRoute } from "./tag-merges";
+import { libraryExtrasRoute } from "./library-extras";
 import { managedCatalog, filterCatalog, tagCatalogRoute } from "./tag-catalog";
 import { collectionOrganizingRoute } from "./collection-organizing";
 import { collectionsRoute, collectionID } from "./collections";
@@ -327,6 +329,7 @@ export default {
     await maintainPrivacy(env);
     await maintainLibrarySync(env);
     await drainCollectionRules(env,100);
+    await drainTagMerges(env,100);
   },
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const timing = new TimingCollector();
@@ -342,11 +345,12 @@ export default {
     let response: Response | null = null;
     try {
       response = await handleRequest(request, env, timing);
-      if(response.ok && request.method!=="GET" && request.method!=="OPTIONS" && ctx) ctx.waitUntil(drainCollectionRules(env).catch(()=>{}));
+      if(response.ok && request.method!=="GET" && request.method!=="OPTIONS" && ctx) ctx.waitUntil(drainCollectionRules(env).then(()=>drainTagMerges(env,10)).catch(()=>{}));
       const policy = await policyRead;
       response = withServerTiming(response, timing);
       if (response.ok) response.headers.set("X-Cairn-Sync", "1");
-      if (request.headers.get("X-Cairn-Collections") === "1") response.headers.set("X-Cairn-Collections", "1");
+      const collectionsHeader = request.headers.get("X-Cairn-Collections");
+      if (collectionsHeader === "1" || collectionsHeader === "2") response.headers.set("X-Cairn-Collections", collectionsHeader);
       if (contentFunctionsAware(request)) response.headers.set("X-Cairn-Content-Functions", "1");
       if (request.headers.get("X-Cairn-Search-Summary") === "1") response.headers.set("X-Cairn-Search-Summary", "1");
       if (request.headers.get("X-Cairn-Tag-System") === "1") response.headers.set("X-Cairn-Tag-System", "1");
@@ -579,6 +583,18 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const denied=path.startsWith("/api/v2/")?requireEnricherToken(request,env):requireApiToken(request,env);
     if(denied!==null)return denied;
     return tagCatalogRoute(request,env,path);
+  }
+
+  if (/^\/api\/tag-catalog\/(?:usage|merges)(?:\/|$)/.test(path)) {
+    const denied=requireApiToken(request,env);
+    if(denied!==null)return denied;
+    return (await tagMergeRoute(request,env,path)) ?? error("not_found",404);
+  }
+
+  if (["/api/links/lookup","/api/links/legacy-dropped","/api/preferences","/api/preferences/operations"].includes(path)) {
+    const denied=requireApiToken(request,env);
+    if(denied!==null)return denied;
+    return (await libraryExtrasRoute(request,env,path))!;
   }
 
   if(path==="/api/enrichment/collection-rules/drain") {

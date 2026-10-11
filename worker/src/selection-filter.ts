@@ -83,7 +83,7 @@ export const entityStateSQL = `COALESCE((SELECT CASE WHEN e.state<>'not_run' AND
           AND s.content_revision=e.content_revision AND s.content_hash=e.content_hash))
       THEN 'stale' ELSE e.state END FROM entity_states e WHERE e.link_id=links.id),'not_run')`;
 
-export const SELECTION_FILTER_KEYS = ["filter_contract_version", "topic", "form", "use", ...dimensions, "entity_state", "custom_tags", "topics_mode", "resource_mode", "custom_mode", "functions_mode", "resource_kind", "custom_tag", "topic_mode", "topic_refinements"];
+export const SELECTION_FILTER_KEYS = ["filter_contract_version", "topic", "form", "use", ...dimensions, "entity_state", "custom_tags", "topics_mode", "resource_mode", "custom_mode", "functions_mode", "resource_kind", "custom_tag", "topic_mode", "topic_refinements", "tags", "tags_mode", "tags_children"];
 
 export function selectionFilters(params: URLSearchParams, catalog?: Taxonomy): { clauses: string[]; bindings: string[] } | null {
   params = new URLSearchParams(params);
@@ -142,6 +142,42 @@ export function selectionFilters(params: URLSearchParams, catalog?: Taxonomy): {
       WHERE a.link_id=links.id AND t.owner_id='default' AND a.tag_id IN(SELECT value FROM json_each(?))) ${params.get("custom_mode") === "all" ? `= ${terms.length}` : "> 0"}`);
     bindings.push(JSON.stringify(terms));
   }
+  // Unified tag-chip filter: system and personal tags in one list, ANY or ALL.
+  // tags_children=1 lets a parent topic also match its direct and indirect children.
+  if (params.has("tags")) {
+    const entries = params.getAll("tags");
+    if (entries.length !== 1 || entries[0].length > 4096) return null;
+    for (const key of ["tags_mode", "tags_children"]) if (params.getAll(key).length > 1) return null;
+    const mode = params.get("tags_mode") ?? "any", children = params.get("tags_children") ?? "0";
+    if (!["any", "all"].includes(mode) || !["0", "1"].includes(children)) return null;
+    const refs = [...new Set(entries[0].split(","))];
+    if (!refs.length || refs.length > 32) return null;
+    const slots: Array<{ kind: "system" | "custom"; field?: string; terms?: string[]; term?: string }> = [];
+    for (const ref of refs) {
+      const system = ref.match(/^system\/(topics|resource_kinds|content_functions|carriers|affordances|forms|uses)\/([a-z][a-z0-9_]{0,39})$/);
+      if (system) {
+        const [, dimension, id] = system;
+        if (!findTerm(dimension, id, catalog)) return null;
+        const terms = [id];
+        if (children === "1" && dimension === "topics" && catalog) {
+          for (let i = 0; i < terms.length && terms.length <= 64; i++) {
+            for (const t of catalog.topics) if (t.relations?.some(r => r.kind === "broader" && r.id === terms[i]) && !terms.includes(t.id)) terms.push(t.id);
+          }
+        }
+        slots.push({ kind: "system", field: dimension === "forms" ? "form" : dimension === "uses" ? "use" : dimension, terms });
+        continue;
+      }
+      const custom = ref.match(/^custom\/default\/([A-Za-z0-9-]{1,80})$/);
+      if (!custom) return null;
+      slots.push({ kind: "custom", term: custom[1] });
+    }
+    clauses.push(`(SELECT COUNT(*) FROM json_each(?) slot WHERE
+      (json_extract(slot.value,'$.kind')='system' AND EXISTS(SELECT 1 FROM effective_tag_memberships e
+        WHERE e.link_id=links.id AND e.field=json_extract(slot.value,'$.field') AND e.term IN (SELECT value FROM json_each(slot.value,'$.terms'))))
+      OR (json_extract(slot.value,'$.kind')='custom' AND EXISTS(SELECT 1 FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id
+        WHERE a.link_id=links.id AND t.owner_id='default' AND a.tag_id=json_extract(slot.value,'$.term')))) ${mode === "all" ? `= ${slots.length}` : "> 0"}`);
+    bindings.push(JSON.stringify(slots));
+  } else if (params.has("tags_mode") || params.has("tags_children")) return null;
   if (params.has("entity_state")) {
     const entries = params.getAll("entity_state");
     const states = entries[0].split(',');
