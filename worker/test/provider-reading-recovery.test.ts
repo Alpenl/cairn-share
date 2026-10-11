@@ -19,7 +19,7 @@ function call(path: string, body?: unknown, token = "internal", method = "POST")
 const fetchKey = "a".repeat(64);
 const readingKey = "e".repeat(64);
 const source = (image_urls: string[] = []) => ({ original_text: "Persisted primary source",
-  original_language: "en", context_text: "", related_links: [], image_urls, model: "grok-test" });
+  original_language: "en", context_text: "", related_links: [], image_urls, model: "manual" });
 const recovery = (reading = { ai_title: "中文阅读辅助标题测试", original_language: "en",
   translated_text: "完整译文", summary: "阅读摘要", model: "grok-test" }) => ({
   operation_key: readingKey, response_id: "resp_reading", actor: "ops@example.org", reading });
@@ -27,19 +27,13 @@ const recovery = (reading = { ai_title: "中文阅读辅助标题测试", origin
 async function fixture(imageURLs: string[] = [], persistEvidence = true) {
   const created = await call("links", { url: "https://x.com/u/status/100" }, "app");
   const { id } = await created.json() as { id: number };
+ await env.DB.prepare("UPDATE links SET original_text=? WHERE id=?").bind("fixture archived original",id).run();
   const claimed = await call("enrichment/jobs/claim", {});
   expect(claimed.status).toBe(200);
   const job = await claimed.json() as { lease_token: string; content_revision: number };
-  expect((await call(`enrichment/jobs/${id}/lease-admit`, {
-    lease_token: job.lease_token, stage: "fetch", min_remaining_ms: 210_000
-  })).status).toBe(200);
   const permit = { operation_key: fetchKey, request_hash: "b".repeat(64), model: "grok-test",
-    stage: "fetch", variant: "fetch_thread", attempt_number: 1, link_id: id,
+    stage: "reading", variant: "reading", attempt_number: 1, link_id: id,
     lease_token: job.lease_token, content_revision: job.content_revision, min_remaining_ms: 210_000 };
-  expect((await call("enrichment/provider-attempts/reserve", permit)).status).toBe(200);
-  expect((await call("enrichment/provider-attempts/settle", { operation_key: fetchKey, http_status: 200,
-    response_id: "resp_fetch", input_tokens: 100, output_tokens: 20, total_tokens: 120,
-    x_search_calls: 1, cost_usd_ticks: 1000 })).status).toBe(200);
   expect((await call(`enrichment/jobs/${id}/source`, {
     lease_token: job.lease_token, source: source(imageURLs)
   })).status).toBe(200);
@@ -95,7 +89,7 @@ it("recovers a settled reading once without changing source, classification or h
   expect((await env.DB.prepare("SELECT COUNT(*) n FROM enrichment_provider_reading_recoveries")
     .first<{ n: number }>())?.n).toBe(1);
   expect((await env.DB.prepare("SELECT COUNT(*) n FROM enrichment_provider_attempts WHERE link_id=?")
-    .bind(id).first<{ n: number }>())?.n).toBe(2);
+    .bind(id).first<{ n: number }>())?.n).toBe(1);
   expect(await env.DB.prepare(`SELECT reading_payload,source_payload,images_payload,lease_token
     FROM enrichment_provider_reading_recoveries WHERE operation_key=?`).bind(readingKey).first())
     .toMatchObject({ reading_payload: null, source_payload: null, images_payload: null, lease_token: null });

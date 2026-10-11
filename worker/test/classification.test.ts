@@ -19,11 +19,11 @@ async function request(path: string, body?: unknown, method = "POST", token = "i
 async function setup(url = "https://x.com/a/status/123") {
   const create = await request("links", { url, note: "test" }, "POST", "app");
   const { id } = await create.json() as { id: number };
+ await env.DB.prepare("UPDATE links SET original_text=? WHERE id=?").bind("fixture archived original",id).run();
   const leased = await request(`enrichment/jobs/${id}/claim`);
   const { lease_token } = await leased.json() as { lease_token: string };
-  await settleFixtureAttempt((path, body) => request(path, body), id, lease_token, "fetch");
   const source = { original_text: "A guide to evaluating LLMs", original_language: "en", context_text: "A related comment",
-    related_links: [], image_urls: [], model: "grok-test" };
+    related_links: [], image_urls: [], model: "manual" };
   expect((await request(`enrichment/jobs/${id}/source`, { lease_token, source })).status).toBe(200);
   expect((await request(`v2/links/${id}/evidence`, { snapshot: {
     blocks: [{ id: "primary", role: "primary", text: source.original_text }],
@@ -229,6 +229,8 @@ it("shares provider cooldown across jobs and grants only one half-open probe", a
   expect(await paused.json()).toMatchObject({ error: "component_paused" });
   const sourceCreate = await request("links", { url: "https://x.com/a/status/504" }, "POST", "app");
   const sourceID = (await sourceCreate.json() as { id: number }).id;
+  expect((await request(`enrichment/jobs/${sourceID}/claim`)).status).toBe(409);
+  await env.DB.prepare("UPDATE links SET original_text='captured original' WHERE id=?").bind(sourceID).run();
   expect((await request(`enrichment/jobs/${sourceID}/claim`)).status).toBe(200);
   for (const id of [second.id, third.id]) {
     expect(await env.DB.prepare("SELECT attempts FROM classification_jobs WHERE link_id=?").bind(id).first("attempts")).toBe(0);

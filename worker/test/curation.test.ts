@@ -24,7 +24,9 @@ async function request(path: string, method = "GET", body?: unknown, bearer = to
 async function create(url = "https://x.com/example/status/123"): Promise<number> {
   const response = await request("/api/links", "POST", { url, note: "收藏备注" }, appToken);
   expect(response.status).toBe(201);
-  return (await response.json() as { id: number }).id;
+  const { id } = await response.json() as {id:number};
+  await env.DB.prepare("UPDATE links SET original_text='fixture archived original' WHERE id=?").bind(id).run();
+  return id;
 }
 
 function classification(extra: Partial<Classification> = {}): Classification {

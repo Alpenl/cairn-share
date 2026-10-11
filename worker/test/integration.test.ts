@@ -20,7 +20,9 @@ async function request(path: string, body?: unknown, method = "POST", token = "i
 
 async function createLink(url = "https://x.com/a/status/1"): Promise<number> {
   const response = await request("links", { url, note: "note" }, "POST", "app");
-  return (await response.json() as { id: number }).id;
+  const { id } = await response.json() as {id:number};
+  await env.DB.prepare("UPDATE links SET original_text='fixture archived original' WHERE id=?").bind(id).run();
+  return id;
 }
 
 it("applies every migration and exposes the v2 tables", async () => {
@@ -66,10 +68,10 @@ it("keeps the six legacy fields stable while v2 data exists", async () => {
 
 it("classifies independently of reading and preserves source on reading failure", async () => {
   const id = await createLink();
+ await env.DB.prepare("UPDATE links SET original_text=? WHERE id=?").bind("fixture archived original",id).run();
   const claim = await request(`enrichment/jobs/${id}/claim`);
   const { lease_token } = await claim.json() as { lease_token: string };
-  await settleFixtureAttempt((path, body) => request(path, body), id, lease_token, "fetch");
-  const source = { original_text: "archived text", original_language: "en", context_text: "", related_links: [], image_urls: [], model: "grok" };
+  const source = { original_text: "archived text", original_language: "en", context_text: "", related_links: [], image_urls: [], model: "manual" };
   expect((await request(`enrichment/jobs/${id}/source`, { lease_token, source })).status).toBe(200);
   // Reading fails, but the source remains readable and classification can run.
   expect((await request(`enrichment/jobs/${id}/fail`, { lease_token, error: "reading failed" })).status).toBe(200);

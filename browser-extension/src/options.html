@@ -2,16 +2,19 @@
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cairn · 设置</title><link rel="stylesheet" href="styles.css"></head>
 <body class="options">
-  <header class="app-header"><div class="brand"><img src="icons/48.png" alt="" width="28" height="28"><span>Cairn</span></div><span class="muted">浏览器收藏</span></header>
-  <main><p class="eyebrow">你的收藏，随处可读</p><h1>连接与偏好</h1><p class="intro">浏览器与 Android 使用同一份收藏库。填写 Android 设置中使用的访问令牌即可连接。</p>
+  <header class="app-header"><div class="brand"><img src="icons/48.png" alt="" width="24" height="24"><span>Cairn</span></div><span class="muted">设置</span></header>
+  <main>
     <form id="settings-form" class="card">
-      <label for="server">服务器</label><input id="server" readonly type="url"><p class="muted">收藏会提交到这里，随后由服务处理 X 增强内容。</p>
-      <label for="token">访问令牌</label><div class="token-field"><input id="token" type="password" autocomplete="off" maxlength="512" placeholder="填写访问令牌"><button id="show-token" type="button" class="text-button" aria-label="显示访问令牌">显示</button></div><p id="token-help" class="muted">令牌仅保存在当前浏览器，不参与浏览器账号同步。</p>
-      <label class="check"><input id="keep-full-url" type="checkbox" checked><span>保留完整链接 <small>包含 query 和 fragment，与 Android 默认行为一致。</small></span></label>
+      <h2>连接</h2>
+      <p class="muted">与 Android 使用同一份收藏库，填写 Android 设置中的访问令牌。</p>
+      <label for="token">访问令牌</label><div class="token-field"><input id="token" type="password" autocomplete="off" maxlength="512" placeholder="填写访问令牌"><button id="show-token" type="button" class="text-button" aria-label="显示访问令牌">显示</button></div>
+      <p class="hint">服务器 <span id="server"></span> · 令牌只保存在当前浏览器。</p>
+      <label class="check"><input id="keep-full-url" type="checkbox" checked><span>保留完整链接 <small>包含问号后的参数和 # 片段，与 Android 一致。</small></span></label>
       <label id="move-pending-label" class="check" hidden><input id="move-pending" type="checkbox"><span id="move-pending-text"></span></label>
-      <button id="connect" type="submit" class="primary" disabled>测试并保存连接</button><p id="status" class="status" role="status" aria-live="polite" hidden></p>
+      <button id="connect" type="submit" class="primary" disabled>测试并保存</button><p id="status" class="status" role="status" aria-live="polite" hidden></p>
     </form>
-    <section class="queue-section card"><div class="section-heading"><h2>待上传 <span id="pending-count">0</span></h2><button id="retry-all" class="text-button" type="button" hidden>全部重试</button></div><p class="muted">关闭弹窗后仍会上传。连接中断时保存在本机，浏览器运行期间自动重试。</p><div id="queue"></div></section>
-    <section class="privacy"><h2>如何收藏</h2><p>点击工具栏图标，填写可选备注并保存；也可以右键收藏页面或链接。快捷键 <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> 打开收藏面板。</p><p>扩展只发送你主动收藏的链接、备注和重试标识。页面标题用于本机展示；不读取网页正文、表单、Cookie 或浏览历史。卸载扩展会清除本机草稿和待上传收藏。</p></section>
+    <section class="queue-section card"><div class="section-heading"><h2>待同步 <span id="pending-count">0</span></h2><button id="retry-all" class="text-button" type="button" hidden>全部重试</button></div><p class="muted">关闭弹窗后仍会在后台上传，失败时保留在本机。</p><div id="queue"></div></section>
+    <section class="card"><h2>图片与媒体</h2><p class="muted">保存时只会申请当前文章用到的图片站点。若跨站图片经常缺失，可一次性允许读取所有网站的图片；只在你收藏时使用。</p><button id="image-permission" class="secondary" type="button">允许读取所有网站的图片</button></section>
+    <section class="privacy"><p>点击工具栏图标、按 <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>，或右键页面/链接即可收藏。</p><p>只在你保存时读取当前页已加载的正文和媒体，不读取表单、Cookie 或浏览历史。卸载扩展会清除本机草稿和待同步内容。详见随附的隐私说明。</p></section>
   </main><footer>Cairn 浏览器扩展 <span id="version"></span></footer><script type="module" src="options.mjs"></script>
 </body></html>

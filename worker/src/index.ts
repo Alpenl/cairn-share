@@ -25,7 +25,7 @@ import { emitProviderRecovery, emitRequest, emitWorkerBusiness, logExporterStatu
   type ProviderRecoveryEvent, type RequestD1Stats, type WorkerBusinessEvent } from "./observability";
 import { providerCheckRoute } from "./provider-checks";
 import { providerAttemptRoute, PROVIDER_ATTEMPT_LIMITS } from "./provider-attempts";
-import { MAX_ENRICHMENT_ATTEMPTS, SOURCE_CLAIM_CANDIDATE_SQL, SOURCE_GATE_READY_SQL,
+import { CAPTURED_SOURCE_SQL, MAX_ENRICHMENT_ATTEMPTS, SOURCE_CLAIM_CANDIDATE_SQL, SOURCE_GATE_READY_SQL,
   SOURCE_NEXT_COMPONENT_SQL, X_LINK_SQL,
   sourceClaimCandidateBindings, sourceClaimSQL } from "./source-claim";
 
@@ -74,6 +74,8 @@ type EnrichmentStatus = "pending" | "processing" | "completed" | "failed" | "exh
 type EnrichmentFilter = EnrichmentStatus | "unsupported";
 
 interface EnrichmentListRow {
+  has_source?: number;
+  source_available?: number;
   search_excerpt?: string;
   content_revision?: number;
   personal_revision?: number;
@@ -126,7 +128,7 @@ interface EnrichmentCountRow {
   unsupported: number;
 }
 
-type ErrorCode =
+type ErrorCode = "capture_required"
   | "invalid_json"
   | "invalid_expected_revision"
   | "invalid_content_type"
@@ -209,12 +211,13 @@ const READ_CACHE_TTL_SECONDS = 15;
 // The overview is polled every 30s. Its generation key changes on writes, so
 // retain an unchanged snapshot across polls without delaying invalidation.
 const OVERVIEW_CACHE_TTL_SECONDS = 15 * 60;
-const CACHE_VERSION = "4";
+const CACHE_VERSION = "5";
 const CACHE_ORIGIN = "https://cairn-share-cache.internal";
 const LINKS_CACHE_GENERATION_KEY = "links_generation";
 const LINK_COLUMNS = "id, url, note, created_at, learned, learned_at";
 const ENRICHMENT_COLUMNS = `enrichment_status, enrichment_attempts, enrichment_next_retry_at,
   enrichment_paid_uncertain, enrichment_paid_stage,
+  CASE WHEN original_text IS NOT NULL AND original_text<>'' THEN 1 ELSE 0 END AS has_source,
   ai_title, original_language, summary, images, enrichment_model, enrichment_error,
   enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
   CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable`;
@@ -1290,7 +1293,8 @@ async function getEnrichmentJob(env: Env, id: number, timing: TimingCollector, w
               ai_title, original_language, original_text,
               translated_text, ${presentationColumns}, summary, related_links, images, enrichment_model,
               enrichment_error, enrichment_updated_at, enriched_at, classification, curation, why, curation_status,
-              CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable${cacheIdentityColumns(withIdentity)}
+              CASE WHEN ${X_LINK_SQL} THEN 1 ELSE 0 END AS processable,
+              CASE WHEN original_text IS NOT NULL AND original_text<>'' THEN 1 ELSE 0 END AS has_source${cacheIdentityColumns(withIdentity)}
               ${tagAware ? "," + tagSummaryColumns() : ""}
          FROM links
         WHERE id = ?`
@@ -1335,7 +1339,7 @@ async function getEnrichmentReading(env: Env, id: number, timing: TimingCollecto
   const row = snapshot.link as unknown as EnrichmentDetailRow;
   const bodyUnchanged = knownBodyRevision >= 0 && row.app_body_revision === knownBodyRevision;
   const processable = /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\//i.test(row.url) ? 1 : 0;
-  const mapped = mapEnrichmentListItem({ ...row, processable,
+  const mapped = mapEnrichmentListItem({ ...row, processable, has_source:row.source_available,
     cache_decision_id: snapshot.decisionId,
     cache_entity_revision: snapshot.entity?.revision ?? 0 }, true);
   // The same SQL statement supplies body, effective tags, custom definitions
@@ -1539,7 +1543,7 @@ async function claimEnrichmentJob(request: Request, env: Env, timing: TimingColl
   const row = results[0].results[0] as EnrichmentJobRow | undefined;
 
   if (row === undefined) {
-    return await pausedSourceGate(env) ?? new Response(null, { status: 204, headers: CORS_HEADERS });
+    return await pausedSourceGate(env, "reading") ?? new Response(null, { status: 204, headers: CORS_HEADERS });
   }
 
   if (Number(results[1].meta.changes) === 1) {
@@ -1581,6 +1585,7 @@ async function claimEnrichmentJobById(
               enrichment_updated_at = ?
         WHERE id = ?
           AND ${X_LINK_SQL}
+          AND ${CAPTURED_SOURCE_SQL}
           AND enrichment_paid_uncertain=0
           AND (COALESCE(enrichment_error,'') <> 'budget_exhausted'
             OR enrichment_next_retry_at IS NULL OR enrichment_next_retry_at<=?)
@@ -1616,11 +1621,12 @@ async function claimEnrichmentJobById(
   }
 
   const existing = await timing.measure("db-check", () =>
-    env.DB.prepare(`SELECT id FROM links WHERE id = ? AND ${X_LINK_SQL}`)
+    env.DB.prepare(`SELECT id,original_text FROM links WHERE id = ? AND ${X_LINK_SQL}`)
       .bind(id)
-      .first<{ id: number }>()
+      .first<{ id: number; original_text: string | null }>()
   );
   if (existing === null) return error("not_found", 404);
+  if (!existing.original_text) return error("capture_required", 409);
   const stage = await env.DB.prepare(`SELECT ${SOURCE_NEXT_COMPONENT_SQL} AS component
     FROM links WHERE id=?`).bind(id).first<{ component: "source" | "reading" }>();
   return await pausedSourceGate(env, stage?.component) ?? error("job_busy", 409);
@@ -1646,9 +1652,10 @@ async function admitPaidSourceStage(
       (stage !== "fetch" && stage !== "reading" && stage !== "legacy_unknown")) {
     return error("invalid_enrichment");
   }
+  if (stage !== "reading") return error("capture_required", 410);
   const now = new Date();
   const deadline = new Date(now.getTime() + Number(minRemaining)).toISOString();
-  const component = stage === "fetch" ? "source" : stage;
+  const component = "reading";
   const admitted = await timing.measure("db", () => env.DB.prepare(`UPDATE links
     SET enrichment_paid_stage=?
     WHERE id=? AND enrichment_status='processing' AND enrichment_lease_token=?
@@ -1675,7 +1682,7 @@ async function admitPaidSourceStage(
   if (!current) return error("not_found", 404);
   if (current.enrichment_status !== "processing" || current.enrichment_lease_token !== token ||
       current.enrichment_lease_until === null) return error("lease_conflict", 409);
-  if (stage !== "legacy_unknown" && current.enrichment_paid_uncertain === 0 &&
+  if (current.enrichment_paid_uncertain === 0 &&
       current.enrichment_lease_until >= deadline &&
       (current.enrichment_paid_stage === null || current.enrichment_paid_stage === stage)) {
     const gate = await timing.measure("db-check", () => env.DB.prepare(`SELECT state,probe_token,probe_until,retry_at
@@ -2720,9 +2727,8 @@ function mapEnrichmentJob(row: EnrichmentJobRow, includeComponent = false): Reco
     lease_token: row.enrichment_lease_token,
     lease_until: row.enrichment_lease_until,
     content_revision: row.content_revision,
-    // A non-zero epoch is an explicit, one-shot refresh intent the processor
-    // must consume instead of reusing a stored source (R2-06).
-    refresh_epoch: row.refresh_epoch ?? 0,
+    // Retain the legacy field without authorizing a source fetch.
+    refresh_epoch: 0,
     ...(includeComponent ? { source_component: row.source_component } : {})
   };
 }
@@ -2752,7 +2758,8 @@ function mapEnrichmentListItem(row: EnrichmentListRow, withIdentity = false): Re
     related_links: parseStoredRelatedLinks(row.related_links),
     images: parseStoredImages(row.images, row.id),
     model: row.enrichment_model,
-    error: row.enrichment_error,
+    error: processable && row.enrichment_status !== "completed" && row.has_source === 0
+      ? "capture_required" : row.enrichment_error,
     paid_call_unresolved: row.enrichment_paid_uncertain === 1,
     paid_stage: row.enrichment_paid_stage,
     updated_at: row.enrichment_updated_at,

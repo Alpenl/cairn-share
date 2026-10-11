@@ -2,21 +2,27 @@
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>收藏到 Cairn</title><link rel="stylesheet" href="styles.css"></head>
 <body class="popup">
-  <header class="app-header"><div class="brand"><img src="icons/48.png" alt="" width="28" height="28"><span>Cairn</span></div><button id="settings" class="text-button" type="button">设置</button></header>
+  <header class="app-header"><div class="brand"><img src="icons/48.png" alt="" width="22" height="22"><span>Cairn</span></div><button id="settings" class="icon-button" type="button" aria-label="设置" title="设置"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-2-1.2L14.5 3h-4l-.4 2.6a7.6 7.6 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.4l-2 1.6 2 3.4 2.4-1a7.6 7.6 0 0 0 2 1.2l.4 2.6h4l.4-2.6a7.6 7.6 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2Z"/></svg></button></header>
   <main>
-    <h1>留住这一页</h1>
-    <p id="connection" class="muted"></p>
+    <section id="setup" class="setup" hidden><h1>连接你的收藏库</h1><p class="muted">填写访问令牌后，就能一键收藏网页。</p><button id="open-settings" class="primary" type="button">去设置</button></section>
     <form id="capture-form">
-      <label for="url">链接</label><textarea id="url" class="url-input" rows="2" maxlength="8192" spellcheck="false" required placeholder="https://…"></textarea>
-      <p id="page-title" class="page-title"></p><p id="url-policy" class="muted"></p>
-      <label for="note">备注 <span class="optional">可选</span></label><textarea id="note" rows="2" maxlength="2000" placeholder="为什么想留下它？"></textarea><div id="note-count" class="character-count">0 / 2000</div>
-      <div class="section-heading"><label>加入合集 <span class="optional">可选</span></label><button id="refresh-collections" class="text-button" type="button">刷新</button></div><div id="collection-choices" class="collection-choices"></div><p id="collection-status" class="muted"></p>
-      <label class="check capture-check"><input id="capture-page" type="checkbox" checked><span>同时保存正文、图片、视频和音频</span></label>
-      <p id="capture-hint" class="muted"></p>
-      <button id="image-permission" class="text-button" type="button">允许读取媒体站点</button>
+      <div id="page-card" class="page-card" hidden>
+        <img id="favicon" alt="" width="16" height="16" hidden>
+        <div class="page-text"><p id="page-title" class="page-title"></p><p id="page-host" class="page-host"></p></div>
+        <button id="edit-url" class="text-button" type="button">改链接</button>
+      </div>
+      <div id="url-field" class="field" hidden><textarea id="url" class="url-input" rows="2" maxlength="8192" spellcheck="false" required placeholder="粘贴要收藏的链接" aria-label="链接"></textarea></div>
+      <p id="url-policy" class="hint" hidden></p>
+      <div class="field"><textarea id="note" rows="2" maxlength="2000" placeholder="添加备注（可选）" aria-label="备注"></textarea><div id="note-count" class="character-count" hidden></div></div>
+      <div id="collections" class="collections" hidden><span class="field-label">合集</span><div id="collection-choices" class="collection-choices"></div></div>
+      <label id="capture-option" class="check capture-check" hidden><input id="capture-page" type="checkbox" checked><span>同时保存正文和图片</span></label>
     </form>
-
-    <section class="queue-section"><div class="section-heading"><h2>待上传 <span id="pending-count">0</span></h2><button id="retry-all" type="button" class="text-button" hidden>全部重试</button></div><div id="queue"></div></section>
-  </main><div class="save-dock"><p id="status" class="status" role="status" aria-live="polite" hidden></p><button id="save" form="capture-form" class="primary" type="submit" disabled>保存收藏</button><button id="recapture" class="text-button" type="button" hidden>重新采集并更新原收藏</button><span class="muted shortcut">⌘ / Ctrl + Enter 保存</span></div><footer>与 Android 收藏同步 · <span id="server"></span></footer>
+    <section id="queue-section" class="queue-section" hidden>
+      <div class="section-heading"><h2>待同步 <span id="pending-count">0</span></h2><button id="retry-all" type="button" class="text-button" hidden>全部重试</button></div>
+      <div id="queue"></div>
+      <button id="image-permission" class="text-button" type="button" hidden>允许读取媒体站点</button>
+    </section>
+  </main>
+  <div id="save-dock" class="save-dock"><p id="status" class="status" role="status" aria-live="polite" hidden></p><button id="save" form="capture-form" class="primary" type="submit" title="Ctrl / ⌘ + Enter" disabled>保存</button><button id="recapture" class="text-button recapture" type="button" hidden>重新采集并更新原收藏</button></div>
   <script type="module" src="popup.mjs"></script>
 </body></html>

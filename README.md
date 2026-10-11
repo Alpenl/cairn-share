@@ -124,8 +124,8 @@ curl -X PATCH https://share.alpenl.com/api/links/1 \
 ```
 
 `PATCH` 可单独或组合修改 `url`、`note`、`learned`。`url` 变化会让已存来源失效
-（等待重新抓取），但保留人工整理结果；`note` 只改个人备注，保留已抓取的原文、译文和
-图片，不触发重新抓取。再次传 `{"learned":false}` 可以把已学习链接改回未学习。
+（等待浏览器插件重新采集），但保留人工整理结果；`note` 只改个人备注，保留已抓取的原文、译文和
+图片，不触发重新采集。再次传 `{"learned":false}` 可以把已学习链接改回未学习。
 
 ### 分类目标握手（v2，可选）
 
@@ -337,15 +337,12 @@ GitHub secret 值。
 
 它做的事情：
 
-1. 按轮询间隔调用 `POST /api/enrichment/jobs/claim` 领取尚未处理的 X 收藏，Worker 用
-   原子更新和 15 分钟 lease 分发任务，允许多实例并发而不重复领取。
-2. 用 Grok Responses API 和服务端 `x_search` 读取原帖及评论。
-3. 通过 `POST /api/enrichment/jobs/:id/images` 归档图片，只接受
-   `https://pbs.twimg.com/media/...`，由 Worker 校验响应类型和大小后写入 R2，D1 只保存
-   对象引用。
-4. 通过 `POST /api/enrichment/jobs/:id/complete` 或 `.../fail` 回写结果：AI 中文标题、
-   原始语言全文、简体中文译文、摘要和内容相关链接。失败由 Worker 按
-   `1m / 5m / 30m / 2h` 退避，最多尝试 5 次。
+1. 浏览器插件通过 `/api/captures` 或 `/api/captures/v2` 保存原文、相关链接和媒体。仅保存 URL 的收藏等待采集，不领取处理租约或调用模型获取原文。
+2. 按轮询间隔调用 `POST /api/enrichment/jobs/claim` 领取已有原文的 X 收藏；Worker 用原子更新和 15 分钟 lease 分发任务，允许多实例并发而不重复领取。
+3. Grok Responses API 仅处理已归档原文，生成标题、译文和摘要；独立 Jev 队列、标签、合集规则及人工整理流程保持不变。
+4. 通过 `POST /api/enrichment/jobs/:id/complete` 或 `.../fail` 回写阅读结果。阅读失败仍按 `1m / 5m / 30m / 2h` 退避，最多尝试 5 次。现有图片、视频和相关链接继续复用归档。
+
+配套升级先应用 `0062_browser_source_only.sql` 并发布 Worker，再更新 Enricher。迁移只新增已采集正文的队列索引，不修改历史内容。旧 fetch 付费许可、fallback 和 refresh-source 入口返回 `capture_required`；历史调用的结算、核对及恢复保留。网页显式粘贴原文仍作为人工修复入口。
 
 它同时在本机监听一个局域网页面（NAS 部署映射到 `8088`），提供收藏列表、独立阅读页和
 手动触发处理。该页面会展示收藏内容并可以触发付费模型请求，只应开放在可信局域网，不要

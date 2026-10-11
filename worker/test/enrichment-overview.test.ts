@@ -35,7 +35,7 @@ it("keeps the single-row overview private, versioned and generation cached", asy
     attention: 0, queued: 0 });
   expect(first.headers.get("Cache-Control")).toBe("private, no-store");
   const generation = await env.DB.prepare("SELECT value FROM cache_metadata WHERE key='links_generation'").first<number>("value");
-  const cacheUrl = `https://cairn-share-cache.internal/api/enrichment/overview?v=4&g=${generation}&host=test.example`;
+  const cacheUrl = `https://cairn-share-cache.internal/api/enrichment/overview?v=5&g=${generation}&host=test.example`;
   const stored = await caches.default.match(new Request(cacheUrl));
   expect(stored?.headers.get("Cache-Control")).toBe("public, max-age=900, s-maxage=900");
   expect((await call("enrichment/overview")).headers.get("X-Cairn-Cache")).toBe("HIT");
