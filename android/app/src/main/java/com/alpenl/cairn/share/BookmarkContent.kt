@@ -102,7 +102,8 @@ internal fun BookmarkCuration(
     Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(enrichment.curationStatus.label, style = MaterialTheme.typography.titleMedium)
+                // 2026-10: 整理状态 is no longer shown or edited (the field is kept server-side).
+                Text("收藏原因", style = MaterialTheme.typography.titleMedium)
                 TextButton(onClick = { editing = true; onLoadTaxonomy() }, enabled = !busy, modifier = Modifier.testTag("edit_curation")) {
                     Text("整理")
                 }
@@ -136,7 +137,8 @@ private fun CurationDialog(
     onSave: (CurationUpdate) -> Unit,
 ) {
     var why by rememberSaveable { mutableStateOf(enrichment.why) }
-    var status by rememberSaveable { mutableStateOf(enrichment.curationStatus) }
+    // Saved back unchanged: the redesign keeps the legacy status but never edits it.
+    val status = enrichment.curationStatus
     var topics by rememberSaveable { mutableStateOf(enrichment.classification?.topics.orEmpty()) }
     var form by rememberSaveable { mutableStateOf(enrichment.classification?.form.orEmpty()) }
     var use by rememberSaveable { mutableStateOf(enrichment.classification?.use.orEmpty()) }
@@ -146,12 +148,6 @@ private fun CurationDialog(
         title = { Text("整理收藏") },
         text = {
             Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    for (value in CurationStatus.entries) FilterChip(
-                        selected = value == status, onClick = { status = value }, enabled = !busy,
-                        label = { Text(value.label) }, modifier = Modifier.testTag("curation_status_${value.apiValue}"),
-                    )
-                }
                 OutlinedTextField(
                     value = why, onValueChange = { why = it }, label = { Text("收藏原因") },
                     supportingText = { Text("$whyLength / 200") }, isError = whyLength > 200,
@@ -397,14 +393,6 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
                         modifier = Modifier.padding(start = 6.dp).size(14.dp))
                 }
                 if (advanced) {
-                    Text("整理状态", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for (status in CurationStatus.entries) QuietFilterTag(label = status.label,
-                            selected = filters.curationStatus == status.apiValue,
-                            onClick = { onChange(filters.copy(curationStatus = if (filters.curationStatus == status.apiValue) "" else status.apiValue)) },
-                            modifier = Modifier.testTag("filter_curation_${status.apiValue}"),
-                        )
-                    }
                     Text("来源与时间", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         for ((value, label) in listOf("x" to "X", "wechat" to "公众号", "other" to "其他来源")) QuietFilterTag(label = label,

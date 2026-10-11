@@ -119,11 +119,11 @@ class EnrichmentInstrumentedTest {
             compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("edit_curation"))
             compose.onNodeWithTag("edit_curation").performClick()
             compose.onNodeWithTag("curation_why").performTextReplacement("用于项目评审")
-            compose.onNodeWithTag("curation_status_kept").performClick()
             compose.onNodeWithTag("save_curation").performClick()
             compose.waitUntil(20_000) { edit.get() != null }
             assertEquals("用于项目评审", edit.get().getString("why"))
-            assertEquals("kept", edit.get().getString("curation_status"))
+            // 整理状态 is no longer editable; the stored value is sent back unchanged.
+            assertEquals("inbox", edit.get().getString("curation_status"))
             compose.waitUntil(20_000) { compose.onAllNodesWithTag("save_curation").fetchSemanticsNodes().isEmpty() }
             compose.onNodeWithTag("detail_content").performScrollToNode(hasText("用于项目评审"))
             compose.onNodeWithText("用于项目评审").assertIsDisplayed()
