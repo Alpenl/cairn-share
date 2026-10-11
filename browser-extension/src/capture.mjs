@@ -47,6 +47,12 @@ export async function discoverMedia(pageURL, found, fetcher = fetch) {
 }
 
 export async function mediaPermissions(ext, tabId, url) {
+  return (await pagePreview(ext,tabId,url)).origins;
+}
+
+// One preview pass serves both the permission request and the popup's
+// one-line capture summary (characters · images · videos).
+export async function pagePreview(ext, tabId, url) {
   await prepareExtractor(ext,tabId);
   const [{result}] = await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[url,true]});
   const origins = new Set();
@@ -54,5 +60,6 @@ export async function mediaPermissions(ext, tabId, url) {
     try {const u=new URL(item.url);if(/^https?:$/.test(u.protocol))origins.add(`${u.protocol}//${u.hostname}/*`);}catch{}
   }
   if (/(^|\.)(x|twitter)\.com$/.test(new URL(url).hostname)) {origins.add('https://cdn.syndication.twimg.com/*');origins.add('https://video.twimg.com/*');}
-  return [...origins];
+  const media=result?.media||[];
+  return {origins:[...origins],stats:{chars:(result?.text||'').length,images:(result?.images||[]).length,videos:media.filter(m=>m.kind==='video').length,audios:media.filter(m=>m.kind==='audio').length,truncated:Boolean(result?.truncated)}};
 }
