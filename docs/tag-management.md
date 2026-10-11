@@ -31,7 +31,7 @@ Android `collections.db` 从2升级至3，单独保存当前账号的目录和�
 | 0064 | `tag_merges` 合并记录与 `tag_merge_queue` 逐条迁移队列 |
 | 0065 | `preferences` 跨设备 AI 打标偏好（单行 + CAS + 幂等回执） |
 
-接口（均需 App 令牌）：
+接口（App 令牌走 `/api/...`；NAS 工作区用内部令牌走 `/api/v2/tag-catalog/...` 与 `/api/enrichment/...` 同名路径）：
 
 - `rule` 操作新增 `exclude_tag_refs`、`admission`、`confirmed_only`（v2）。`backfill` 在待审模式下写入候选而非直接加入。
 - `GET /api/collections/:id/rules/candidates?status=pending|ignored|accepted`、`GET /api/collections/review-summary`；操作 `review_accept` / `review_ignore`（`link_ids`）。合集列表多返回 `pending_review_count`，预览返回 `counts`（将加入、待审、已忽略、被排除标签挡住）。

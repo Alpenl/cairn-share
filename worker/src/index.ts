@@ -585,16 +585,22 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     return tagCatalogRoute(request,env,path);
   }
 
-  if (/^\/api\/tag-catalog\/(?:usage|merges)(?:\/|$)/.test(path)) {
-    const denied=requireApiToken(request,env);
+  // App clients use /api/...; the NAS workspace proxies the same handlers with
+  // its internal token under /api/v2/tag-catalog/... and /api/enrichment/....
+  if (/^\/api\/(?:v2\/)?tag-catalog\/(?:usage|merges)(?:\/|$)/.test(path)) {
+    const denied=path.startsWith("/api/v2/")?requireEnricherToken(request,env):requireApiToken(request,env);
     if(denied!==null)return denied;
     return (await tagMergeRoute(request,env,path)) ?? error("not_found",404);
   }
 
-  if (["/api/links/lookup","/api/links/legacy-dropped","/api/preferences","/api/preferences/operations"].includes(path)) {
-    const denied=requireApiToken(request,env);
-    if(denied!==null)return denied;
-    return (await libraryExtrasRoute(request,env,path))!;
+  {
+    const extras=["/api/links/lookup","/api/links/legacy-dropped","/api/preferences","/api/preferences/operations"];
+    const internalExtra=path.startsWith("/api/enrichment/")&&extras.includes(path.replace("/api/enrichment/","/api/"));
+    if (extras.includes(path) || internalExtra) {
+      const denied=internalExtra?requireEnricherToken(request,env):requireApiToken(request,env);
+      if(denied!==null)return denied;
+      return (await libraryExtrasRoute(request,env,internalExtra?path.replace("/api/enrichment/","/api/"):path))!;
+    }
   }
 
   if(path==="/api/enrichment/collection-rules/drain") {

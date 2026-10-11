@@ -123,3 +123,13 @@ it('counts legacy dropped bookmarks for the read-only settings notice',async()=>
  await env.DB.prepare("UPDATE links SET curation_status='drop' WHERE id IN(1,3)").run();
  expect((await call('links/legacy-dropped')).data).toEqual({count:2});
 });
+
+it('serves the same extras to the NAS workspace with its internal token only',async()=>{
+ const get=(path:string,token:string)=>worker.fetch(new Request('https://v2.example'+path,{headers:{...headers,Authorization:'Bearer '+token}}),binding());
+ expect((await get('/api/enrichment/preferences','internal')).status).toBe(200);
+ expect((await get('/api/enrichment/preferences','app')).status).toBe(401);
+ expect((await get('/api/enrichment/links/legacy-dropped','internal')).status).toBe(200);
+ expect((await get('/api/v2/tag-catalog/usage','internal')).status).toBe(200);
+ expect((await get('/api/v2/tag-catalog/usage','app')).status).toBe(401);
+ expect((await get('/api/tag-catalog/usage','internal')).status).toBe(401);
+});
