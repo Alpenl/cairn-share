@@ -1,5 +1,5 @@
 import type { Env } from './index';
-import { collectionID, collectionsRoute } from './collections';
+import { collectionID, collectionsRoute, collectionsVersion } from './collections';
 import { readJSONObject } from './json-body';
 import { canonicalJSON } from './domain';
 const reply=(v:unknown,status=200)=>new Response(JSON.stringify(v),{status,headers:{'Content-Type':'application/json','Cache-Control':'private, no-store','X-Cairn-Collections':'1'}});
@@ -62,7 +62,8 @@ async function autoApply(env:Env,current:Run){
  await env.DB.prepare('UPDATE collection_organizing_runs SET auto_finished=1 WHERE id=?').bind(current.id).run();
 }
 export async function collectionOrganizingRoute(request:Request,env:Env,path:string,internal:boolean):Promise<Response>{
- if(request.headers.get('X-Cairn-Collections')!=='1')return fail('capability_mismatch',409);
+ // Protocol 2 only adds rule fields to collections; organizing is unchanged.
+ if(!collectionsVersion(request))return fail('capability_mismatch',409);
  const root='/api/collections/organizing';const suffix=path.slice(root.length);
  if(request.method==='GET'&&suffix===''){
   const rows=await env.DB.prepare("SELECT r.*,(SELECT COUNT(*) FROM collection_organizing_items WHERE run_id=r.id) AS total,(SELECT COUNT(*) FROM collection_organizing_items WHERE run_id=r.id AND status IN('queued','processing')) AS pending,(SELECT COUNT(*) FROM collection_organizing_items WHERE run_id=r.id AND status='ready') AS review_count,(SELECT COUNT(*) FROM collection_organizing_items WHERE run_id=r.id AND status='failed') AS failed FROM collection_organizing_runs r ORDER BY created_at DESC LIMIT 30").all();return reply({items:rows.results.map(r=>({...r,definitions:JSON.parse(r.definitions as string)}))});
