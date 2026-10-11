@@ -331,7 +331,7 @@ internal fun CairnLinksApp(
             }
             composable(Routes.Offline) {
                 ScreenColumn {
-                    DetailTopBar(title = "离线阅读", onBack = { navController.popBackStack() })
+                    DetailTopBar(title = "离线阅读", onBack = { navController.popBackStack() }, large = true)
                     Text("本机保存的正文与图片；可在设置中下载或更新全部资料。", style = MaterialTheme.typography.bodySmall)
                     LinkList(items = state.offlineLinks.sortedWith(compareByDescending<SavedLink> { state.offlineReads[it.id]?.pinned == true }.thenByDescending { it.id }),
                         onTagFilter = onTagFilter,
@@ -688,6 +688,7 @@ private fun PendingUploadsScreen(
         DetailTopBar(
             title = "待上传队列",
             onBack = onBack,
+            large = true,
             actions = {
                 IconButton(
                     onClick = onRetryAll,
@@ -1188,7 +1189,7 @@ private fun UpdateScreen(
         AppUpdateState.UpToDate -> null
     }
     ScreenColumn(scroll = true) {
-        DetailTopBar(title = "检查更新", onBack = onBack)
+        DetailTopBar(title = "检查更新", onBack = onBack, large = true)
         UpdatePanel(
             updateState = state.updateState,
             currentVersionName = state.currentVersionName,
@@ -1220,6 +1221,7 @@ private fun ApiConsoleScreen(
         DetailTopBar(
             title = "API 调试台",
             onBack = onBack,
+            large = true,
             actions = {
                 IconButton(
                     onClick = {
@@ -1246,6 +1248,7 @@ private fun ApiConsoleScreen(
             onValueChange = onPathChange,
             label = { Text("路径") },
             singleLine = true,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
             shape = RoundedCornerShape(18.dp),
             modifier = Modifier.fillMaxWidth(),
         )
@@ -1308,7 +1311,7 @@ private fun AboutScreen(
     onOpenExternal: (String) -> Unit,
 ) {
     ScreenColumn(scroll = true) {
-        DetailTopBar(title = "关于", onBack = onBack)
+        DetailTopBar(title = "关于", onBack = onBack, large = true)
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1396,6 +1399,7 @@ internal fun AppHeader(
 private fun DetailTopBar(
     title: String,
     onBack: () -> Unit,
+    large: Boolean = false,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     Row(
@@ -1406,10 +1410,11 @@ private fun DetailTopBar(
         IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", modifier = Modifier.size(20.dp))
         }
+        // Settings sub-pages use the serif page title (like 标签库 / AI 打标); the reader keeps a quiet label.
         Text(
             title,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Normal,
+            style = if (large) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.bodyMedium,
+            fontWeight = if (large) null else FontWeight.Normal,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

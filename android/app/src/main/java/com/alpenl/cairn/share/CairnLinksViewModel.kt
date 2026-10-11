@@ -699,7 +699,8 @@ internal class CairnLinksViewModel(
         )
         refreshJob = viewModelScope.launch {
             if (offlineReads.syncState(accountKey).cursor != null) {
-                uiState = uiState.copy(loading = false)
+                // Sync reports its own progress; the list-refresh banner must not linger.
+                uiState = uiState.copy(loading = false, statusText = "")
                 downloadLibrary(useSync = true)
                 return@launch
             }
@@ -714,7 +715,7 @@ internal class CairnLinksViewModel(
                 when (result) {
                     is LinkPageResult.Loaded -> {
                         if (repository.supportsSync) {
-                            uiState = uiState.copy(loading = false)
+                            uiState = uiState.copy(loading = false, statusText = "")
                             downloadLibrary(useSync = true)
                             return@launch
                         }

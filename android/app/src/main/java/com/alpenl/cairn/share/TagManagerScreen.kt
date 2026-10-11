@@ -102,6 +102,8 @@ private fun toneOf(dimension: String) = when (dimension) { "topics" -> TagTone.T
     val p = CairnTheme.palette
     val writable = state.payload != null && state.pending == null && !busy
 
+    // The detail is a page inside this route: system back returns to the list.
+    androidx.activity.compose.BackHandler(enabled = editing != null) { editing = null }
     editing?.let { (dim, term) ->
         val tag = tags.firstOrNull { it.dimension == dim && term.has("id") && it.id == term.optString("id") }
         TagDetailPage(dim, term, tag?.let(::countOf) ?: 0, writable, tags.filter { it.dimension == "topics" && it.active },
@@ -206,7 +208,7 @@ private fun toneOf(dimension: String) = when (dimension) { "topics" -> TagTone.T
     }
 }
 
-@Composable private fun TypePill(label: String, selected: Boolean, tone: TagTone? = null, onClick: () -> Unit) {
+@Composable internal fun TypePill(label: String, selected: Boolean, tone: TagTone? = null, onClick: () -> Unit) {
     val p = CairnTheme.palette
     Row(Modifier.heightIn(min = 34.dp).clip(RoundedCornerShape(10.dp)).background(if (selected) p.ink else p.surface)
         .then(if (selected) Modifier else Modifier.border(1.dp, p.hairlineSoft, RoundedCornerShape(10.dp)))

@@ -2,6 +2,11 @@ package com.alpenl.cairn.share
 
 import android.content.Context
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.selection.selectable
@@ -115,27 +120,50 @@ internal class CollectionController(val context:Context,val base:String,val toke
     var deleting by remember{mutableStateOf(false)};var filters by remember{mutableStateOf(BookmarkFilters())};var showFilters by remember{mutableStateOf(false)}
     var reviewing by remember{mutableStateOf<CollectionPending?>(null)}
     var selecting by remember{mutableStateOf(false)};var checked by remember{mutableStateOf(setOf<Int>())}
+    // System back leaves a collection before it leaves the page, matching the 返回 button.
+    androidx.activity.compose.BackHandler(enabled=selected!=null){selected=null;checked=emptySet();selecting=false}
     val record=c.state.collections.find{it.id==selected};val members=c.state.members.filter{it.collection==selected}.sortedBy{it.position}
     val catalog=remember(links){links.associateBy{it.id}}
     val counts=remember(c.state.members){c.state.members.groupingBy{it.collection}.eachCount()}
+    val p=com.alpenl.cairn.share.ui.theme.CairnTheme.palette
     ScreenColumn {
-        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
-            TextButton(onClick={if(selected!=null){selected=null;checked=emptySet();selecting=false}else onBack()}){Text("返回")}
-            Text(record?.name?:"合集",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,maxLines=1,overflow=TextOverflow.Ellipsis)
-            TextButton(onClick={c.refresh();onRefreshLibrary()},enabled=!c.working){Text("刷新")}
-            TextButton(onClick={if(record==null)creating=true else editor=true}){Text(if(record==null)"新建" else "编辑")}
+        // Prototype page header: back arrow, serif title, quiet icon refresh, accent 新建/编辑.
+        Row(Modifier.fillMaxWidth().heightIn(min=56.dp),verticalAlignment=Alignment.CenterVertically){
+            IconButton(onClick={if(selected!=null){selected=null;checked=emptySet();selecting=false}else onBack()}){Icon(Icons.AutoMirrored.Filled.ArrowBack,contentDescription="返回")}
+            Column(Modifier.weight(1f)){
+                Text(record?.name?:"合集",style=MaterialTheme.typography.headlineSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+                val sub=if(record==null)"${c.state.collections.count{!it.deleted&&!it.archived}} 个合集 · 手动整理或按标签自动收录" else "${members.size} 条收藏"+(if(record.archived)" · 已归档" else "")
+                Text(sub,style=MaterialTheme.typography.labelSmall,color=p.tertiary,maxLines=1,overflow=TextOverflow.Ellipsis)
+            }
+            IconButton(onClick={c.refresh();onRefreshLibrary()},enabled=!c.working){Icon(Icons.Default.Refresh,contentDescription="刷新",Modifier.size(20.dp))}
+            TextButton(onClick={if(record==null)creating=true else editor=true}){if(record==null)Icon(Icons.Default.Add,null,Modifier.size(16.dp));Text(if(record==null)"新建" else "编辑")}
         }
-        if(record?.description?.isNotBlank()==true)Text(record.description,style=MaterialTheme.typography.bodySmall,maxLines=3,overflow=TextOverflow.Ellipsis)
-        OutlinedTextField(query,{query=it},placeholder={Text(if(record==null)"查找合集" else "搜索合集内标题、正文或备注")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("collection_search"))
+        if(record?.description?.isNotBlank()==true)Text(record.description,style=MaterialTheme.typography.bodyMedium,color=p.inkSoft,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(horizontal=4.dp))
+        OutlinedTextField(query,{query=it},placeholder={Text(if(record==null)"查找合集" else "搜索合集内标题、正文或备注")},singleLine=true,
+            leadingIcon={Icon(Icons.Default.Search,null,Modifier.size(18.dp))},
+            trailingIcon={if(query.isNotEmpty())IconButton(onClick={query=""}){Icon(Icons.Default.Close,"清除")}},
+            shape=RoundedCornerShape(10.dp),
+            colors=OutlinedTextFieldDefaults.colors(unfocusedBorderColor=p.hairlineSoft,focusedBorderColor=p.terracotta,unfocusedContainerColor=p.surface,focusedContainerColor=p.surface),
+            modifier=Modifier.fillMaxWidth().testTag("collection_search"))
         CollectionStatus(c)
-        if(record==null)TextButton(onClick={organizing=true},modifier=Modifier.testTag("organize_collections")){Text("自动整理")}
-        if(record==null)Row {
-            listOf("active" to "使用中","archived" to "已归档","deleted" to "已删除").forEach{(value,label)->TextButton(onClick={mode=value}){Text(if(mode==value)"· $label" else label)}}
+        if(record==null)Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=Alignment.CenterVertically){
+            listOf("active" to "使用中","archived" to "已归档","deleted" to "已删除").forEach{(value,label)->TypePill(label,mode==value){mode=value}}
+            Spacer(Modifier.width(4.dp))
+            TextButton(onClick={organizing=true},modifier=Modifier.testTag("organize_collections")){Icon(CairnIcons.Library,null,Modifier.size(16.dp));Spacer(Modifier.width(6.dp));Text("自动整理")}
         } else Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
-            Text("${members.size} 条",Modifier.weight(1f),style=MaterialTheme.typography.labelMedium)
+            Text("${members.size} 条",Modifier.weight(1f).padding(start=4.dp),style=MaterialTheme.typography.labelMedium,color=p.muted)
             if(!record.deleted){TextButton(onClick={showAdd=true}){Text("添加")};TextButton(onClick={selecting=!selecting;checked=emptySet()}){Text(if(selecting)"完成" else "选择")};TextButton(onClick={showFilters=true}){Text("筛选")}}
         }
-        if(record!=null&&!record.deleted)TextButton(onClick={tagRules=true},modifier=Modifier.testTag("collection_tag_rules")){Text(if(record.ruleEnabled)"自动收录 · 匹配"+(if(record.ruleMode=="all")"全部"else"任一")+"标签" else "设置自动收录标签")}
+        // Rule entry as a settings-style card; the full page summarises the rule in one sentence.
+        if(record!=null&&!record.deleted)Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(p.surface).border(1.dp,p.hairlineSoft,RoundedCornerShape(12.dp))
+            .clickable{tagRules=true}.padding(horizontal=14.dp,vertical=12.dp).testTag("collection_tag_rules"),verticalAlignment=Alignment.CenterVertically){
+            Column(Modifier.weight(1f)){
+                Text(if(record.ruleEnabled)"自动收录 · 匹配"+(if(record.ruleMode=="all")"全部"else"任一")+"标签" else "设置自动收录标签",style=MaterialTheme.typography.bodyMedium,fontWeight=FontWeight.Medium)
+                Text(if(record.ruleEnabled)"${record.ruleTags.size} 个标签"+(if(record.ruleExclude.isNotEmpty())" · 排除 ${record.ruleExclude.size} 个" else "")+(if(record.ruleAdmission=="review")" · 审核后加入" else " · 直接加入") else "按标签把收藏自动放进这个合集",
+                    style=MaterialTheme.typography.labelSmall,color=p.muted)
+            }
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight,null,tint=p.muted)
+        }
         if(checked.isNotEmpty())CollectionMembershipButton(base,token,checked.toList())
         val errors=c.state.pending.filter{it.error.isNotBlank()&&(selected==null||it.collection==selected)}
         errors.firstOrNull()?.let{p->
@@ -147,27 +175,31 @@ internal class CollectionController(val context:Context,val base:String,val toke
         }
         LazyColumn(Modifier.weight(1f).testTag("collections_list"),contentPadding=PaddingValues(bottom=24.dp)){
             if(record==null)items(c.state.collections.filter{when(mode){"deleted"->it.deleted;"archived"->!it.deleted&&it.archived;else->!it.deleted&&!it.archived}}.filter{(it.name+it.description).contains(query,true)}.sortedWith(compareByDescending<CollectionRecord>{it.pinned}.thenBy{it.name}),key={it.id}){item->
-                Row(Modifier.fillMaxWidth().clickable{selected=item.id}.padding(vertical=16.dp),verticalAlignment=Alignment.CenterVertically){
-                    Column(Modifier.weight(1f)){Text((if(item.pinned)"☆ " else "")+item.name,style=MaterialTheme.typography.titleMedium);Text("${counts[item.id]?:0} 条"+(if(c.state.pending.any{it.collection==item.id})" · 待同步" else ""),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}
-                    Text("›",color=MaterialTheme.colorScheme.onSurfaceVariant)
-                };HorizontalDivider()
+                Row(Modifier.fillMaxWidth().clickable{selected=item.id}.padding(horizontal=4.dp,vertical=14.dp),verticalAlignment=Alignment.CenterVertically){
+                    Column(Modifier.weight(1f)){
+                        Text((if(item.pinned)"☆ " else "")+item.name,style=MaterialTheme.typography.titleMedium)
+                        if(item.description.isNotBlank())Text(item.description,style=MaterialTheme.typography.bodySmall,color=p.muted,maxLines=1,overflow=TextOverflow.Ellipsis)
+                        Text("${counts[item.id]?:0} 条"+(if(item.ruleEnabled)" · 自动收录" else "")+(if(c.state.pending.any{it.collection==item.id})" · 待同步" else ""),style=MaterialTheme.typography.labelSmall,color=p.tertiary)
+                    }
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight,null,tint=p.muted)
+                };HorizontalDivider(color=p.hairlineSoft)
             } else items(members.filter{member->val link=catalog[member.link];val text=listOf(link?.displayTitle(),link?.note,link?.enrichment?.summary,link?.enrichment?.originalText,link?.enrichment?.translatedText,member.note).joinToString(" ");query.split(Regex("\\s+")).all{text.contains(it,true)}&&(link==null||filters.matches(link))},key={it.link}){member->
                 var menu by remember{mutableStateOf(false)}
                 Row(Modifier.fillMaxWidth().padding(vertical=14.dp),verticalAlignment=Alignment.CenterVertically){
                     if(selecting)Checkbox(member.link in checked,{value->if(!value||checked.size<100)checked=if(value)checked+member.link else checked-member.link})
-                    Column(Modifier.weight(1f).clickable{onOpen(member.link)}){
+                    Column(Modifier.weight(1f).clickable{onOpen(member.link)}.padding(start=4.dp)){
                         Text(catalog[member.link]?.displayTitle()?:"收藏 #${member.link}（正文尚未下载）",style=MaterialTheme.typography.titleMedium,maxLines=2,overflow=TextOverflow.Ellipsis)
-                        if(member.origin=="rule")Text("按标签自动收录",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                        if(member.note.isNotBlank())Text(member.note,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                        if(member.origin=="rule")Text("按标签自动收录",style=MaterialTheme.typography.labelSmall,color=p.terracotta)
+                        if(member.note.isNotBlank())Text(member.note,style=MaterialTheme.typography.bodySmall,color=p.inkSoft)
                     }
-                    Box{TextButton(onClick={menu=true}){Text("⋯")};DropdownMenu(menu,{menu=false}){
+                    Box{IconButton(onClick={menu=true}){Icon(CairnIcons.More,contentDescription="更多",tint=p.muted)};DropdownMenu(menu,{menu=false}){
                         DropdownMenuItem(text={Text("合集内备注")},onClick={menu=false;note=member})
                         val index=members.indexOf(member)
                         if(index>0)DropdownMenuItem(text={Text("上移")},onClick={menu=false;c.action{c.write(record.id,"move",JSONObject().put("link_id",member.link).put("before_id",members[index-1].link))}})
                         if(index<members.lastIndex)DropdownMenuItem(text={Text("下移")},onClick={menu=false;c.action{c.write(record.id,"move",JSONObject().put("link_id",member.link).put("before_id",members.getOrNull(index+2)?.link?:JSONObject.NULL))}})
                         DropdownMenuItem(text={Text("移出合集")},onClick={menu=false;c.action{c.write(record.id,"remove",JSONObject().put("link_ids",JSONArray(listOf(member.link))))}})
                     }}
-                };HorizontalDivider()
+                };HorizontalDivider(color=p.hairlineSoft)
             }
             if(record!=null&&members.isEmpty())item{Text("还没有内容，点击“添加”选择收藏。",Modifier.padding(vertical=24.dp),color=MaterialTheme.colorScheme.onSurfaceVariant)}
         }
