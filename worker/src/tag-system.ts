@@ -208,7 +208,7 @@ async function applyActions(request: Request, env: Env, id: number) {
       }
     } else return fail("invalid_action");
   }
-  const future = effectiveView(snapshot.automatic, [...snapshot.projectionInput.overrides, ...changes]);
+  const future = effectiveView(snapshot.effectiveAutomatic, [...snapshot.projectionInput.overrides, ...changes]);
   const display = (await env.DB.prepare(`SELECT dimension,term_id,label,display_revision FROM taxonomy_display_overrides`).all<{
     dimension: string; term_id: string; label: string; display_revision: number
   }>()).results;
@@ -256,7 +256,7 @@ async function applyActions(request: Request, env: Env, id: number) {
     SELECT ?,?,?, 'operation','',?,'human',?,?,? WHERE ${guard.sql}`)
     .bind(id, `${key}:operation`, key, actions.length === 1 ? String(actions[0].action) : "batch", revision, canonicalJSON(context), now, ...guard.bindings));
   statements.push(env.DB.prepare(`UPDATE links SET personal_revision=? WHERE id=? AND ${guard.sql}`).bind(revision, id, ...guard.bindings));
-  statements.push(...projectionWrites(env, id, revision, future, snapshot.automatic, snapshot.projected, snapshot.contentRevision,
+  statements.push(...projectionWrites(env, id, revision, future, snapshot.effectiveAutomatic, snapshot.projected, snapshot.contentRevision,
     snapshot.stale, snapshot.decisionId, snapshot.projectionInput.classification, appliedGuard));
   try { await env.DB.batch(statements); } catch (cause) { const receipt = await stored(); if (receipt) return acknowledge(receipt, true); throw cause; }
   const receipt = await stored();

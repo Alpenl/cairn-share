@@ -248,9 +248,10 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
   const projection = await readSelectionSnapshot(env, id);
   if (!projection) return fail("not_found", 404);
   const inputGuard = projectionInputGuard(id, projection);
-  const storedAutomatic = { ...projection.automatic,
+  // E4: compatibility projections (links.classification) never carry held AI terms.
+  const storedAutomatic = { ...projection.effectiveAutomatic,
     entities: state === "completed_nonempty" ? entities as string[] : [] };
-  const storedView = effectiveView({ ...projection.effectiveAutomatic, entities: storedAutomatic.entities }, projection.projectionInput.overrides);
+  const storedView = effectiveView(storedAutomatic, projection.projectionInput.overrides);
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO entity_operations(operation_key,link_id,request_hash,evidence_snapshot_id,content_revision,content_hash,payload,outcome,created_at)
@@ -279,7 +280,7 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
       projection.projected, projection.contentRevision, projection.stale, projection.decisionId,
       projection.projectionInput.classification,
       entityProjectionGuard(id, projection, operationKey, requestHash, "stored")),
-    ...projectionWrites(env, id, projection.link.personal_revision, projection.view, projection.automatic,
+    ...projectionWrites(env, id, projection.link.personal_revision, projection.view, projection.effectiveAutomatic,
       projection.projected, projection.contentRevision, projection.stale, projection.decisionId,
       projection.projectionInput.classification,
       entityProjectionGuard(id, projection, operationKey, requestHash, "ignored_stale"))
@@ -899,7 +900,7 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
     policyVersion: body.policy_version, policy: body.policy ?? {}, automatic, runIDs, personalRevision: link.personal_revision,
     operationKey, createdAt: new Date().toISOString(), payloadHash,
     ...(policyReplay ? { policyHash: String(body.policy_hash), replayTargetGeneration: target!.generation } : {})
-  }, guard), ...(heldStatement ? [heldStatement] : []), ...projectionWrites(env, id, link.personal_revision, futureView, futureAutomatic, true,
+  }, guard), ...(heldStatement ? [heldStatement] : []), ...projectionWrites(env, id, link.personal_revision, futureView, withoutHolds(futureAutomatic, aiHolds), true,
     link.content_revision, false, 0, snapshot.projectionInput.classification,
     decisionProjectionGuard(id, snapshot, operationKey, payloadHash))];
   // A policy experiment is a real decision but does not claim that a different
@@ -1050,7 +1051,7 @@ async function recordOverride(
     env.DB.prepare(`UPDATE links SET personal_revision = personal_revision + 1
       WHERE id = ? AND ${inputGuard.sql} AND EXISTS (${accepted}) RETURNING personal_revision`)
       .bind(id, ...inputGuard.bindings, operationKey, id, revision, payloadHash),
-    ...projectionWrites(env, id, revision, futureView, snapshot.automatic, snapshot.projected,
+    ...projectionWrites(env, id, revision, futureView, snapshot.effectiveAutomatic, snapshot.projected,
       snapshot.contentRevision, snapshot.stale, snapshot.decisionId, snapshot.projectionInput.classification, projectedGuard)
   ]);
   const updated = results[2].results as unknown[];
@@ -1186,7 +1187,7 @@ export async function persistSelectionOverrides(
             SELECT ?,?,?,?,?,? WHERE ${guard.sql} RETURNING operation_key`)
             .bind(operation.key, id, operation.payloadHash, snapshot.link.personal_revision,
               canonicalJSON(selection), new Date().toISOString(), ...guard.bindings),
-          ...projectionWrites(env, id, snapshot.link.personal_revision, snapshot.view, snapshot.automatic,
+          ...projectionWrites(env, id, snapshot.link.personal_revision, snapshot.view, snapshot.effectiveAutomatic,
             snapshot.projected, snapshot.contentRevision, snapshot.stale, snapshot.decisionId,
             snapshot.projectionInput.classification, guard)
         ]);
@@ -1238,7 +1239,7 @@ export async function persistSelectionOverrides(
         SELECT ?,?,?,?,?,? WHERE ${projectedGuard.sql} RETURNING operation_key`)
         .bind(operation.key, id, operation.payloadHash, revision, canonicalJSON(selection), now,
           ...projectedGuard.bindings)] : []),
-      ...projectionWrites(env, id, revision, futureView, snapshot.automatic, snapshot.projected,
+      ...projectionWrites(env, id, revision, futureView, snapshot.effectiveAutomatic, snapshot.projected,
         snapshot.contentRevision, snapshot.stale, snapshot.decisionId, snapshot.projectionInput.classification, projectedGuard)
     ]);
   } catch (error) {
@@ -1474,9 +1475,10 @@ export async function completionProjectionPlan(
       : { ...EMPTY_AUTOMATIC, topics: classification.topics, form: classification.form, use: classification.use,
         entities: snapshot.automatic.entities };
   // Held terms (E4) never reach the compatibility projections either.
-  const view = effectiveView(automatic !== null ? withoutHolds(futureAutomatic, holds)
-    : snapshot.projected ? snapshot.effectiveAutomatic : futureAutomatic, snapshot.projectionInput.overrides);
-  const statements = projectionWrites(env, id, snapshot.link.personal_revision, view, futureAutomatic,
+  const compatAutomatic = automatic !== null ? withoutHolds(futureAutomatic, holds)
+    : snapshot.projected ? snapshot.effectiveAutomatic : futureAutomatic;
+  const view = effectiveView(compatAutomatic, snapshot.projectionInput.overrides);
+  const statements = projectionWrites(env, id, snapshot.link.personal_revision, view, compatAutomatic,
     projected, snapshot.contentRevision, automatic !== null ? false : snapshot.stale,
     snapshot.decisionId, JSON.stringify(classification), postGuard);
   if (!projected) {
@@ -1501,7 +1503,7 @@ async function persistEffective(env: Env, id: number): Promise<void> {
     if (!snapshot) return;
     const guard = projectionInputGuard(id, snapshot);
     const statements = projectionWrites(env, id, snapshot.link.personal_revision, snapshot.view,
-      snapshot.automatic, snapshot.projected, snapshot.contentRevision, snapshot.stale,
+      snapshot.effectiveAutomatic, snapshot.projected, snapshot.contentRevision, snapshot.stale,
       snapshot.decisionId, snapshot.projectionInput.classification, guard);
     const result = await env.DB.batch(statements);
     if (result[0].results.length) return;

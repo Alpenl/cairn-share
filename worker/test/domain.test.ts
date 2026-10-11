@@ -1015,6 +1015,23 @@ async function memberships(id: number): Promise<string[]> {
   return rows.results.map((r) => r.k);
 }
 
+async function filterIds(tag: string): Promise<number[]> {
+  const response = await request(`links?tags=${encodeURIComponent(tag)}&limit=50`, undefined, "GET", "app");
+  expect(response.status).toBe(200);
+  const body = await response.json() as { items: Array<{ id: number }> };
+  return body.items.map((item) => item.id);
+}
+
+it("E4: deleting a link removes its holds", async () => {
+  await setAiPreferences({ ai_confirm_before_apply: true });
+  const id = await createLink();
+  const run = await submitRun(id, "e4-delete");
+  expect((await submitDecision(id, run, { ...emptyAutomatic, topics: ["llm"] }, "e4-delete-decision")).status).toBe(200);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM ai_suggestion_holds WHERE link_id=?").bind(id).first("n")).toBe(1);
+  expect((await request(`links/${id}`, undefined, "DELETE", "app")).status).toBeLessThan(300);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM ai_suggestion_holds WHERE link_id=?").bind(id).first("n")).toBe(0);
+});
+
 it("E4: confirm-before-apply holds AI tags until a person accepts or dismisses them", async () => {
   await setAiPreferences({ ai_confirm_before_apply: true });
   const id = await createLink();
@@ -1024,6 +1041,10 @@ it("E4: confirm-before-apply holds AI tags until a person accepts or dismisses t
   // The stored decision is untouched (replayable); only the fold skips held terms.
   expect(JSON.parse(String(await env.DB.prepare("SELECT automatic FROM classification_decisions WHERE link_id=?").bind(id).first("automatic"))).topics).toEqual(["llm", "eng"]);
   expect(await memberships(id)).toEqual([]);
+  // Filters, tag counts and collection rules all read the membership index; v1
+  // clients read links.classification, which must not carry held terms either.
+  expect(await filterIds("system/topics/llm")).toEqual([]);
+  expect(JSON.parse(String(await env.DB.prepare("SELECT classification FROM links WHERE id=?").bind(id).first("classification"))).topics).toEqual([]);
   let snap = (await readSelectionSnapshot(env as unknown as Env, id))!;
   expect(snap.view.topics).toEqual([]);
   expect(snap.state.ai_pending.map((p: { field: string; term: string; reason: string }) => `${p.field}:${p.term}:${p.reason}`).sort())
@@ -1035,6 +1056,10 @@ it("E4: confirm-before-apply holds AI tags until a person accepts or dismisses t
   expect(snap.view.topics).toEqual(["llm"]);
   expect(await memberships(id)).toEqual(["topics:llm"]);
   expect(snap.state.ai_pending.map((p: { term: string }) => p.term)).toEqual(["method"]);
+  expect(await filterIds("system/topics/llm")).toEqual([id]);
+  expect(await filterIds("system/topics/eng")).toEqual([]);
+  expect(JSON.parse(String(await env.DB.prepare("SELECT classification FROM links WHERE id=?").bind(id).first("classification"))).topics).toEqual([]);
+  expect(JSON.parse(String(await env.DB.prepare("SELECT curation FROM links WHERE id=?").bind(id).first("curation"))).topics).toEqual(["llm"]);
   // The SQL fold used by filters agrees with the TypeScript view.
   const sqlTerms = await env.DB.prepare(`SELECT field||':'||term AS k FROM canonical_effective_tag_terms WHERE link_id=? AND field IN ('topics','content_functions') ORDER BY k`).bind(id).all<{ k: string }>();
   expect(sqlTerms.results.map((r) => r.k)).toEqual(["topics:llm"]);
