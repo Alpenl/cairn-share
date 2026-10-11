@@ -202,7 +202,9 @@ internal fun SaveLinkSheetContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.04f), RoundedCornerShape(8.dp))
+            // 2026-10: 合集 sits right under the link so it is visible without scrolling; 收藏原因 follows.
+            collectionsContent()
+            Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.38f), RoundedCornerShape(10.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("备注，可选", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 androidx.compose.foundation.text.BasicTextField(value = note, onValueChange = onNoteChange,
@@ -230,7 +232,6 @@ internal fun SaveLinkSheetContent(
             Column {
                 HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
                 Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    collectionsContent()
                     if (statusText.isNotBlank()) Text(statusText, style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.testTag("status").semantics { liveRegion = LiveRegionMode.Polite })
