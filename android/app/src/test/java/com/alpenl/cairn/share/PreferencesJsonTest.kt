@@ -13,7 +13,7 @@ class PreferencesJsonTest {
         val snap = PreferencesJson.parse(JSONObject("""{"value":{"ai_suggestion_limit":5,"ai_confirm_before_apply":true},"revision":7}"""))
         assertEquals(5, snap.value.suggestionLimit)
         assertTrue(snap.value.confirmBeforeApply)
-        assertTrue(snap.value.lowConfidenceReview)
+        assertFalse(snap.value.lowConfidenceReview)
         assertEquals(7L, snap.revision)
         assertEquals(AiPreferences(), PreferencesJson.parse(JSONObject("{}")).value)
     }

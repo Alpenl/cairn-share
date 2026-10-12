@@ -3,6 +3,8 @@ import { CLASSIFICATION_LIMITS, classificationBudgetAvailable, classificationWin
 import { validEnrichmentSource } from "./source-validation";
 import { validRunProvenance } from "./run-provenance";
 import type { Env } from "./index";
+import { computeHolds, holdInsertStatement } from "./ai-holds";
+import { readPreferences } from "./library-extras";
 import { personalUse, record, taxonomy, validateClassification, type Classification } from "./curation";
 import { classificationTaxonomy, taxonomyV2, type TermDefinition } from "./taxonomy-v2";
 import { contentHash, objectivePayload, objectiveUseAllowed, validAssessment,
@@ -642,8 +644,10 @@ export async function classificationRoute(request: Request, env: Env, path: stri
       const completeKey = key ?? `complete-${id}-${body.revision}`;
       const runKey = `${completeKey}:run`;
       const decisionKey = `${completeKey}:decision`;
+      // E4: the AI tagging preferences decide which of this decision's terms wait for confirmation.
+      const aiHolds = isV2 && automatic ? computeHolds(automatic, (await readPreferences(env)).value) : [];
       const plan = await completionProjectionPlan(env, id, classification, automatic,
-        isV2 ? decisionKey : null, payloadHash, guard);
+        isV2 ? decisionKey : null, payloadHash, guard, aiHolds);
       if (!plan) return { failure: "not_found" as const };
       const statements: D1PreparedStatement[] = [
         // The read-only first statement records whether all precomputed inputs
@@ -672,6 +676,9 @@ export async function classificationRoute(request: Request, env: Env, path: stri
           policyVersion: String(result.policy_version), policy: result.policy ?? {}, automatic,
           operationKey: decisionKey, createdAt, payloadHash
         }, plan.preGuard, false));
+        // E4: apply the AI tagging preferences to this decision only.
+        const holds = holdInsertStatement(env, decisionKey, id, aiHolds, createdAt);
+        if (holds) statements.push(holds);
       }
       statements.push(...plan.statements);
       // A successful model result closes only the half-open probe that owns

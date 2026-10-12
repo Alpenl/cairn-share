@@ -1,4 +1,5 @@
 import type { Env } from "./index";
+import { HELD_FIELDS, withoutHolds, type Hold } from "./ai-holds";
 import { effectiveView, effectiveOrigins, EMPTY_AUTOMATIC, normalizeField, validAssessment,
   type AutomaticView, type Override, type OverrideField } from "./domain";
 
@@ -17,7 +18,7 @@ type Queue = { status: string; content_revision: number };
 type Evidence = { id: number; content_hash: string; truncated: number; completeness: string };
 type Row = { id: number; personal_revision: number; content_revision: number; classification: string | null;
   why: string | null; curation_status: string | null; decision: string | null; overrides: string;
-  legacy: string | null; entity: string | null; queue: string | null; evidence: string | null };
+  legacy: string | null; entity: string | null; queue: string | null; evidence: string | null; ai_holds?: string | null };
 
 export type SummaryCustomTag = { id: string; owner_id: string; label: string; revision: number; status: string };
 export type TagSummary = { topics: string[]; resource_kinds: string[]; content_functions: string[]; custom_tags: SummaryCustomTag[] };
@@ -90,6 +91,8 @@ function selectionSQL(where: string, includeReading: boolean, extraColumns = "")
       (SELECT json_group_array(json_object('coverage',r.coverage,'evidence_coverage',r.evidence_coverage))
         FROM classification_decision_runs dr JOIN classification_runs r ON r.id=dr.run_id WHERE dr.decision_id=d.id))
       FROM classification_decisions d WHERE d.link_id=l.id ORDER BY d.id DESC LIMIT 1) AS decision,
+    (SELECT json_group_array(json_object('field',h.field,'term',h.term,'reason',h.reason,'probability',h.probability))
+      FROM ai_suggestion_holds h WHERE h.decision_id=(SELECT id FROM classification_decisions WHERE link_id=l.id ORDER BY id DESC LIMIT 1)) AS ai_holds,
     (SELECT json_group_array(json_object('field',o.field,'term',o.term,'action',o.action,'source',o.source,
       'confirmed',o.confirmed,'revision',o.revision)) FROM
       (SELECT field,term,action,source,confirmed,revision FROM curation_overrides WHERE link_id=l.id ORDER BY revision,id) o) AS overrides,
@@ -175,7 +178,15 @@ function selectionFromRow(link: Row) {
     });
   const legacy = parse<Legacy | null>(link.legacy, null);
   const layered = [...legacyOverrides(legacy), ...overrides];
-  const view = effectiveView(automatic, layered);
+  // E4: held automatic terms (see ai-holds.ts) are suggestions, not tags, until a person accepts them.
+  const holds = decision ? parse<Hold[]>(link.ai_holds ?? null, []).filter((h) => h && typeof h.term === "string") : [];
+  const effectiveAutomatic = withoutHolds(automatic, holds);
+  const view = effectiveView(effectiveAutomatic, layered);
+  const lastAction = (field: string, term: string) => [...layered].reverse().find((o) => o.field === field && o.term === term)?.action;
+  const aiPending = holds.filter((h) => h.reason !== "limit" && !(view[h.field] ?? []).includes(h.term) && lastAction(h.field, h.term) !== "reject")
+    .map((h) => ({ field: h.field, term: h.term, reason: h.reason, probability: h.probability ?? null }))
+    .sort((a, b) => HELD_FIELDS.indexOf(a.field) - HELD_FIELDS.indexOf(b.field) ||
+      (automatic[a.field] ?? []).indexOf(a.term) - (automatic[b.field] ?? []).indexOf(b.term));
   const stale = decision !== null && decision.content_revision !== link.content_revision;
   const origins = effectiveOrigins(view, layered, decision ? "automatic" : "legacy_unknown");
   // Entities have their own run, independent of whether classification ran.
@@ -214,7 +225,7 @@ function selectionFromRow(link: Row) {
     return [field, { ...origins[field], status, assessment_available: assessment !== null, incomplete, candidates }];
   }));
   return {
-    link, view, automatic, decisionId: decision?.id ?? 0, projected: decision !== null, stale, contentRevision: link.content_revision,
+    link, view, automatic, effectiveAutomatic, decisionId: decision?.id ?? 0, projected: decision !== null, stale, contentRevision: link.content_revision,
     entity, entityStale, overrides: layered,
     projectionInput: {
       overrides: layered,
@@ -229,7 +240,7 @@ function selectionFromRow(link: Row) {
       decision_id: decision?.id ?? null, decision_content_revision: decision?.content_revision ?? null,
       policy_version: decision?.policy_version ?? null,
       decision_answers_partial: partial("coverage"), decision_evidence_partial: partial("evidence_coverage"),
-      classification_queue: queue, evidence, fields,
+      classification_queue: queue, evidence, fields, ai_pending: aiPending,
       entities: { ...origins.entities, status: entityStale ? "stale" : entity?.state ?? "not_run",
         recorded_state: entity?.state ?? "not_run", content_revision: entity?.content_revision ?? null,
         evidence_snapshot_id: entity?.evidence_snapshot_id ?? null, revision: entity?.revision ?? 0, automatic: automatic.entities,

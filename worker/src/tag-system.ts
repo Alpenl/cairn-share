@@ -160,7 +160,9 @@ async function applyActions(request: Request, env: Env, id: number) {
       const target = systemRef(action.tag_ref, catalog);
       if (!target) return fail("invalid_tag_ref");
       if (["accept", "confirm"].includes(name) && !selectable(target, catalog)) return fail("tag_deprecated", 409);
-      if (name === "confirm" && !((snapshot.view[target.field] ?? []) as string[]).includes(target.term)) return fail("tag_not_effective", 409);
+      // E4: a held AI suggestion (ai_pending) can be confirmed just like an applied one.
+      if (name === "confirm" && !((snapshot.view[target.field] ?? []) as string[]).includes(target.term) &&
+        !snapshot.state.ai_pending.some(p => p.field === target.field && p.term === target.term)) return fail("tag_not_effective", 409);
       add(target.field, target.term, name === "confirm" ? "accept" : name as OverrideAction);
     } else if (name === "replace") {
       const from = systemRef(action.from_tag_ref, catalog), to = systemRef(action.to_tag_ref, catalog);
@@ -206,7 +208,7 @@ async function applyActions(request: Request, env: Env, id: number) {
       }
     } else return fail("invalid_action");
   }
-  const future = effectiveView(snapshot.automatic, [...snapshot.projectionInput.overrides, ...changes]);
+  const future = effectiveView(snapshot.effectiveAutomatic, [...snapshot.projectionInput.overrides, ...changes]);
   const display = (await env.DB.prepare(`SELECT dimension,term_id,label,display_revision FROM taxonomy_display_overrides`).all<{
     dimension: string; term_id: string; label: string; display_revision: number
   }>()).results;
@@ -254,7 +256,7 @@ async function applyActions(request: Request, env: Env, id: number) {
     SELECT ?,?,?, 'operation','',?,'human',?,?,? WHERE ${guard.sql}`)
     .bind(id, `${key}:operation`, key, actions.length === 1 ? String(actions[0].action) : "batch", revision, canonicalJSON(context), now, ...guard.bindings));
   statements.push(env.DB.prepare(`UPDATE links SET personal_revision=? WHERE id=? AND ${guard.sql}`).bind(revision, id, ...guard.bindings));
-  statements.push(...projectionWrites(env, id, revision, future, snapshot.automatic, snapshot.projected, snapshot.contentRevision,
+  statements.push(...projectionWrites(env, id, revision, future, snapshot.effectiveAutomatic, snapshot.projected, snapshot.contentRevision,
     snapshot.stale, snapshot.decisionId, snapshot.projectionInput.classification, appliedGuard));
   try { await env.DB.batch(statements); } catch (cause) { const receipt = await stored(); if (receipt) return acknowledge(receipt, true); throw cause; }
   const receipt = await stored();

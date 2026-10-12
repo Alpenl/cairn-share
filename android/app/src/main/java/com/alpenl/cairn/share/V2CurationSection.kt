@@ -28,6 +28,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.size
+import com.alpenl.cairn.share.ui.components.TagChip
+import com.alpenl.cairn.share.ui.components.TagState
+import com.alpenl.cairn.share.ui.components.TagTone
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.alpenl.cairn.share.network.BookmarkTaxonomy
@@ -96,6 +101,42 @@ internal fun MultidimensionalCurationSection(
                 Row {
                     TextButton(onClick = onReapply, modifier = Modifier.testTag("v2_conflict_reapply")) { Text("重新应用") }
                     TextButton(onClick = onDiscard, modifier = Modifier.testTag("v2_conflict_discard")) { Text("放弃修改") }
+                }
+            }
+        }
+        if (effective.aiPending.isNotEmpty()) {
+            Column(Modifier.fillMaxWidth().testTag("v2_ai_pending"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("待你确认的 AI 建议", style = MaterialTheme.typography.labelLarge)
+                Text("点标签确认，点 × 忽略。确认前它们不参与筛选和合集规则。", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    effective.aiPending.forEach { pending ->
+                        val label = when (pending.field) {
+                            "topics" -> taxonomy.topics.firstOrNull { it.id == pending.term }?.label
+                            "resource_kinds" -> taxonomy.resourceKinds.firstOrNull { it.id == pending.term }?.label
+                            else -> taxonomy.contentFunctions.firstOrNull { it.id == pending.term }?.label
+                        } ?: pending.term
+                        val tone = when (pending.field) {
+                            "topics" -> TagTone.Topic
+                            "resource_kinds" -> TagTone.Resource
+                            else -> TagTone.Feature
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TagChip(
+                                label = if (pending.reason == "low_confidence") "$label ?" else label,
+                                tone = tone,
+                                state = TagState.Suggested,
+                                modifier = Modifier.testTag("v2_ai_pending_${pending.field}_${pending.term}"),
+                                onClick = if (busy) null else ({ onAction(pending.field, pending.term, "accept") }),
+                            )
+                            IconButton(
+                                onClick = { onAction(pending.field, pending.term, "reject") },
+                                enabled = !busy,
+                                modifier = Modifier.size(28.dp).testTag("v2_ai_dismiss_${pending.field}_${pending.term}"),
+                            ) { Icon(Icons.Default.Close, contentDescription = "忽略 $label", modifier = Modifier.size(14.dp)) }
+                        }
+                    }
                 }
             }
         }

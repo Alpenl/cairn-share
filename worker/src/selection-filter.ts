@@ -41,7 +41,8 @@ legacy_fields AS (
   SELECT e.* FROM active e WHERE e.action IN ('accept','reject')
     AND NOT EXISTS (SELECT 1 FROM active r WHERE r.field=e.field AND r.term=e.term AND r.action='reset' AND r.sequence>e.sequence)
 ), baseline AS (
-  SELECT COALESCE((SELECT automatic FROM classification_decisions WHERE link_id=links.id ORDER BY id DESC LIMIT 1),
+  SELECT (SELECT id FROM classification_decisions WHERE link_id=links.id ORDER BY id DESC LIMIT 1) AS decision_id,
+    COALESCE((SELECT automatic FROM classification_decisions WHERE link_id=links.id ORDER BY id DESC LIMIT 1),
     json_object('topics',json(COALESCE(json_extract(links.classification,'$.topics'),'[]')),
       'form',COALESCE(json_extract(links.classification,'$.form'),''),
       'use',COALESCE(json_extract(links.classification,'$.use'),''))) AS automatic
@@ -52,6 +53,8 @@ automatic AS (
       WHEN field='carriers' THEN json_array(json_extract(automatic,'$.carriers[0]'))
       ELSE COALESCE(json_extract(automatic,'$.'||field),'[]') END) j
     WHERE j.type='text' AND j.value<>''
+      AND NOT EXISTS (SELECT 1 FROM ai_suggestion_holds h WHERE h.decision_id=baseline.decision_id
+        AND h.field=dimensions.field AND h.term=j.value)
 ), allowed_automatic AS (
   SELECT a.* FROM automatic a LEFT JOIN barriers b ON b.field=a.field
     LEFT JOIN events barrier ON barrier.field=b.field AND barrier.sequence=b.sequence

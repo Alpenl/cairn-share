@@ -109,9 +109,9 @@ it('looks up a saved page by URL identity without writing',async()=>{
 });
 
 it('keeps AI tagging preferences with CAS and idempotent receipts',async()=>{
- const p=await call('preferences');expect(p.data).toEqual({value:{ai_suggestion_limit:3,ai_confirm_before_apply:false,ai_low_confidence_review:true},revision:0});
+ const p=await call('preferences');expect(p.data).toEqual({value:{ai_suggestion_limit:5,ai_confirm_before_apply:false,ai_low_confidence_review:false},revision:0});
  const op={operation_key:uuid(),expected_revision:0,patch:{ai_suggestion_limit:5,ai_confirm_before_apply:true}};
- const w=await call('preferences/operations',op);expect(w.status).toBe(200);expect(w.data).toMatchObject({revision:1,value:{ai_suggestion_limit:5,ai_confirm_before_apply:true,ai_low_confidence_review:true}});
+ const w=await call('preferences/operations',op);expect(w.status).toBe(200);expect(w.data).toMatchObject({revision:1,value:{ai_suggestion_limit:5,ai_confirm_before_apply:true,ai_low_confidence_review:false}});
  expect((await call('preferences/operations',op)).data.replayed).toBe(true);
  expect((await call('preferences/operations',{...op,patch:{ai_suggestion_limit:6}})).status).toBe(409);
  expect((await call('preferences/operations',{operation_key:uuid(),expected_revision:0,patch:{ai_suggestion_limit:2}})).data.error).toBe('revision_conflict');

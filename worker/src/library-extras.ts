@@ -25,7 +25,9 @@ async function lookup(request:Request,env:Env){
 }
 
 // Cross-device preferences. Only AI tagging lives here: reading preferences stay per device.
-export const PREFERENCE_DEFAULTS={ai_suggestion_limit:3,ai_confirm_before_apply:false,ai_low_confidence_review:true};
+// E4 applies them to new decisions, so the defaults reproduce the classifier's existing
+// behaviour (policy MaxPrimaryTags=5, nothing held) until the user opts in.
+export const PREFERENCE_DEFAULTS={ai_suggestion_limit:5,ai_confirm_before_apply:false,ai_low_confidence_review:false};
 type Preferences=typeof PREFERENCE_DEFAULTS;
 const validators:Record<keyof Preferences,(v:unknown)=>boolean>={
  ai_suggestion_limit:v=>Number.isInteger(v)&&(v as number)>=1&&(v as number)<=8,

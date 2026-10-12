@@ -34,7 +34,22 @@ internal data class MultidimensionalSelection(
     val decisionId: Long? = null,
     val contentRevision: Long? = null,
     val tagSystem: Boolean = false,
+    /** E4: AI suggestions held for confirmation (state.ai_pending); not part of the selection. */
+    val aiPending: List<AiPendingSuggestion> = emptyList(),
 )
+
+internal data class AiPendingSuggestion(val field: String, val term: String, val reason: String)
+
+internal fun decodeAiPending(state: JSONObject?): List<AiPendingSuggestion> {
+    val values = state?.optJSONArray("ai_pending") ?: return emptyList()
+    return (0 until values.length()).mapNotNull { index ->
+        val entry = values.optJSONObject(index) ?: return@mapNotNull null
+        val field = entry.optString("field")
+        val term = entry.optString("term")
+        if (field !in setOf("topics", "resource_kinds", "content_functions") || term.isEmpty()) null
+        else AiPendingSuggestion(field, term, entry.optString("reason"))
+    }
+}
 
 internal sealed interface V2Result<out T> {
     data class Loaded<T>(val value: T) : V2Result<T>
@@ -286,6 +301,7 @@ internal class V2CurationClient(
                 available = true,
                 automatic = decodeAutomatic(payload.optJSONObject("automatic")),
                 state = state,
+                aiPending = decodeAiPending(payload.optJSONObject("state")),
             )
         )
     }
