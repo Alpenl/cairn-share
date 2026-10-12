@@ -88,10 +88,11 @@ try {
   await click("connect");
   await until(async () => (await text("status")).includes("连接成功"), "Firefox connection test failed");
   await command("url", { url: `${url}/popup.html` });
-  await until(async () => (await text("connection")).includes("已连接"), "Firefox popup did not initialize");
+  await until(async () => execute("return document.getElementById('url')?.value.startsWith('moz-extension://')"), "Firefox popup did not load the active tab");
   const exactUrl = "https://example.com/firefox?keep=%20#fragment";
   await fill("url", exactUrl);
   await fill("note", "Firefox 收藏备注");
+  await until(async () => execute("return document.getElementById('save')?.disabled === false"), "Firefox popup did not initialize");
   await click("save");
   await until(async () => (await text("status")).includes("已上传"), "Firefox upload failed");
   assert.equal(records.size, 1);
@@ -101,7 +102,7 @@ try {
   await fill("note", "断网后的 Firefox 收藏");
   await click("save");
   await until(async () => (await text("queue")).includes("服务暂时不可用"), "Firefox did not retain failed upload");
-  await command("url", { url: `${url}/options.html` });
+  await command("url", { url: `${url}/options.html#queue` });
   await until(async () => (await text("pending-count")) === "1", "Firefox pending job did not survive popup close");
   offline = false;
   await click("retry-all");
