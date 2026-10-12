@@ -271,11 +271,11 @@ class ShareActivityInstrumentedTest {
                         latest.set(request)
                         val payload = JSONObject("""{"items":[],"next_before_id":null}""")
                         if (!oldBackend.get()) payload.put("filter_contract_version", 1)
-                        if (url.queryParameter("topics") != null) payload.getJSONArray("items").put(JSONObject("""{
+                        if (url.queryParameter("tags") != null) payload.getJSONArray("items").put(JSONObject("""{
                             "id":99,"url":"https://example.com/filtered","note":"服务端匹配结果",
                             "created_at":"2026-09-23T00:00:00Z","learned":false
                         }"""))
-                        MockResponse().setBody(payload.toString())
+                        MockResponse().setBody(payload.toString()).apply { if (!oldBackend.get()) setHeader("X-Cairn-Tag-System", "1") }
                     }
                     else -> MockResponse().setResponseCode(404)
                 }
@@ -291,20 +291,23 @@ class ShareActivityInstrumentedTest {
             compose.waitUntil(5_000) { latest.get() != null }
             compose.onNodeWithTag("bookmark_filters").performClick()
             compose.waitUntil(5_000) {
-                runCatching { compose.onAllNodesWithTag("filter_topics_design").assertCountEquals(1); true }.getOrDefault(false)
+                runCatching { compose.onAllNodesWithTag("tag_filter_system/topics/design").assertCountEquals(1); true }.getOrDefault(false)
             }
-            for (tag in listOf("filter_topics_design", "filter_topics_llm")) {
+            for (tag in listOf("tag_filter_system/topics/design", "tag_filter_system/topics/llm", "tag_filter_system/content_functions/method", "tag_filter_system/content_functions/data")) {
                 compose.onNodeWithTag(tag).performScrollTo().performClick()
             }
+            compose.onNodeWithText("全部满足").performScrollTo().performClick()
             compose.onNodeWithTag("advanced_bookmark_filters").performScrollTo().performClick()
-            for (tag in listOf("filter_content_functions_method", "filter_content_functions_data", "filter_carriers_single", "filter_affordances_practice", "filter_entity_state_failed", "filter_entity_state_stale")) {
+            for (tag in listOf("filter_carriers_single", "filter_affordances_practice", "filter_entity_state_failed", "filter_entity_state_stale")) {
                 compose.onNodeWithTag(tag).performScrollTo().performClick()
             }
             compose.onNodeWithTag("view_filter_results").assertIsDisplayed().performClick()
             compose.waitUntil(5_000) { latest.get()?.requestUrl?.queryParameter("entity_state") == "failed,stale" }
             val query = latest.get()!!.requestUrl!!
-            assertEquals("design,llm", query.queryParameter("topics"))
-            assertEquals("method,data", query.queryParameter("content_functions"))
+            assertEquals("system/topics/design,system/topics/llm,system/content_functions/method,system/content_functions/data", query.queryParameter("tags"))
+            assertEquals("all", query.queryParameter("tags_mode"))
+            assertEquals(null, query.queryParameter("topics"))
+            assertEquals(null, query.queryParameter("content_functions"))
             assertEquals("single", query.queryParameter("carriers"))
             assertEquals("practice", query.queryParameter("affordances"))
             assertEquals("1", query.queryParameter("filter_contract_version"))
