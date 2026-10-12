@@ -439,7 +439,16 @@ export interface EffectiveView extends AutomaticView {
 // Build the effective view from the automatic proposals of the latest decision
 // and the human override log. This is the only derivation of user-facing
 // values; list, detail, filters and exports all read its projection.
-export function effectiveView(automatic: AutomaticView, overrides: Override[]): EffectiveView {
+export type DeletedTag = { field: OverrideField; term: string };
+export function withoutDeletedTags<T extends AutomaticView | EffectiveView>(view: T, deleted: DeletedTag[]): T {
+  const next = { ...view };
+  for (const { field, term } of deleted) {
+    if (field === 'form' || field === 'use') { if (next[field] === term) next[field] = ''; }
+    else if (Array.isArray(next[field])) next[field] = next[field]!.filter(value => value !== term);
+  }
+  return next;
+}
+export function effectiveView(automatic: AutomaticView, overrides: Override[], deleted: DeletedTag[] = []): EffectiveView {
   const ordered = [...overrides].sort((left, right) => left.revision - right.revision);
   const states: Record<string, FieldState> = {};
   for (const field of OVERRIDE_FIELDS) states[field] = newFieldState();
@@ -448,7 +457,7 @@ export function effectiveView(automatic: AutomaticView, overrides: Override[]): 
     if (state) applyOverride(state, override);
   }
   const carrier = resolveSingle(automatic.carriers[0] ?? "", states.carriers);
-  return {
+  return withoutDeletedTags({
     topics: resolveMulti(automatic.topics, states.topics),
     ...(automatic.resource_kinds !== undefined || overrides.some(o => o.field === "resource_kinds")
       ? { resource_kinds: resolveMulti(automatic.resource_kinds ?? [], states.resource_kinds) } : {}),
@@ -471,7 +480,7 @@ export function effectiveView(automatic: AutomaticView, overrides: Override[]): 
     },
     reviewed: Object.values(states).some((state) => state.action.size > 0 || state.clearedAutomatic || state.empty),
     revision: ordered.length > 0 ? ordered[ordered.length - 1].revision : 0
-  };
+  }, deleted);
 }
 
 export function taxonomyVersion(): string { return taxonomy.version; }

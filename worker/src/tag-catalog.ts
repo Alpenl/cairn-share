@@ -3,6 +3,7 @@ import type { Env } from "./index";
 import { readJSONObject } from "./json-body";
 import { taxonomyV2, classificationTaxonomy, validateTaxonomy, normalizeTerm, type Taxonomy, type TermDefinition } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
+import { deleteCatalogTag } from "./tag-deletion";
 
 export const catalogDimensions = ["topics","resource_kinds","content_functions","carriers","affordances","forms","uses"] as const;
 export type CatalogDimension = typeof catalogDimensions[number];
@@ -91,13 +92,13 @@ export async function tagCatalogRoute(request:Request,env:Env,path:string):Promi
  if(!path.endsWith('/operations')) {
   if(request.method!=="GET")return fail("method_not_allowed",405);
   const [current,counts]=await Promise.all([displayedCatalog(env),env.DB.prepare("SELECT field,term,COUNT(*) AS n FROM effective_tag_memberships GROUP BY field,term").all<{field:string;term:string;n:number}>()]);
-  const custom=await env.DB.prepare("SELECT t.id,t.owner_id,t.label,t.revision,t.status,t.dimension_id,t.description,t.aliases,t.ai_enabled,COUNT(a.link_id) AS link_count FROM custom_tags t LEFT JOIN custom_tag_links a ON a.tag_id=t.id WHERE t.owner_id='default' GROUP BY t.id ORDER BY t.label,t.id").all();
+  const custom=await env.DB.prepare("SELECT t.id,t.owner_id,t.label,t.revision,t.status,t.dimension_id,t.description,t.aliases,t.ai_enabled,COUNT(a.link_id) AS link_count FROM custom_tags t LEFT JOIN custom_tag_links a ON a.tag_id=t.id WHERE t.owner_id='default' AND NOT EXISTS(SELECT 1 FROM custom_tag_operations d WHERE d.tag_id=t.id AND d.action='delete') GROUP BY t.id ORDER BY t.label,t.id").all();
   return reply({...current,dimensions:await customDimensions(env),counts:counts.results,custom_tags:custom.results.map(t=>({...t,tag_ref:`custom/default/${t.id}`}))});
  }
  if(request.method!=="POST")return fail("method_not_allowed",405);
  const b=await readJSONObject(request,32*1024);
  if(b && typeof b.type === "string" && b.type.startsWith("dimension_")) return dimensionOperation(env,b);
- if(!b||typeof b.operation_key!=='string'||!uuid.test(b.operation_key)||!Number.isSafeInteger(b.expected_revision)||!catalogDimensions.includes(b.dimension as CatalogDimension)||!['create','edit','archive','restore'].includes(String(b.type))||Object.keys(b).some(k=>!['operation_key','expected_revision','dimension','id','type','definition'].includes(k)))return fail('invalid_tag_operation');
+ if(!b||typeof b.operation_key!=='string'||!uuid.test(b.operation_key)||!Number.isSafeInteger(b.expected_revision)||!catalogDimensions.includes(b.dimension as CatalogDimension)||!['create','edit','archive','restore','delete'].includes(String(b.type))||Object.keys(b).some(k=>!['operation_key','expected_revision','dimension','id','type','definition'].includes(k)))return fail('invalid_tag_operation');
  const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonicalJSON(b))),hash=Array.from(new Uint8Array(bytes),x=>x.toString(16).padStart(2,'0')).join('');
  const receipt=()=>env.DB.prepare('SELECT request_hash,revision,term_id FROM tag_catalog_operations WHERE operation_key=?').bind(b.operation_key).first<{request_hash:string;revision:number;term_id:string}>();
  const previous=await receipt();if(previous)return previous.request_hash===hash?reply({...await displayedCatalog(env),operation_revision:previous.revision,id:previous.term_id,replayed:true}):fail('operation_conflict',409);
@@ -107,6 +108,15 @@ export async function tagCatalogRoute(request:Request,env:Env,path:string):Promi
  const before=typeof b.id==='string'?catalogTerm(catalog,dimension,b.id):undefined;
  if(b.type!=='create'&&!before)return fail('tag_not_found',404);
  if(b.type==='create'&&b.id!==undefined)return fail('invalid_dimension');
+ if(b.type==='delete'){
+  if(b.definition!==undefined)return fail('invalid_tag_operation');
+  const result=await deleteCatalogTag(env,{key:b.operation_key as string,hash,dimension,id:before!.id},current);
+  if(result)return fail(result,409);
+  const saved=await receipt();
+  if(!saved)return fail('revision_conflict',409,{revision:(await managedCatalog(env)).revision});
+  if(saved.request_hash!==hash)return fail('operation_conflict',409);
+  return reply({...await displayedCatalog(env),id:before!.id,operation_revision:saved.revision,replayed:false});
+ }
  let after:TermDefinition|null;
  if(b.type==='archive'||b.type==='restore'){if(b.definition!==undefined)return fail('invalid_tag_operation');after={...before!,active:b.type==='restore',deprecated:b.type==='archive',status:b.type==='restore'?'active':'deprecated'};}
  else after=definition(b.definition,dimension,before);

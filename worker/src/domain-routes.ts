@@ -251,7 +251,7 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
   // E4: compatibility projections (links.classification) never carry held AI terms.
   const storedAutomatic = { ...projection.effectiveAutomatic,
     entities: state === "completed_nonempty" ? entities as string[] : [] };
-  const storedView = effectiveView(storedAutomatic, projection.projectionInput.overrides);
+  const storedView = effectiveView(storedAutomatic, projection.projectionInput.overrides, projection.deletedTags);
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO entity_operations(operation_key,link_id,request_hash,evidence_snapshot_id,content_revision,content_hash,payload,outcome,created_at)
@@ -866,7 +866,7 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
   const futureAutomatic = { ...automatic, entities: snapshot.automatic.entities };
   // E4: the AI tagging preferences decide which of this decision's terms wait for confirmation.
   const aiHolds = computeHolds(futureAutomatic, (await readPreferences(env)).value);
-  const futureView = effectiveView(withoutHolds(futureAutomatic, aiHolds), snapshot.projectionInput.overrides);
+  const futureView = effectiveView(withoutHolds(futureAutomatic, aiHolds), snapshot.projectionInput.overrides, snapshot.deletedTags);
   const heldStatement = holdInsertStatement(env, operationKey, id, aiHolds, new Date().toISOString());
   const inputGuard = projectionInputGuard(id, snapshot);
   const guard: WriteGuard = {
@@ -1033,7 +1033,7 @@ async function recordOverride(
   const revision = snapshot.link.personal_revision + 1;
   const inputGuard = projectionInputGuard(id, snapshot);
   const futureView = effectiveView(snapshot.effectiveAutomatic, [...snapshot.projectionInput.overrides,
-    { field, term, action, source: "human", confirmed: true, revision }]);
+    { field, term, action, source: "human", confirmed: true, revision }], snapshot.deletedTags);
   const projectedGuard = overrideProjectionGuard(id, snapshot, revision, operationKey, payloadHash);
   const accepted = `SELECT 1 FROM curation_overrides WHERE operation_key = ? AND link_id = ? AND revision = ? AND payload_hash = ?`;
   const results = await env.DB.batch([
@@ -1216,7 +1216,7 @@ export async function persistSelectionOverrides(
   });
   const payload = JSON.stringify(changes);
   const inputGuard = projectionInputGuard(id, snapshot);
-  const futureView = effectiveView(snapshot.effectiveAutomatic, [...snapshot.projectionInput.overrides, ...changes]);
+  const futureView = effectiveView(snapshot.effectiveAutomatic, [...snapshot.projectionInput.overrides, ...changes], snapshot.deletedTags);
   const selection = selectionFromView(futureView);
   const projectedGuard = selectionProjectionGuard(id, snapshot, revision, changes.map((entry) => entry.operation_key));
   let results: D1Result[];
@@ -1344,11 +1344,12 @@ type SelectionSnapshot = NonNullable<Awaited<ReturnType<typeof readSelectionSnap
 // unchanged. Every domain statement in the batch must use this predicate.
 export function projectionInputGuard(id: number, snapshot: SelectionSnapshot): WriteGuard {
   return {
-    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+    sql: `(SELECT COALESCE(MAX(revision),0) FROM tag_catalog_operations WHERE action='delete')=?
+      AND EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
       AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?
       AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
       AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?`,
-    bindings: [id, snapshot.link.personal_revision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+    bindings: [snapshot.projectionInput.deletionRevision, id, snapshot.link.personal_revision, snapshot.link.content_revision, snapshot.projectionInput.classification,
       id, snapshot.projectionInput.decisionId, id, snapshot.projectionInput.entityRevision,
       id, snapshot.projectionInput.legacyId]
   };
@@ -1356,12 +1357,13 @@ export function projectionInputGuard(id: number, snapshot: SelectionSnapshot): W
 
 function decisionProjectionGuard(id: number, snapshot: SelectionSnapshot, operationKey: string, payloadHash: string): WriteGuard {
   return {
-    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+    sql: `(SELECT COALESCE(MAX(revision),0) FROM tag_catalog_operations WHERE action='delete')=?
+      AND EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
       AND (SELECT id FROM classification_decisions WHERE link_id=? ORDER BY id DESC LIMIT 1)=
         (SELECT id FROM classification_decisions WHERE link_id=? AND operation_key=? AND payload_hash=?)
       AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
       AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?`,
-    bindings: [id, snapshot.link.personal_revision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+    bindings: [snapshot.projectionInput.deletionRevision, id, snapshot.link.personal_revision, snapshot.link.content_revision, snapshot.projectionInput.classification,
       id, id, operationKey, payloadHash, id, snapshot.projectionInput.entityRevision,
       id, snapshot.projectionInput.legacyId]
   };
@@ -1370,12 +1372,13 @@ function decisionProjectionGuard(id: number, snapshot: SelectionSnapshot, operat
 function overrideProjectionGuard(id: number, snapshot: SelectionSnapshot, personalRevision: number,
   operationKey: string, payloadHash: string): WriteGuard {
   return {
-    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+    sql: `(SELECT COALESCE(MAX(revision),0) FROM tag_catalog_operations WHERE action='delete')=?
+      AND EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
       AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?
       AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
       AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?
       AND EXISTS (SELECT 1 FROM curation_overrides WHERE link_id=? AND operation_key=? AND payload_hash=? AND revision=?)`,
-    bindings: [id, personalRevision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+    bindings: [snapshot.projectionInput.deletionRevision, id, personalRevision, snapshot.link.content_revision, snapshot.projectionInput.classification,
       id, snapshot.projectionInput.decisionId, id, snapshot.projectionInput.entityRevision,
       id, snapshot.projectionInput.legacyId, id, operationKey, payloadHash, personalRevision]
   };
@@ -1384,13 +1387,14 @@ function overrideProjectionGuard(id: number, snapshot: SelectionSnapshot, person
 function selectionProjectionGuard(id: number, snapshot: SelectionSnapshot, personalRevision: number,
   actionKeys: string[]): WriteGuard {
   return {
-    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+    sql: `(SELECT COALESCE(MAX(revision),0) FROM tag_catalog_operations WHERE action='delete')=?
+      AND EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
       AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?
       AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
       AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?
       AND (SELECT COUNT(*) FROM curation_overrides WHERE link_id=? AND revision=?
         AND operation_key IN (SELECT value FROM json_each(?)))=?`,
-    bindings: [id, personalRevision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+    bindings: [snapshot.projectionInput.deletionRevision, id, personalRevision, snapshot.link.content_revision, snapshot.projectionInput.classification,
       id, snapshot.projectionInput.decisionId, id, snapshot.projectionInput.entityRevision,
       id, snapshot.projectionInput.legacyId, id, personalRevision, JSON.stringify(actionKeys), actionKeys.length]
   };
@@ -1400,13 +1404,14 @@ function entityProjectionGuard(id: number, snapshot: SelectionSnapshot, operatio
   requestHash: string, outcome: "stored" | "ignored_stale"): WriteGuard {
   const expectedEntityRevision = snapshot.projectionInput.entityRevision + (outcome === "stored" ? 1 : 0);
   return {
-    sql: `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
+    sql: `(SELECT COALESCE(MAX(revision),0) FROM tag_catalog_operations WHERE action='delete')=?
+      AND EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=? AND classification IS ?)
       AND COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?
       AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?
       AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
       AND EXISTS (SELECT 1 FROM entity_operations WHERE link_id=? AND operation_key=? AND request_hash=? AND outcome=?)
       AND (?='ignored_stale' OR EXISTS (SELECT 1 FROM entity_states WHERE link_id=? AND operation_key=?))`,
-    bindings: [id, snapshot.link.personal_revision, snapshot.link.content_revision, snapshot.projectionInput.classification,
+    bindings: [snapshot.projectionInput.deletionRevision, id, snapshot.link.personal_revision, snapshot.link.content_revision, snapshot.projectionInput.classification,
       id, snapshot.projectionInput.decisionId, id, snapshot.projectionInput.legacyId,
       id, expectedEntityRevision, id, operationKey, requestHash, outcome,
       outcome, id, operationKey]
@@ -1448,10 +1453,11 @@ export async function completionProjectionPlan(
 ): Promise<{ preGuard: WriteGuard; postGuard: WriteGuard; statements: D1PreparedStatement[] } | null> {
   const snapshot = await readSelectionSnapshot(env, id);
   if (!snapshot) return null;
-  const identity = `EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=?)
+  const identity = `(SELECT COALESCE(MAX(revision),0) FROM tag_catalog_operations WHERE action='delete')=?
+    AND EXISTS (SELECT 1 FROM links WHERE id=? AND personal_revision=? AND content_revision=?)
     AND COALESCE((SELECT revision FROM entity_states WHERE link_id=?),0)=?
     AND COALESCE((SELECT MAX(id) FROM legacy_curation_history WHERE link_id=?),0)=?`;
-  const identityBindings = [id, snapshot.link.personal_revision, snapshot.link.content_revision,
+  const identityBindings = [snapshot.projectionInput.deletionRevision, id, snapshot.link.personal_revision, snapshot.link.content_revision,
     id, snapshot.projectionInput.entityRevision, id, snapshot.projectionInput.legacyId];
   const priorDecision = `COALESCE((SELECT MAX(id) FROM classification_decisions WHERE link_id=?),0)=?`;
   const preGuard: WriteGuard = {
@@ -1477,7 +1483,7 @@ export async function completionProjectionPlan(
   // Held terms (E4) never reach the compatibility projections either.
   const compatAutomatic = automatic !== null ? withoutHolds(futureAutomatic, holds)
     : snapshot.projected ? snapshot.effectiveAutomatic : futureAutomatic;
-  const view = effectiveView(compatAutomatic, snapshot.projectionInput.overrides);
+  const view = effectiveView(compatAutomatic, snapshot.projectionInput.overrides, snapshot.deletedTags);
   const statements = projectionWrites(env, id, snapshot.link.personal_revision, view, compatAutomatic,
     projected, snapshot.contentRevision, automatic !== null ? false : snapshot.stale,
     snapshot.decisionId, JSON.stringify(classification), postGuard);

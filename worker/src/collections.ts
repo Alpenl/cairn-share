@@ -1,3 +1,4 @@
+import { currentRuleRefsSQL } from "./tag-deletion";
 import { resolveRuleTags, previewRule, resolveRule, ruleV2SQL, ruleBindings, matchedRefsSQL, type CollectionRule } from "./collection-rules";
 import type { Env } from "./index";
 import { readJSONObject } from "./json-body";
@@ -149,7 +150,7 @@ export async function collectionsRoute(request:Request,env:Env,path:string, elig
    if("admission" in b){patch.push("rule_admission=?");values.push(b.admission);}
    if("confirmed_only" in b){patch.push("rule_confirmed_only=?");values.push(Number(b.confirmed_only));}}
   if(type==="delete"||type==="restore") patch.push(`deleted=${type==="delete"?1:0}`);
-  let condition="";
+  let condition=type==="rule" ? ` AND ${currentRuleRefsSQL}` : "";
   if(type==="restore") condition=" AND (SELECT COUNT(*) FROM collections WHERE deleted=0)<500";
   if(type==="add") condition=" AND (SELECT COUNT(*) FROM collection_items WHERE collection_id=collections.id)+(SELECT COUNT(*) FROM json_each(?) j WHERE NOT EXISTS(SELECT 1 FROM collection_items i WHERE i.collection_id=collections.id AND i.link_id=j.value))<=1000",values.push(JSON.stringify(b.link_ids));
   if(type==="review_accept"||type==="review_ignore") condition=" AND (SELECT COUNT(*) FROM collection_rule_candidates k WHERE k.collection_id=collections.id AND k.link_id IN(SELECT value FROM json_each(?)) AND k.status IN("+(type==="review_accept"?"'pending','ignored'":"'pending'")+"))=?"+(type==="review_accept"?" AND (SELECT COUNT(*) FROM collection_items WHERE collection_id=collections.id)+json_array_length(?)<=1000":""),values.push(JSON.stringify(b.link_ids),(b.link_ids as number[]).length,...(type==="review_accept"?[JSON.stringify(b.link_ids)]:[]));
@@ -158,6 +159,7 @@ export async function collectionsRoute(request:Request,env:Env,path:string, elig
   if(eligibility){condition+=" AND NOT EXISTS(SELECT 1 FROM json_each(?) j LEFT JOIN links l ON l.id=j.value LEFT JOIN collection_organizing_items i ON i.link_id=j.value AND i.run_id=? WHERE l.id IS NULL OR i.content_revision IS NOT l.content_revision OR i.status NOT IN('ready','applied'))";values.push(JSON.stringify(eligibility.linkIDs),eligibility.runID);if(eligibility.actionID){condition+=" AND EXISTS(SELECT 1 FROM collection_organizing_actions WHERE id=? AND status='pending')";values.push(eligibility.actionID);}}
   // Patch bindings precede the admission bindings. Conditions follow them.
   const patchValues=["edit","rule"].includes(type)?values:[];const conditionValues=["edit","rule"].includes(type)?[]:values;
+  if(type==="rule"){const refs=JSON.stringify([...(b.tag_refs as string[]),...((b.exclude_tag_refs??[]) as string[])]);conditionValues.push(refs,refs);}
   statements.push(env.DB.prepare(`UPDATE collections SET ${patch.length?patch.join(',')+',':""}revision=revision+1,last_operation=?,updated_at=? WHERE id=? AND revision=? AND deleted=? AND NOT EXISTS(SELECT 1 FROM collection_operations WHERE operation_key=?)${condition}`)
    .bind(...patchValues,admission,stamp,id,expected,type==="restore"?1:0,op,...conditionValues));
  }

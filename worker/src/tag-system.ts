@@ -1,3 +1,4 @@
+import { deletedCollectionRules } from "./tag-deletion";
 import { managedCatalog, filterCatalog } from "./tag-catalog";
 import type { Taxonomy } from "./taxonomy-v2";
 import { encodeCursor, decodeCursor } from "./cursor";
@@ -218,7 +219,7 @@ async function applyActions(request: Request, env: Env, id: number) {
       }
     } else return fail("invalid_action");
   }
-  const future = effectiveView(snapshot.effectiveAutomatic, [...snapshot.projectionInput.overrides, ...changes]);
+  const future = effectiveView(snapshot.effectiveAutomatic, [...snapshot.projectionInput.overrides, ...changes], snapshot.deletedTags);
   const display = (await env.DB.prepare(`SELECT dimension,term_id,label,display_revision FROM taxonomy_display_overrides`).all<{
     dimension: string; term_id: string; label: string; display_revision: number
   }>()).results;
@@ -308,7 +309,7 @@ async function history(env: Env, id: number, params: URLSearchParams, granularit
 async function customRoute(request: Request, env: Env, id?: string): Promise<Response> {
   if (request.method === "GET" && !id) {
     const rows = await env.DB.prepare(`SELECT t.id,t.owner_id,t.label,t.revision,t.status,COUNT(a.link_id) AS link_count
-      FROM custom_tags t LEFT JOIN custom_tag_links a ON a.tag_id=t.id WHERE t.owner_id=? GROUP BY t.id ORDER BY t.label,t.id`).bind(owner).all<Custom>();
+      FROM custom_tags t LEFT JOIN custom_tag_links a ON a.tag_id=t.id WHERE t.owner_id=? AND NOT EXISTS(SELECT 1 FROM custom_tag_operations d WHERE d.tag_id=t.id AND d.action='delete') GROUP BY t.id ORDER BY t.label,t.id`).bind(owner).all<Custom>();
     return reply({ tags: rows.results.map(tagged) });
   }
   if (!((request.method === "POST" && !id) || (id && ["PATCH", "DELETE"].includes(request.method)))) return fail("method_not_allowed", 405);
@@ -318,10 +319,14 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
   const key = body.operation_key;
   const stored = await env.DB.prepare(`SELECT payload_hash,after_value FROM custom_tag_operations WHERE operation_key=?`).bind(key).first<{ payload_hash: string; after_value: string }>();
   if (stored) return stored.payload_hash !== payloadHash ? fail("operation_conflict", 409) : reply({ tag: tagged(JSON.parse(stored.after_value) as Custom), replayed: true });
-  const current = id ? await env.DB.prepare(`SELECT * FROM custom_tags WHERE id=? AND owner_id=?`).bind(id, owner).first<Custom>() : null;
+  const current = id ? await env.DB.prepare(`SELECT * FROM custom_tags WHERE id=? AND owner_id=? AND NOT EXISTS(SELECT 1 FROM custom_tag_operations d WHERE d.tag_id=custom_tags.id AND d.action='delete')`).bind(id, owner).first<Custom>() : null;
   if (id && !current) return fail("not_found", 404);
   if (current && body.expected_revision !== current.revision) return fail("revision_conflict", 409, { tag: tagged(current) });
   const deleting = request.method === "DELETE";
+  if (body.permanent !== undefined && (!deleting || typeof body.permanent !== 'boolean')) return fail('invalid_tag_operation');
+  // DELETE historically archived a custom definition. Keep old clients able to
+  // restore it; permanent removal is an explicit opt-in from the new UI.
+  const permanent = deleting && body.permanent === true;
   if(body.archived!==undefined&&(typeof body.archived!=="boolean"||!current||request.method!=="PATCH"))return fail("invalid_tag_operation");
   if (!deleting && !text(body.label, 80)) return fail("invalid_label");
   const label = deleting ? current!.label : String(body.label).trim(), normalized = normalizeName(label);
@@ -365,7 +370,7 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
   }
   const statements = [env.DB.prepare(`INSERT INTO custom_tag_operations(operation_key,tag_id,payload_hash,action,before_value,after_value,created_at)
     SELECT ?,?,?,?,?,?,? WHERE ${guard}`)
-    .bind(key, tagID, payloadHash, request.method, current ? canonicalJSON({ ...current, link_count: links.length }) : null, canonicalJSON(next), now, ...bindings)];
+    .bind(key, tagID, payloadHash, permanent ? 'delete' : request.method, current ? canonicalJSON({ ...current, link_count: links.length }) : null, canonicalJSON(next), now, ...bindings)];
   // Definitions must exist before their receipts' FK is inserted.
   if (!current) statements.unshift(env.DB.prepare(`INSERT INTO custom_tags(id,owner_id,label,normalized_label,revision,status,created_at,updated_at)
     VALUES(?,?,?,?,1,'active',?,?)`).bind(tagID, owner, label, normalized, now, now));
@@ -374,7 +379,7 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
     statements[1] = env.DB.prepare(`INSERT INTO custom_tag_operations(operation_key,tag_id,payload_hash,action,before_value,after_value,created_at)
       VALUES(?,?,?,'POST',NULL,?,?)`).bind(key, tagID, payloadHash, canonicalJSON(next), now);
   } else statements.push(env.DB.prepare(`UPDATE custom_tags SET label=?,normalized_label=?,revision=?,status=?,updated_at=? WHERE id=? AND ${guard}`)
-    .bind(label, normalized, next.revision, next.status, now, tagID, ...bindings));
+    .bind(label, permanent ? `deleted:${tagID}:`+"~".repeat(80) : normalized, next.revision, next.status, now, tagID, ...bindings));
   const definitionAccepted='EXISTS(SELECT 1 FROM custom_tag_operations WHERE operation_key=? AND payload_hash=?)';
   statements.push(env.DB.prepare(`UPDATE custom_tags SET dimension_id=?,description=?,aliases=?,ai_enabled=? WHERE id=? AND ${definitionAccepted}`)
     .bind(next.dimension_id,next.description,next.aliases,next.ai_enabled,tagID,key,payloadHash));
@@ -389,6 +394,7 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
       .bind(JSON.stringify(links), key, payloadHash));
     statements.push(env.DB.prepare(`DELETE FROM custom_tag_links WHERE tag_id=? AND ${accepted}`).bind(tagID, key, payloadHash));
   }
+  if (permanent) statements.push(...deletedCollectionRules(env, [`custom/${owner}/${tagID}`], now, definitionAccepted, [key, payloadHash]));
   try { await env.DB.batch(statements); } catch (cause) {
     const receipt = await env.DB.prepare(`SELECT payload_hash,after_value FROM custom_tag_operations WHERE operation_key=?`).bind(key).first<{ payload_hash: string; after_value: string }>();
     if (receipt) return receipt.payload_hash === payloadHash ? reply({ tag: tagged(JSON.parse(receipt.after_value)), replayed: true }) : fail("operation_conflict", 409);

@@ -1,7 +1,7 @@
 import type { Env } from "./index";
 import { HELD_FIELDS, withoutHolds, type Hold } from "./ai-holds";
 import { effectiveView, effectiveOrigins, EMPTY_AUTOMATIC, normalizeField, validAssessment,
-  type AutomaticView, type Override, type OverrideField } from "./domain";
+  withoutDeletedTags, type DeletedTag, type AutomaticView, type Override, type OverrideField } from "./domain";
 
 const dimensions = ["topics", "content_functions", "carriers", "affordances", "form", "use", "resource_kinds"] as const;
 const parse = <T>(value: string | null, fallback: T): T => {
@@ -17,7 +17,7 @@ type Entity = { state: string; content_revision: number; content_hash: string; e
 type Queue = { status: string; content_revision: number };
 type Evidence = { id: number; content_hash: string; truncated: number; completeness: string };
 type Row = { id: number; personal_revision: number; content_revision: number; classification: string | null;
-  why: string | null; curation_status: string | null; decision: string | null; overrides: string;
+  deleted_tags: string; deletion_revision: number; why: string | null; curation_status: string | null; decision: string | null; overrides: string;
   legacy: string | null; entity: string | null; queue: string | null; evidence: string | null; ai_holds?: string | null };
 
 export type SummaryCustomTag = { id: string; owner_id: string; label: string; revision: number; status: string; origin?:string };
@@ -86,6 +86,9 @@ function legacyOverrides(source: Legacy | null): Override[] {
 // even when every individual query is correct. Never read mutable projections.
 function selectionSQL(where: string, includeReading: boolean, extraColumns = ""): string {
   return `SELECT l.id,l.personal_revision,l.content_revision,l.classification,l.why,l.curation_status,
+    (SELECT COALESCE(MAX(revision),0) FROM tag_catalog_operations WHERE action='delete') AS deletion_revision,
+    (SELECT json_group_array(json_object('field',CASE dimension WHEN 'forms' THEN 'form' WHEN 'uses' THEN 'use' ELSE dimension END,'term',term_id))
+      FROM tag_catalog_operations WHERE action='delete') AS deleted_tags,
     (SELECT json_object('id',d.id,'content_revision',d.content_revision,'automatic',d.automatic,'policy_version',d.policy_version,
       'run_references_complete',d.run_references_complete,'runs',
       (SELECT json_group_array(json_object('coverage',r.coverage,'evidence_coverage',r.evidence_coverage))
@@ -152,7 +155,7 @@ export async function readSelectionExport(env: Env, filters: { clauses: string[]
   const rowsSQL = selectionSQL(`l.id IN (SELECT id FROM matched)${beforeId ? " AND l.id<?" : ""}`, false,
     `,l.url,l.note,${tagSummaryColumns("l")}`) + " ORDER BY l.id DESC LIMIT ?";
   const fields = ["id", "personal_revision", "content_revision", "classification", "why", "curation_status", "decision",
-    "overrides", "legacy", "entity", "queue", "evidence", "url", "note", "tag_topics", "tag_resources", "tag_functions", "tag_custom_tags"];
+    "overrides", "legacy", "entity", "queue", "evidence", "deleted_tags", "deletion_revision", "ai_holds", "url", "note", "tag_topics", "tag_resources", "tag_functions", "tag_custom_tags"];
   const rowJSON = fields.map(field => `'${field}',e.${field}`).join(",");
   const envelope = await env.DB.prepare(`WITH matched AS MATERIALIZED (SELECT id FROM links WHERE ${matched})
     SELECT COALESCE((SELECT value FROM cache_metadata WHERE key='links_generation'),0) AS version,
@@ -187,10 +190,11 @@ function selectionFromRow(link: Row) {
   const layered = [...legacyOverrides(legacy), ...overrides];
   // E4: held automatic terms (see ai-holds.ts) are suggestions, not tags, until a person accepts them.
   const holds = decision ? parse<Hold[]>(link.ai_holds ?? null, []).filter((h) => h && typeof h.term === "string") : [];
-  const effectiveAutomatic = withoutHolds(automatic, holds);
-  const view = effectiveView(effectiveAutomatic, layered);
+  const deletedTags = parse<DeletedTag[]>(link.deleted_tags, []);
+  const effectiveAutomatic = withoutDeletedTags(withoutHolds(automatic, holds), deletedTags);
+  const view = effectiveView(effectiveAutomatic, layered, deletedTags);
   const lastAction = (field: string, term: string) => [...layered].reverse().find((o) => o.field === field && o.term === term)?.action;
-  const aiPending = holds.filter((h) => h.reason !== "limit" && !(view[h.field] ?? []).includes(h.term) && lastAction(h.field, h.term) !== "reject")
+  const aiPending = holds.filter((h) => !deletedTags.some(d => d.field === h.field && d.term === h.term) && h.reason !== "limit" && !(view[h.field] ?? []).includes(h.term) && lastAction(h.field, h.term) !== "reject")
     .map((h) => ({ field: h.field, term: h.term, reason: h.reason, probability: h.probability ?? null }))
     .sort((a, b) => HELD_FIELDS.indexOf(a.field) - HELD_FIELDS.indexOf(b.field) ||
       (automatic[a.field] ?? []).indexOf(a.term) - (automatic[b.field] ?? []).indexOf(b.term));
@@ -232,9 +236,10 @@ function selectionFromRow(link: Row) {
     return [field, { ...origins[field], status, assessment_available: assessment !== null, incomplete, candidates }];
   }));
   return {
-    link, view, automatic, effectiveAutomatic, decisionId: decision?.id ?? 0, projected: decision !== null, stale, contentRevision: link.content_revision,
+    link, view, automatic, effectiveAutomatic, deletedTags, decisionId: decision?.id ?? 0, projected: decision !== null, stale, contentRevision: link.content_revision,
     entity, entityStale, overrides: layered,
     projectionInput: {
+      deletionRevision: link.deletion_revision,
       overrides: layered,
       decisionId: decision?.id ?? 0,
       entityRevision: entity?.revision ?? 0,
