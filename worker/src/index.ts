@@ -1,3 +1,4 @@
+import { workspace } from "./workspace";
 import { drainCustomTagClassification } from './custom-tag-classification';
 import { captureUploads } from './capture-uploads';
 import { pendingCaptures } from './pending-captures';
@@ -712,6 +713,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const authError = requireEnricherToken(request, env);
     if (authError !== null) return authError;
     return routeMethod(request, ["GET"], () => getEnrichmentOverview(request, url, env, timing));
+  }
+
+  if (path === "/api/enrichment/workspace" || /^\/api\/enrichment\/workspace\/(?:[1-9][0-9]*|collections\/[a-f0-9-]{36})$/.test(path)) {
+    const authError = requireEnricherToken(request, env);
+    if (authError !== null) return authError;
+    return routeMethod(request, ["GET"], () => workspace(request, env));
   }
 
   if (path === "/api/enrichment/backstage") {
