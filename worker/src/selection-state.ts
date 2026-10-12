@@ -20,7 +20,7 @@ type Row = { id: number; personal_revision: number; content_revision: number; cl
   why: string | null; curation_status: string | null; decision: string | null; overrides: string;
   legacy: string | null; entity: string | null; queue: string | null; evidence: string | null; ai_holds?: string | null };
 
-export type SummaryCustomTag = { id: string; owner_id: string; label: string; revision: number; status: string };
+export type SummaryCustomTag = { id: string; owner_id: string; label: string; revision: number; status: string; origin?:string };
 export type TagSummary = { topics: string[]; resource_kinds: string[]; content_functions: string[]; custom_tags: SummaryCustomTag[] };
 export type TagSummaryRow = { tag_topics: string; tag_resources: string; tag_functions: string; tag_custom_tags: string };
 export type TagOriginsRow = { field: string; term: string; action: string; actions: string | null; context: string | null };
@@ -32,8 +32,8 @@ export function tagSummaryColumns(alias = "links", ownerSQL = "'default'"): stri
   const terms = (field: string, name: string) => `(SELECT json_group_array(term) FROM
     (SELECT term FROM effective_tag_memberships WHERE link_id=${alias}.id AND field='${field}' ORDER BY position,term)) AS ${name}`;
   return `${terms("topics", "tag_topics")},${terms("resource_kinds", "tag_resources")},${terms("content_functions", "tag_functions")},
-    (SELECT json_group_array(json_object('id',t.id,'owner_id',t.owner_id,'label',t.label,'revision',t.revision,'status',t.status))
-      FROM (SELECT t.id,t.owner_id,t.label,t.revision,t.status FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id
+    (SELECT json_group_array(json_object('id',t.id,'owner_id',t.owner_id,'label',t.label,'revision',t.revision,'status',t.status,'origin',t.origin))
+      FROM (SELECT t.id,t.owner_id,t.label,t.revision,t.status,a.origin FROM custom_tag_links a JOIN custom_tags t ON t.id=a.tag_id
         WHERE a.link_id=${alias}.id AND t.owner_id=${ownerSQL} ORDER BY t.label,t.id) t) AS tag_custom_tags`;
 }
 export function tagSummaryFromRow(row: TagSummaryRow): TagSummary {

@@ -25,7 +25,7 @@ const confirmedSQL=(link:string)=>`EXISTS(SELECT 1 FROM curation_overrides o WHE
 // The same predicate powers preview, backfill and final admission. It observes
 // final indexed memberships, after the enclosing human/classification transaction.
 const tagMatchSQL=(link:string,confirmed=false)=>`((json_extract(t.value,'$.kind')='system' AND EXISTS(SELECT 1 FROM effective_tag_memberships e WHERE e.link_id=${link} AND e.field=json_extract(t.value,'$.field') AND e.term=json_extract(t.value,'$.term'))${confirmed?` AND ${confirmedSQL(link)}`:""})
- OR (json_extract(t.value,'$.kind')='custom' AND EXISTS(SELECT 1 FROM custom_tag_links a JOIN custom_tags c ON c.id=a.tag_id WHERE a.link_id=${link} AND a.tag_id=json_extract(t.value,'$.term') AND c.owner_id='default' AND c.status='active')))`;
+ OR (json_extract(t.value,'$.kind')='custom' AND EXISTS(SELECT 1 FROM custom_tag_links a JOIN custom_tags c ON c.id=a.tag_id WHERE a.link_id=${link} AND a.tag_id=json_extract(t.value,'$.term') AND c.owner_id='default' AND c.status='active'${confirmed?" AND a.origin='human'":""})))`;
 /** Bindings: tags JSON, required count. Kept for callers that only know v1 rules. */
 export const ruleMatchSQL=(link='l.id')=>`(SELECT COUNT(*) FROM json_each(?) t WHERE ${tagMatchSQL(link)}) >= ?`;
 export const matchedRefsSQL=(link='l.id',confirmed=false)=>`(SELECT json_group_array(json_extract(t.value,'$.ref')) FROM json_each(?) t WHERE ${tagMatchSQL(link,confirmed)})`;

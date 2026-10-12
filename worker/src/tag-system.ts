@@ -17,10 +17,10 @@ const object = (v: unknown): v is Record<string, unknown> => v !== null && typeo
 const text = (v: unknown, max = 200): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
 const owner = "default"; // Existing deployment is single-account; never trust a caller owner id.
 const dimensions: OverrideField[] = ["topics", "resource_kinds", "content_functions", "carriers", "affordances", "form", "use"];
-type Custom = { id: string; owner_id: string; label: string; revision: number; status: string; link_count?: number };
+type Custom = { id: string; owner_id: string; label: string; revision: number; status: string; link_count?: number; dimension_id?: string|null; description?:string; aliases?:string; ai_enabled?:number; origin?:string };
 const ref = (tag: Custom) => `custom/${tag.owner_id}/${tag.id}`;
 const tagged = (tag: Custom) => ({ id: tag.id, owner_id: tag.owner_id, label: tag.label, revision: tag.revision,
-  status: tag.status, tag_ref: ref(tag), ...(tag.link_count === undefined ? {} : { link_count: tag.link_count }) });
+  status: tag.status, tag_ref: ref(tag), origin:tag.origin??"human", dimension_id:tag.dimension_id??null, description:tag.description??"", aliases:JSON.parse(tag.aliases??"[]"), ai_enabled:!!tag.ai_enabled, ...(tag.link_count === undefined ? {} : { link_count: tag.link_count }) });
 async function bodyOf(request: Request): Promise<Record<string, unknown> | null> {
   return readJSONObject(request, 64 << 10);
 }
@@ -42,7 +42,7 @@ function selectable(value: { field: OverrideField; term: string }, catalog?: Tax
   return term?.active === true && !term.deprecated;
 }
 async function customOf(env: Env, id: number) {
-  const rows = await env.DB.prepare(`SELECT t.id,t.owner_id,t.label,t.revision,t.status FROM custom_tags t
+  const rows = await env.DB.prepare(`SELECT t.id,t.owner_id,t.label,t.revision,t.status,a.origin FROM custom_tags t
     JOIN custom_tag_links a ON a.tag_id=t.id WHERE a.link_id=? AND t.owner_id=? ORDER BY t.label,t.id`).bind(id, owner).all<Custom>();
   return rows.results.map(tagged);
 }
@@ -150,6 +150,8 @@ async function applyActions(request: Request, env: Env, id: number) {
   const catalog = (await managedCatalog(env)).catalog;
   const changes: Override[] = [], customBefore = await customOf(env, id), customAfter = new Set(customBefore.map(t => t.id));
   const customBasis = new Map<string, { revision: number; status: string }>();
+  let undoCustom: {tag_id:string;action:string|null;origin:string}[] = [];
+  const beforeCustomOverrides=(await env.DB.prepare('SELECT tag_id,action FROM custom_tag_overrides WHERE link_id=?').bind(id).all<{tag_id:string;action:string}>()).results;
   let undo: string | null = null;
   let restoredActions: Record<string, "accept" | "confirm"> | undefined;
   const add = (field: OverrideField, term: string, action: OverrideAction, source: Override["source"] = "human", confirmed = true) =>
@@ -188,6 +190,14 @@ async function applyActions(request: Request, env: Env, id: number) {
       undo = action.operation_id;
       restoredActions = previous.context ? (JSON.parse(previous.context) as { before_origins?: Record<string, "accept" | "confirm"> }).before_origins : undefined;
       const priorActions = JSON.parse(previous.actions) as Action[];
+      const oldContext=previous.context?JSON.parse(previous.context):{};
+      const oldCustom=JSON.parse(previous.before_custom) as Array<Custom>;
+      undoCustom=priorActions.filter(a=>['attach','detach'].includes(String(a.action))).map(a=>{
+        const tagID=String(a.tag_ref).slice(`custom/${owner}/`.length);
+        const oldTag=oldCustom.find(t=>t.id===tagID);
+        const oldOverride=oldContext.before_custom_overrides?.find((o:{tag_id:string})=>o.tag_id===tagID);
+        return {tag_id:tagID,action:oldContext.before_custom_overrides?oldOverride?.action??null:oldTag?'attach':null,origin:oldTag?.origin??'human'};
+      });
       if (priorActions.some(a => a.action === "undo")) return fail("unsupported_redo", 409);
       const fields = new Set<OverrideField>();
       for (const entry of priorActions) {
@@ -212,7 +222,7 @@ async function applyActions(request: Request, env: Env, id: number) {
   const display = (await env.DB.prepare(`SELECT dimension,term_id,label,display_revision FROM taxonomy_display_overrides`).all<{
     dimension: string; term_id: string; label: string; display_revision: number
   }>()).results;
-  const context = { actor_type: "human", actor_id: owner, content_revision: snapshot.contentRevision,
+  const context = { before_custom_overrides:beforeCustomOverrides, actor_type: "human", actor_id: owner, content_revision: snapshot.contentRevision,
     decision_id: snapshot.decisionId, taxonomy_version: taxonomyV2().version, definition_version: taxonomyV2().definition_version,
     reason: body.reason ?? null, basis: snapshot.state, before_origins: await manualOrigins(env, id, snapshot.link.personal_revision),
     ...(restoredActions ? { restored_actions: restoredActions } : {}), tag_definitions: changes.map(c => {
@@ -250,6 +260,17 @@ async function applyActions(request: Request, env: Env, id: number) {
   for (const tagID of [...customAfter].filter(t => !customBefore.some(before => before.id === t))) {
     statements.push(env.DB.prepare(`INSERT INTO custom_tag_links(link_id,tag_id,created_at) SELECT ?,?,? WHERE ${guard.sql} ON CONFLICT DO NOTHING`)
       .bind(id, tagID, now, ...guard.bindings));
+  }
+  for (const action of actions.filter(a=>['attach','detach'].includes(String(a.action)))) {
+    const tagID=String(action.tag_ref).slice(`custom/${owner}/`.length);
+    statements.push(env.DB.prepare(`INSERT INTO custom_tag_overrides(link_id,tag_id,action) SELECT ?,?,? WHERE ${guard.sql}
+      ON CONFLICT(link_id,tag_id) DO UPDATE SET action=excluded.action`).bind(id,tagID,action.action,...guard.bindings));
+    if(action.action==='attach')statements.push(env.DB.prepare(`UPDATE custom_tag_links SET origin='human' WHERE link_id=? AND tag_id=? AND ${guard.sql}`).bind(id,tagID,...guard.bindings));
+  }
+  for(const prior of undoCustom){
+    statements.push(env.DB.prepare(`DELETE FROM custom_tag_overrides WHERE link_id=? AND tag_id=? AND ${guard.sql}`).bind(id,prior.tag_id,...guard.bindings));
+    if(prior.action)statements.push(env.DB.prepare(`INSERT INTO custom_tag_overrides(link_id,tag_id,action) SELECT ?,?,? WHERE ${guard.sql}`).bind(id,prior.tag_id,prior.action,...guard.bindings));
+    statements.push(env.DB.prepare(`UPDATE custom_tag_links SET origin=? WHERE link_id=? AND tag_id=? AND ${guard.sql}`).bind(prior.origin,id,prior.tag_id,...guard.bindings));
   }
   // Custom-only actions also have a permanent per-bookmark fact.
   statements.push(env.DB.prepare(`INSERT INTO tag_change_facts(link_id,operation_key,operation_id,field,term,action,source,revision,context,created_at)
@@ -322,10 +343,19 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
       return receipt?.payload_hash === payloadHash ? reply({ tag: tagged(JSON.parse(receipt.after_value)), reused: true, replayed: false }) : fail("operation_conflict", 409);
     }
   }
+  const dimensionID=body.dimension_id===undefined?(current?.dimension_id??null):body.dimension_id;
+  const description=body.description===undefined?(current?.description??''):body.description;
+  const aliases=body.aliases===undefined?JSON.parse(current?.aliases??'[]'):body.aliases;
+  const ai=body.ai_enabled===undefined?!!current?.ai_enabled:body.ai_enabled;
+  if((dimensionID!==null&&typeof dimensionID!=='string')||typeof description!=='string'||description.length>1000||description.includes('\0')||
+    !Array.isArray(aliases)||aliases.length>20||aliases.some(x=>typeof x!=='string'||!x.trim()||x.length>80||x.includes('\0'))||
+    typeof ai!=='boolean'||(ai&&(!dimensionID||!description.trim())))return fail('invalid_tag_definition');
+  if(dimensionID){const dimension=await env.DB.prepare('SELECT archived FROM custom_dimensions WHERE id=?').bind(dimensionID).first<{archived:number}>();
+    if(!dimension||(!deleting&&dimension.archived))return fail('invalid_dimension');}
   const links = current ? (await env.DB.prepare(`SELECT link_id FROM custom_tag_links WHERE tag_id=?`).bind(current.id).all<{ link_id: number }>()).results.map(r => r.link_id) : [];
   if (deleting && links.length && body.detach_all !== true) return fail("tag_in_use", 409, { link_count: links.length });
   const now = new Date().toISOString(), tagID = current?.id ?? crypto.randomUUID();
-  const next: Custom = { id: tagID, owner_id: owner, label, revision: (current?.revision ?? 0) + 1, status: deleting || body.archived===true ? "deprecated" : "active" };
+  const next: Custom = { dimension_id:dimensionID as string|null,description,aliases:JSON.stringify(aliases),ai_enabled:ai?1:0,id: tagID, owner_id: owner, label, revision: (current?.revision ?? 0) + 1, status: deleting || body.archived===true ? "deprecated" : "active" };
   let guard = current ? `EXISTS(SELECT 1 FROM custom_tags WHERE id=? AND revision=?)` : `NOT EXISTS(SELECT 1 FROM custom_tags WHERE owner_id=? AND normalized_label=?)`;
   const bindings = current ? [tagID, current.revision] : [owner, normalized];
   if (deleting) {
@@ -345,6 +375,9 @@ async function customRoute(request: Request, env: Env, id?: string): Promise<Res
       VALUES(?,?,?,'POST',NULL,?,?)`).bind(key, tagID, payloadHash, canonicalJSON(next), now);
   } else statements.push(env.DB.prepare(`UPDATE custom_tags SET label=?,normalized_label=?,revision=?,status=?,updated_at=? WHERE id=? AND ${guard}`)
     .bind(label, normalized, next.revision, next.status, now, tagID, ...bindings));
+  const definitionAccepted='EXISTS(SELECT 1 FROM custom_tag_operations WHERE operation_key=? AND payload_hash=?)';
+  statements.push(env.DB.prepare(`UPDATE custom_tags SET dimension_id=?,description=?,aliases=?,ai_enabled=? WHERE id=? AND ${definitionAccepted}`)
+    .bind(next.dimension_id,next.description,next.aliases,next.ai_enabled,tagID,key,payloadHash));
   if (deleting && links.length) {
     const accepted = `EXISTS(SELECT 1 FROM custom_tag_operations WHERE operation_key=? AND payload_hash=?)`;
     statements.push(env.DB.prepare(`INSERT INTO tag_change_facts(link_id,operation_key,operation_id,field,term,action,source,revision,context,created_at)
