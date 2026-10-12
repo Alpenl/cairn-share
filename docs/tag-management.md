@@ -20,3 +20,25 @@
 0059 保存不可变目录和操作回执；0060 保存规则、人工排除和持久队列。分类或人工标签事务只标记受影响的收藏，后台每次有限处理，失败可续传。NAS每15秒唤醒；Worker的请求完成任务及原定时维护提供补偿。归属写入与合集/缓存 revision 同事务，正文缓存与模型账本不变。
 
 Android `collections.db` 从2升级至3，单独保存当前账号的目录和一项待确认标签修改；原正文、媒体文件与游标继续复用。结果未知沿用原操作编号，明确拒绝后的意图不能因后续离线刷新而自动重提。
+
+## 2026-10 重设计：规则 v2、标签合并与偏好
+
+协议：合集接口接受 `X-Cairn-Collections: 1` 或 `2`，响应回显同一版本。v1 客户端行为不变，既看不到也不能修改 v2 字段；用 v1 修改规则时保留已有 v2 设置。
+
+| 迁移 | 内容 |
+|---|---|
+| 0063 | `collections` 增加 `rule_exclude_tags`（排除标签，带任一个即不收）、`rule_admission`（`direct` 直接加入 / `review` 先进待审）、`rule_confirmed_only`（只认人工确认过的系统标签）；新表 `collection_rule_candidates` 保存待审候选，忽略过的不再提议 |
+| 0064 | `tag_merges` 合并记录与 `tag_merge_queue` 逐条迁移队列 |
+| 0065 | `preferences` 跨设备 AI 打标偏好（单行 + CAS + 幂等回执） |
+
+接口（App 令牌走 `/api/...`；NAS 工作区用内部令牌走 `/api/v2/tag-catalog/...` 与 `/api/enrichment/...` 同名路径）：
+
+- `rule` 操作新增 `exclude_tag_refs`、`admission`、`confirmed_only`（v2）。`backfill` 在待审模式下写入候选而非直接加入。
+- `GET /api/collections/:id/rules/candidates?status=pending|ignored|accepted`、`GET /api/collections/review-summary`；操作 `review_accept` / `review_ignore`（`link_ids`）。合集列表多返回 `pending_review_count`，预览返回 `counts`（将加入、待审、已忽略、被排除标签挡住）。
+- 列表筛选新增统一标签参数：`tags=system/topics/x,custom/default/<id>`、`tags_mode=any|all`、`tags_children=1`（上级主题同时匹配所有下级）。参数进入缓存键。
+- 主题定义可写 `relations`：一个 `broader`（上级主题）和若干 `related`；拒绝环。`synonym` 只由合并写入。
+- `POST /api/tag-catalog/merges`（`kind=system` 仅主题，需目录 revision；`kind=custom` 合并个人标签），`GET /api/tag-catalog/merges/:key`，`POST /api/tag-catalog/merges/:key/undo`。合并时来源标签停用并以同义关系指向目标、别名移到目标、规则引用改写；已有收藏逐条走普通标签操作（`replace` 或 detach+attach），每条都有自己的历史与撤销回执。撤销恢复目录与未被再次修改的规则，并对每条收藏调用它自己的撤销；合并后被人工改过的收藏保持人工结果。队列在请求后、写请求完成后和定时任务中分批处理。
+- `GET /api/tag-catalog/usage`：每个标签的收藏数、最近使用时间、引用它的合集规则，以及最近 20 次合并。
+- `GET /api/links/lookup?url=`：只读判断网页是否已收藏（按 URL 身份），返回标题、收藏原因、图片数和所在合集，供插件弹窗与安卓分享面板显示「已收藏」。
+- `GET /api/preferences`、`POST /api/preferences/operations`：`ai_suggestion_limit`（1–8，默认 3）、`ai_confirm_before_apply`（默认关，保持现有直接生效）、`ai_low_confidence_review`（默认开）。分类流水线读取这些偏好在 cairn-x-enricher E4 中接入。
+- `GET /api/links/legacy-dropped`：旧「整理状态 = 不要」的收藏数。界面已去掉整理状态，这些收藏依旧不进待读、AI 打标和规则，设置页只读提示。

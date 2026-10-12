@@ -1,11 +1,11 @@
-import { resolveRuleTags, previewRule, ruleMatchSQL, matchedRefsSQL, type CollectionRule } from "./collection-rules";
+import { resolveRuleTags, previewRule, resolveRule, ruleV2SQL, ruleBindings, matchedRefsSQL, type CollectionRule } from "./collection-rules";
 import type { Env } from "./index";
 import { readJSONObject } from "./json-body";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const collectionID = (value: unknown): value is string => typeof value === "string" && UUID.test(value);
-const columns = "c.id,c.name,c.description,c.pinned,c.archived,c.deleted,c.revision,c.created_at,c.updated_at,c.rule_enabled,c.rule_mode,c.rule_tags,c.rule_after_id,c.rule_revision";
-const counts = "(SELECT COUNT(*) FROM collection_items i WHERE i.collection_id=c.id) AS item_count";
+const columns = "c.id,c.name,c.description,c.pinned,c.archived,c.deleted,c.revision,c.created_at,c.updated_at,c.rule_enabled,c.rule_mode,c.rule_tags,c.rule_after_id,c.rule_revision,c.rule_exclude_tags,c.rule_admission,c.rule_confirmed_only";
+const counts = "(SELECT COUNT(*) FROM collection_items i WHERE i.collection_id=c.id) AS item_count,(SELECT COUNT(*) FROM collection_rule_candidates k WHERE k.collection_id=c.id AND k.status='pending') AS pending_review_count";
 type Collection = CollectionRule & {deleted:number;item_count:number};
 type Entry = {collection_id:string;link_id:number;position:number;note:string;added_at:string};
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status,headers:{"Content-Type":"application/json","Cache-Control":"private, no-store","X-Cairn-Collections":"1"}});
@@ -42,8 +42,30 @@ async function sync(request:Request,env:Env) {
   changes:rows.map(r=>({...r,value:r.link_id===null?defs.get(r.collection_id)??null:lookup.get(`${r.collection_id}/${r.link_id}`)??null}))});
 }
 
+/** Highest collections protocol this Worker speaks. v2 adds rule exclusions,
+ * review admission, confirmed-only rules and the review queue. */
+export const COLLECTIONS_PROTOCOL=2;
+export const collectionsVersion=(request:Request)=>{const v=request.headers.get("X-Cairn-Collections");return v==="1"?1:v==="2"?2:0;};
+async function candidates(request:Request,env:Env,id:string){
+ const q=new URL(request.url).searchParams;
+ if([...q.keys()].some(k=>!["status","after","limit"].includes(k)||q.getAll(k).length!==1))return error("invalid_query");
+ const status=q.get("status")??"pending",after=Number(q.get("after")??0),limit=Number(q.get("limit")??50);
+ if(!["pending","ignored","accepted"].includes(status)||!Number.isSafeInteger(after)||after<0||!Number.isInteger(limit)||limit<1||limit>100)return error("invalid_query");
+ const rows=await env.DB.prepare(`SELECT k.link_id,k.matched_tags,k.status,k.created_at,k.decided_at,COALESCE(NULLIF(l.ai_title,''),l.url) AS title,l.url
+  FROM collection_rule_candidates k JOIN links l ON l.id=k.link_id WHERE k.collection_id=? AND k.status=? AND (?=0 OR k.link_id<?) ORDER BY k.link_id DESC LIMIT ?`)
+  .bind(id,status,after,after,limit+1).all<{link_id:number;matched_tags:string}>();
+ const items=rows.results.slice(0,limit).map(r=>({...r,matched_tags:JSON.parse(r.matched_tags)}));
+ return reply({items,has_more:rows.results.length>limit,next_after:items.at(-1)?.link_id??null});
+}
 export async function collectionsRoute(request:Request,env:Env,path:string, eligibility?:{runID:string;linkIDs:number[];actionID?:string}):Promise<Response> {
- if(request.headers.get("X-Cairn-Collections")!=="1") return error("capability_mismatch",409);
+ const version=collectionsVersion(request);
+ if(!version) return error("capability_mismatch",409);
+ if(path==="/api/collections/review-summary"){
+  if(version<2)return error("capability_mismatch",409);
+  if(request.method!=="GET")return error("method_not_allowed",405);
+  const rows=await env.DB.prepare("SELECT k.collection_id,COUNT(*) AS pending FROM collection_rule_candidates k JOIN collections c ON c.id=k.collection_id WHERE k.status='pending' AND c.deleted=0 GROUP BY k.collection_id").all<{collection_id:string;pending:number}>();
+  return reply({items:rows.results,total:rows.results.reduce((n,r)=>n+r.pending,0)});
+ }
  if(path==="/api/collections/sync") return request.method==="GET"?sync(request,env):error("method_not_allowed",405);
  if(path==="/api/collections") {
   if(request.method!=="GET") return error("method_not_allowed",405);
@@ -55,6 +77,8 @@ export async function collectionsRoute(request:Request,env:Env,path:string, elig
   const rows=await env.DB.prepare(`SELECT ${columns},${counts},(SELECT COUNT(*) FROM collection_items i WHERE i.collection_id=c.id AND i.link_id IN(SELECT value FROM json_each(?))) AS selected_count FROM collections c ORDER BY pinned DESC,updated_at DESC,id`).bind(JSON.stringify(ids)).all();
   return reply({items:rows.results});
  }
+ const review=path.match(/^\/api\/collections\/([^/]+)\/rules\/candidates$/);
+ if(review){if(version<2)return error("capability_mismatch",409);if(!collectionID(review[1]))return error("invalid_collection");if(request.method!=="GET")return error("method_not_allowed",405);if(!await get(env,review[1]))return error("not_found",404);return candidates(request,env,review[1]);}
  const preview=path.match(/^\/api\/collections\/([^/]+)\/rules\/preview$/);
  if(preview){if(!collectionID(preview[1]))return error("invalid_collection");if(request.method!=="GET")return error("method_not_allowed",405);const current=await get(env,preview[1]);if(!current)return error("not_found",404);return reply({...await previewRule(env,current),revision:current.revision});}
  const m=path.match(/^\/api\/collections\/([^/]+)(\/operations)?$/);
@@ -71,13 +95,15 @@ export async function collectionsRoute(request:Request,env:Env,path:string, elig
  const b=await readJSONObject(request,64*1024);
  if(!b||!collectionID(b.operation_key)||!Number.isSafeInteger(b.expected_revision)||Number(b.expected_revision)<0) return error("invalid_operation");
  const type=b.type;
- const fields:Record<string,string[]>={create:["name","description"],edit:["name","description","pinned","archived"],rule:["enabled","mode","tag_refs"],backfill:[],delete:[],restore:[],add:["link_ids"],remove:["link_ids"],note:["link_id","note"],move:["link_id","before_id"]};
+ const fields:Record<string,string[]>={create:["name","description"],edit:["name","description","pinned","archived"],rule:["enabled","mode","tag_refs","exclude_tag_refs","admission","confirmed_only"],backfill:[],review_accept:["link_ids"],review_ignore:["link_ids"],delete:[],restore:[],add:["link_ids"],remove:["link_ids"],note:["link_id","note"],move:["link_id","before_id"]};
  if(typeof type!=="string"||!Object.hasOwn(fields,type)||Object.keys(b).some(k=>!["operation_key","expected_revision","type",...fields[type]].includes(k))) return error("invalid_operation");
+ // v1 clients keep working: they can neither see nor reset v2 rule settings.
+ if(version<2&&(type.startsWith("review_")||["exclude_tag_refs","admission","confirmed_only"].some(k=>k in b))) return error("capability_mismatch",409);
  if((type==="create"||"name" in b)&&(!text(b.name,80)||!(b.name as string).trim())) return error("invalid_name");
  if("description" in b&&!text(b.description,2000)) return error("invalid_description");
  if(["pinned","archived"].some(k=>k in b&&typeof b[k]!=="boolean")) return error("invalid_operation");
  if(type==="edit"&&!fields.edit.some(k=>k in b)) return error("invalid_operation");
- if(["add","remove"].includes(type)&&(!Array.isArray(b.link_ids)||!b.link_ids.length||b.link_ids.length>100||!b.link_ids.every(positive)||new Set(b.link_ids).size!==b.link_ids.length)) return error("invalid_ids");
+ if(["add","remove","review_accept","review_ignore"].includes(type)&&(!Array.isArray(b.link_ids)||!b.link_ids.length||b.link_ids.length>100||!b.link_ids.every(positive)||new Set(b.link_ids).size!==b.link_ids.length)) return error("invalid_ids");
  if(["note","move"].includes(type)&&!positive(b.link_id)) return error("invalid_ids");
  if(type==="note"&&!text(b.note,2000)) return error("invalid_note");
  if(type==="move"&&!(b.before_id===null||positive(b.before_id)) || type==="move"&&b.before_id===b.link_id) return error("invalid_order");
@@ -85,6 +111,9 @@ export async function collectionsRoute(request:Request,env:Env,path:string, elig
  if(type==="rule") {
   if(typeof b.enabled!=="boolean"||!["any","all"].includes(String(b.mode)))return error("invalid_rule");
   ruleTags=await resolveRuleTags(env,b.tag_refs,b.enabled===true);if(!ruleTags||(b.enabled&&!ruleTags.length))return error("invalid_rule");
+  if("exclude_tag_refs" in b){const ex=await resolveRuleTags(env,b.exclude_tag_refs,b.enabled===true);if(!ex||ex.some(x=>ruleTags!.some(t=>t.ref===x.ref)))return error("invalid_rule");}
+  if("admission" in b&&!["direct","review"].includes(String(b.admission)))return error("invalid_rule");
+  if("confirmed_only" in b&&typeof b.confirmed_only!=="boolean")return error("invalid_rule");
  }
  const hash=await digest([id,Object.fromEntries(Object.entries(b).sort(([a],[z])=>a.localeCompare(z)))]);
  const receipt=()=>env.DB.prepare("SELECT request_hash,revision FROM collection_operations WHERE operation_key=?").bind(b.operation_key).first<{request_hash:string;revision:number}>();
@@ -104,7 +133,7 @@ export async function collectionsRoute(request:Request,env:Env,path:string, elig
  }
  // A distinct transaction admission token prevents concurrent retries of one
  // receipt from repeating member changes after the winning transaction commits.
- const backfillTags=type==="backfill"&&current?await resolveRuleTags(env,JSON.parse(current.rule_tags)):null;
+ const backfillRule=type==="backfill"&&current?await resolveRule(env,current):null;
  const backfill=type==="backfill"&&current?await previewRule(env,current):null;
  if(backfill&&!backfill.rule_valid)return error("invalid_rule");
  const stamp=new Date().toISOString(),next=expected+1,op=b.operation_key,admission=crypto.randomUUID();
@@ -115,11 +144,15 @@ export async function collectionsRoute(request:Request,env:Env,path:string, elig
  else {
   const patch:string[]=[],values:unknown[]=[];
   for(const k of fields.edit) if(type==="edit"&&k in b) {patch.push(`${k}=?`);values.push(typeof b[k]==="boolean"?Number(b[k]):k==="name"?(b[k] as string).trim():b[k]);}
-  if(type==="rule") {patch.push("rule_enabled=?","rule_mode=?","rule_tags=?","rule_after_id=COALESCE((SELECT MAX(id) FROM links),0)","rule_revision=rule_revision+1");values.push(Number(b.enabled),b.mode,JSON.stringify(b.tag_refs));}
+  if(type==="rule") {patch.push("rule_enabled=?","rule_mode=?","rule_tags=?","rule_after_id=COALESCE((SELECT MAX(id) FROM links),0)","rule_revision=rule_revision+1");values.push(Number(b.enabled),b.mode,JSON.stringify(b.tag_refs));
+   if("exclude_tag_refs" in b){patch.push("rule_exclude_tags=?");values.push(JSON.stringify(b.exclude_tag_refs));}
+   if("admission" in b){patch.push("rule_admission=?");values.push(b.admission);}
+   if("confirmed_only" in b){patch.push("rule_confirmed_only=?");values.push(Number(b.confirmed_only));}}
   if(type==="delete"||type==="restore") patch.push(`deleted=${type==="delete"?1:0}`);
   let condition="";
   if(type==="restore") condition=" AND (SELECT COUNT(*) FROM collections WHERE deleted=0)<500";
   if(type==="add") condition=" AND (SELECT COUNT(*) FROM collection_items WHERE collection_id=collections.id)+(SELECT COUNT(*) FROM json_each(?) j WHERE NOT EXISTS(SELECT 1 FROM collection_items i WHERE i.collection_id=collections.id AND i.link_id=j.value))<=1000",values.push(JSON.stringify(b.link_ids));
+  if(type==="review_accept"||type==="review_ignore") condition=" AND (SELECT COUNT(*) FROM collection_rule_candidates k WHERE k.collection_id=collections.id AND k.link_id IN(SELECT value FROM json_each(?)) AND k.status IN("+(type==="review_accept"?"'pending','ignored'":"'pending'")+"))=?"+(type==="review_accept"?" AND (SELECT COUNT(*) FROM collection_items WHERE collection_id=collections.id)+json_array_length(?)<=1000":""),values.push(JSON.stringify(b.link_ids),(b.link_ids as number[]).length,...(type==="review_accept"?[JSON.stringify(b.link_ids)]:[]));
   if(type==="note"||type==="move") condition=" AND EXISTS(SELECT 1 FROM collection_items WHERE collection_id=collections.id AND link_id=?)",values.push(b.link_id);
   if(type==="move"&&b.before_id!==null) condition+=" AND EXISTS(SELECT 1 FROM collection_items WHERE collection_id=collections.id AND link_id=?)",values.push(b.before_id);
   if(eligibility){condition+=" AND NOT EXISTS(SELECT 1 FROM json_each(?) j LEFT JOIN links l ON l.id=j.value LEFT JOIN collection_organizing_items i ON i.link_id=j.value AND i.run_id=? WHERE l.id IS NULL OR i.content_revision IS NOT l.content_revision OR i.status NOT IN('ready','applied'))";values.push(JSON.stringify(eligibility.linkIDs),eligibility.runID);if(eligibility.actionID){condition+=" AND EXISTS(SELECT 1 FROM collection_organizing_actions WHERE id=? AND status='pending')";values.push(eligibility.actionID);}}
@@ -133,16 +166,31 @@ export async function collectionsRoute(request:Request,env:Env,path:string, elig
   .bind(id,id,stamp,eligibility?"organize":"manual",JSON.stringify(b.link_ids),id,admission,next));
  if(type==="add") statements.push(env.DB.prepare(`DELETE FROM collection_rule_exclusions WHERE collection_id=? AND link_id IN(SELECT value FROM json_each(?)) AND ${guard}`).bind(id,JSON.stringify(b.link_ids),id,admission,next));
  if(type==="remove") statements.push(env.DB.prepare(`INSERT INTO collection_rule_exclusions(collection_id,link_id,operation_key,created_at) SELECT ?,value,?,? FROM json_each(?) WHERE ${guard} AND EXISTS(SELECT 1 FROM links WHERE id=value) ON CONFLICT(collection_id,link_id) DO UPDATE SET operation_key=excluded.operation_key,created_at=excluded.created_at`).bind(id,op,stamp,JSON.stringify(b.link_ids),id,admission,next));
- if(backfill?.items.length && backfillTags?.length){
-  const ids=backfill.items.map(i=>i.id),tagJSON=JSON.stringify(backfillTags);
-  statements.push(env.DB.prepare(`INSERT INTO collection_items(collection_id,link_id,position,added_at,origin,matched_tags)
-   SELECT ?,l.id,COALESCE((SELECT MAX(position)+1 FROM collection_items WHERE collection_id=?),0)+CAST(j.key AS INTEGER),?,'rule',${matchedRefsSQL()}
+ if(backfill?.items.length && backfillRule){
+  const ids=backfill.items.filter(i=>i.candidate_status!=="ignored"&&i.candidate_status!=="pending").map(i=>i.id),tagJSON=JSON.stringify(backfillRule.tags),c=backfillRule.confirmed;
+  if(backfillRule.review) statements.push(env.DB.prepare(`INSERT INTO collection_rule_candidates(collection_id,link_id,matched_tags,rule_revision,status,created_at,operation_key)
+   SELECT ?,l.id,${matchedRefsSQL('l.id',c)},?,'pending',?,? FROM json_each(?) j JOIN links l ON l.id=j.value WHERE ${guard}
+   AND ${ruleV2SQL('l.id',c)} AND l.curation_status<>'drop'
+   AND NOT EXISTS(SELECT 1 FROM collection_items i WHERE i.collection_id=? AND i.link_id=l.id)
+   AND NOT EXISTS(SELECT 1 FROM collection_rule_exclusions x WHERE x.collection_id=? AND x.link_id=l.id)
+   ON CONFLICT(collection_id,link_id) DO NOTHING`).bind(id,tagJSON,current!.rule_revision,stamp,op,JSON.stringify(ids),id,admission,next,...ruleBindings(backfillRule),id,id));
+  else statements.push(env.DB.prepare(`INSERT INTO collection_items(collection_id,link_id,position,added_at,origin,matched_tags)
+   SELECT ?,l.id,COALESCE((SELECT MAX(position)+1 FROM collection_items WHERE collection_id=?),0)+CAST(j.key AS INTEGER),?,'rule',${matchedRefsSQL('l.id',c)}
    FROM json_each(?) j JOIN links l ON l.id=j.value WHERE ${guard}
    AND CAST(j.key AS INTEGER)<MAX(0,1000-(SELECT COUNT(*) FROM collection_items WHERE collection_id=?))
-   AND ${ruleMatchSQL()} AND l.curation_status<>'drop'
+   AND ${ruleV2SQL('l.id',c)} AND l.curation_status<>'drop'
    AND NOT EXISTS(SELECT 1 FROM collection_rule_exclusions x WHERE x.collection_id=? AND x.link_id=l.id)
-   ON CONFLICT(collection_id,link_id) DO NOTHING`).bind(id,id,stamp,tagJSON,JSON.stringify(ids),id,admission,next,id,tagJSON,current!.rule_mode==='all'?backfillTags.length:1,id));
+   ON CONFLICT(collection_id,link_id) DO NOTHING`).bind(id,id,stamp,tagJSON,JSON.stringify(ids),id,admission,next,id,...ruleBindings(backfillRule),id));
  }
+ if(type==="review_accept"){
+  statements.push(env.DB.prepare(`INSERT INTO collection_items(collection_id,link_id,position,added_at,origin,matched_tags)
+   SELECT ?,k.link_id,COALESCE((SELECT MAX(position)+1 FROM collection_items WHERE collection_id=?),0)+CAST(j.key AS INTEGER),?,'rule',k.matched_tags
+   FROM json_each(?) j JOIN collection_rule_candidates k ON k.collection_id=? AND k.link_id=j.value WHERE ${guard}
+   ON CONFLICT(collection_id,link_id) DO NOTHING`).bind(id,id,stamp,JSON.stringify(b.link_ids),id,id,admission,next));
+  statements.push(env.DB.prepare(`DELETE FROM collection_rule_exclusions WHERE collection_id=? AND link_id IN(SELECT value FROM json_each(?)) AND ${guard}`).bind(id,JSON.stringify(b.link_ids),id,admission,next));
+ }
+ if(type==="review_accept"||type==="review_ignore") statements.push(env.DB.prepare(`UPDATE collection_rule_candidates SET status=?,decided_at=?,operation_key=? WHERE collection_id=? AND link_id IN(SELECT value FROM json_each(?)) AND ${guard}`)
+  .bind(type==="review_accept"?"accepted":"ignored",stamp,op,id,JSON.stringify(b.link_ids),id,admission,next));
  if(type==="remove") statements.push(env.DB.prepare(`DELETE FROM collection_items WHERE collection_id=? AND link_id IN(SELECT value FROM json_each(?)) AND ${guard}`).bind(id,JSON.stringify(b.link_ids),id,admission,next));
  if(type==="note") statements.push(env.DB.prepare(`UPDATE collection_items SET note=? WHERE collection_id=? AND link_id=? AND ${guard}`).bind(b.note,id,b.link_id,id,admission,next));
  if(type==="move") {
@@ -161,6 +209,7 @@ export async function collectionsRoute(request:Request,env:Env,path:string, elig
   if((latest?.revision??0)!==expected) return error("revision_conflict",409,{revision:latest?.revision??0});
   if(["create","restore","add"].includes(type)) return error("collection_limit",409);
   if(type==="note"||type==="move") return error("member_not_found",409);
+  if(type==="review_accept"||type==="review_ignore") return error((latest?.item_count??0)+(b.link_ids as number[]).length>1000&&type==="review_accept"?"collection_limit":"candidate_not_found",409);
   return error("collection_write_failed",409);
  }
  if(saved.request_hash!==hash) return error("operation_conflict",409);

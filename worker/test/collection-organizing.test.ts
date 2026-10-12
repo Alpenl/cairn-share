@@ -39,3 +39,9 @@ it('concurrent approval retries reuse one receipt and privacy deletion removes i
  const run=await start();await finish();const key=cid();const body={operation_key:key,link_ids:[1],collection_ids:[collection],expected_revisions:{[collection]:1}};const r=await Promise.all(Array.from({length:4},()=>call('/organizing/'+run+'/apply',body)));expect(r.every(x=>x.status===200)).toBe(true);expect((await json(await call('/'+collection))).collection.revision).toBe(2);expect((await json(await call('/organizing/'+run))).actions).toHaveLength(1);
  await env.DB.prepare('DELETE FROM links WHERE id=1').run();const d=await json(await call('/organizing/'+run));expect(d.items.map((i:any)=>i.link_id)).toEqual([2]);expect(d.actions).toEqual([]);
 });
+it('accepts the protocol 2 collections header used by the redesigned workspace and echoes it',async()=>{
+ const headers=(v:string|null)=>({Authorization:'Bearer app',...(v?{'X-Cairn-Collections':v}:{})});
+ const v2=await worker.fetch(new Request('https://example/api/collections/organizing',{headers:headers('2')}),binding());
+ expect(v2.status).toBe(200);expect(v2.headers.get('X-Cairn-Collections')).toBe('2');
+ for(const v of [null,'3'])expect((await worker.fetch(new Request('https://example/api/collections/organizing',{headers:headers(v)}),binding())).status).toBe(409);
+});

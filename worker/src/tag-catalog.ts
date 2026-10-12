@@ -15,7 +15,7 @@ export async function managedCatalog(env:Pick<Env,"DB">):Promise<{revision:numbe
 // Ordinary static-tag filters remain allocation/query compatible with the
 // existing fast path. Runtime IDs and refinements need the current directory.
 export async function filterCatalog(env:Pick<Env,"DB">,url:URL):Promise<Taxonomy|undefined> {
- return url.searchParams.has("topic_refinements")||[...url.searchParams.values()].some(v=>/(?:^|,)tag_[0-9a-f]{32}(?:,|$)/.test(v))?(await managedCatalog(env)).catalog:undefined;
+ return url.searchParams.has("topic_refinements")||url.searchParams.has("tags")||[...url.searchParams.values()].some(v=>/(?:^|,)tag_[0-9a-f]{32}(?:,|$)/.test(v))?(await managedCatalog(env)).catalog:undefined;
 }
 export async function historicalCatalog(env:Pick<Env,"DB">,version:string):Promise<Taxonomy|null> {
  const seed=classificationTaxonomy(version);if(seed)return seed;
@@ -25,7 +25,7 @@ export async function historicalCatalog(env:Pick<Env,"DB">,version:string):Promi
 export function catalogTerm(catalog:Taxonomy,dimension:string,id:string):TermDefinition|undefined {
  return catalogDimensions.includes(dimension as CatalogDimension)?catalog[dimension as CatalogDimension]?.find(t=>t.id===id):undefined;
 }
-async function displayedCatalog(env:Env) {
+export async function displayedCatalog(env:Env) {
  const current=await managedCatalog(env);
  // Legacy seed/snapshots predate ai_enabled. Opposition has always been a
  // human-only tag; expose that invariant before editing/archive validation.
@@ -39,7 +39,7 @@ async function displayedCatalog(env:Env) {
 function definition(value:unknown,dimension:CatalogDimension,before?:TermDefinition):TermDefinition|null {
  if(!value||typeof value!=="object"||Array.isArray(value))return null;
  const v=value as Record<string,unknown>;
- const allowed=["label","aliases","description","includes","excludes","granularity","navigation","recall_terms","ai_enabled"];
+ const allowed=["label","aliases","description","includes","excludes","granularity","navigation","recall_terms","ai_enabled","relations"];
  if(Object.keys(v).some(k=>!allowed.includes(k)))return null;
  const result:Record<string,unknown>={...before,...v};
  if(typeof result.label!=="string"||!result.label.trim()||result.label.length>80||result.label.includes("\0")||typeof result.description!=="string"||result.description.length>1000||!result.description.trim())return null;
@@ -49,6 +49,14 @@ function definition(value:unknown,dimension:CatalogDimension,before?:TermDefinit
  if(dimension!=="topics"&&["granularity","navigation","recall_terms"].some(k=>k in v))return null;
  if(dimension==="topics"&&!['broad','specific'].includes(String(result.granularity??'specific')))return null;
  if(result.navigation!==undefined&&typeof result.navigation!=="boolean")return null;
+ // People may set a parent topic (broader) and related topics. Synonyms are
+ // written only by a merge, so they cannot be typed in directly.
+ if("relations" in v){if(dimension!=="topics"||!Array.isArray(v.relations)||v.relations.length>8)return null;
+  const seen=new Set<string>();
+  for(const r of v.relations as unknown[]){if(!r||typeof r!=="object"||Array.isArray(r))return null;const x=r as Record<string,unknown>;
+   if(Object.keys(x).some(k=>!["id","kind"].includes(k))||typeof x.id!=="string"||!/^[a-z][a-z0-9_]{0,39}$/.test(x.id)||!["broader","related"].includes(String(x.kind))||seen.has(x.id)||x.id===before?.id)return null;seen.add(x.id);}
+  if((v.relations as Array<{kind:string}>).filter(r=>r.kind==="broader").length>1)return null;
+  result.relations=[...(before?.relations??[]).filter(r=>r.kind==="synonym"),...(v.relations as TermDefinition["relations"]&object)];}
  if(dimension==='topics'){
   // A small human-defined tag needs usable Jev boundaries without making
   // optional example fields a prerequisite for creating it.
@@ -63,6 +71,12 @@ function definition(value:unknown,dimension:CatalogDimension,before?:TermDefinit
  }
  return {...result,id:before?.id??`tag_${crypto.randomUUID().replaceAll('-','')}`,label:result.label.trim(),active:before?.active??true,deprecated:before?.deprecated??false,status:before?.status??"active",aliases:result.aliases as string[],ai_enabled:result.ai_enabled??true,
   ...(dimension==='topics'?{granularity:(result.granularity??'specific') as 'broad'|'specific',navigation:result.navigation??false,recall_terms:result.recall_terms as string[]}:{})} as TermDefinition;
+}
+/** True when following broader links from id returns to id. */
+export function parentCycle(terms:TermDefinition[],id:string):boolean {
+ const parent=(x:string)=>terms.find(t=>t.id===x)?.relations?.find(r=>r.kind==="broader")?.id;
+ const seen=new Set([id]);for(let x=parent(id);x;x=parent(x)){if(seen.has(x))return true;seen.add(x);}
+ return false;
 }
 export async function tagCatalogRoute(request:Request,env:Env,path:string):Promise<Response> {
  if(request.headers.get("X-Cairn-Tag-System")!=="1")return fail("capability_mismatch",409);
@@ -101,6 +115,7 @@ export async function tagCatalogRoute(request:Request,env:Env,path:string):Promi
  if(b.type==='create'&&values.length>=128)return fail('tag_limit',409);
  catalog[dimension]=[...values.filter(t=>t.id!==after!.id),after];
  const problems=validateTaxonomy(catalog);if(problems.length)return fail('tag_collision',409,{details:problems});
+ if(dimension==='topics'&&parentCycle(catalog.topics,after.id))return fail('invalid_tag_definition',400,{details:['parent_cycle']});
  if(!catalog[dimension]?.some(t=>t.active&&!t.deprecated&&t.ai_enabled!==false&&!(dimension==='uses'&&t.id==='contra')))return fail('last_ai_tag',409);
  const custom=await env.DB.prepare("SELECT label FROM custom_tags WHERE status='active'").all<{label:string}>();
  if(custom.results.some(t=>[after!.label,...after!.aliases].some(a=>normalizeTerm(a.normalize('NFKC'))===normalizeTerm(t.label.normalize('NFKC')))))return fail('tag_collision',409);
