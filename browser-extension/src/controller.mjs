@@ -4,7 +4,7 @@ export function emptyState() {
   return { settings: { token: "", keepFullUrl: true }, queue: [], lastResult: null };
 }
 
-const PAUSED_ERRORS = new Set(["capture_not_pending","invalid_image","capture_incomplete","revision_conflict","collection_deleted","collection_limit","collections_unsupported","invalid_token", "invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete", "upgrade_required",'media_stale','media_conflict','invalid_media','media_permission','media_too_large','media_protected','media_unsupported','media_unavailable','media_live_or_unsupported']);
+const PAUSED_ERRORS = new Set(["capture_not_pending","invalid_image","capture_incomplete","revision_conflict","collection_deleted","collection_limit","collections_unsupported","invalid_token", "invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete", "upgrade_required",'media_stale','media_conflict','invalid_media','media_permission','media_too_large','image_too_large','media_protected','media_unsupported','media_unavailable','media_live_or_unsupported']);
 
 // Only this background controller writes storage. A mutex prevents independent
 // popup/menu/alarm events from overwriting one another's persisted changes.

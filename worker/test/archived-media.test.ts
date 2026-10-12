@@ -43,3 +43,24 @@ it('restarts expired multipart sessions and rejects media from a replaced captur
  expect((await call('/api/captures','POST',{...body,client_id:crypto.randomUUID(),capture:{...body.capture,text:'New capture.'}})).status).toBe(201);
  expect((await call(`/api/media/${id}`)).status).toBe(404);expect((await call(`/api/media/uploads/${id}`,'POST',init)).status).toBe(409);
 },30000);
+
+
+it('registers all 60 media items and uploads a 257 MiB file with resumable parts',async()=>{
+ const media=Array.from({length:60},(_,i)=>({kind:'video',title:`Movie ${i}`,url:`https://cdn.example.com/${i}.mp4`}));
+ const savedResponse=await call('/api/captures','POST',{url:'https://example.com/large',note:'',client_id:crypto.randomUUID(),capture:{title:'Large movie',language:'en',text:'Article with many movies.',images:[],media}});
+ expect(savedResponse.status).toBe(201);const saved:any=await savedResponse.json();
+ const list:any=await (await call(`/api/links/${saved.id}/media`)).json();expect(list.items).toHaveLength(60);const id=list.items[0].id;
+ const size=257*1024*1024,part=new Uint8Array(8*1024*1024).fill(42);
+ const init={content_type:'video/mp4',size,digest:'a'.repeat(64)};
+ for(const size of [0,-1,1.5,Number.MAX_SAFE_INTEGER+1])expect((await call(`/api/media/uploads/${id}`,'POST',{...init,size})).status).toBe(400);
+ const started:any=await (await call(`/api/media/uploads/${id}`,'POST',init)).json();expect(started.chunk_size).toBe(part.length);
+ expect((await call(`/api/media/uploads/${id}/1`,'PUT',part)).status).toBe(200);
+ const resumed:any=await (await call(`/api/media/uploads/${id}`,'POST',init)).json();expect(resumed.parts).toHaveLength(1);
+ expect((await call(`/api/media/uploads/${id}/1`,'PUT',part)).status).toBe(200);
+ for(let i=2;i<=33;i++)expect((await call(`/api/media/uploads/${id}/${i}`,'PUT',i===33?part.slice(0,1024*1024):part)).status).toBe(200);
+ expect((await call(`/api/media/uploads/${id}/complete`,'POST',{})).status).toBe(200);
+ const range=await call(`/api/media/${id}`,'GET',undefined,{Range:`bytes=${256*1024*1024-3}-${256*1024*1024+3}`});
+ expect(range.status).toBe(206);expect(range.headers.get('Content-Range')).toBe(`bytes ${256*1024*1024-3}-${256*1024*1024+3}/${size}`);expect(new Uint8Array(await range.arrayBuffer())).toEqual(new Uint8Array(7).fill(42));
+ const head=await call(`/api/media/${id}`,'HEAD');expect(head.headers.get('Content-Length')).toBe(String(size));
+ const row:any=await env.DB.prepare('SELECT original_text FROM links WHERE id=?').bind(saved.id).first();expect(row.original_text).toBe('Article with many movies.');
+},120000);
