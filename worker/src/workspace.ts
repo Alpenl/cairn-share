@@ -49,6 +49,17 @@ function article(row: Row, detail = false) {
     summary: row.summary ?? "",
     body: body.split(/\n\s*\n/).filter(Boolean),
     raw: detail ? (row.original_text ?? "") : "",
+    ...(detail
+      ? {
+          images: parse<Array<{ key: string; content_type: string }>>(
+            row.images,
+            [],
+          ).map((image) => ({
+            src: `/api/images/${encodeURIComponent(image.key)}`,
+          })),
+          media: parse<unknown[]>(row.media, []),
+        }
+      : {}),
     tags: [
       ...parse<string[]>(row.tag_refs, []),
       ...parse<string[]>(row.custom_refs, []),
@@ -340,7 +351,7 @@ async function detail(env: Env, id: number, url: URL) {
   )
     return reply({ error: "invalid_query" }, 400);
   const [snapshot, cols] = await Promise.all([
-    readSelectionSnapshot(env, id, true, known, true, true),
+    readSelectionSnapshot(env, id, true, known, true, true, true),
     env.DB.prepare(
       "SELECT i.collection_id,i.note FROM collection_items i JOIN collections c ON c.id=i.collection_id WHERE i.link_id=? AND c.deleted=0",
     )
