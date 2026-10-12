@@ -110,7 +110,14 @@ function selectionSQL(where: string, includeReading: boolean, extraColumns = "")
     FROM links l WHERE ${where}`;
 }
 
-export async function readSelectionSnapshot(env: Env, id: number, includeReading = false, knownBodyRevision = -1, includeTags = false, includeTagDetails = false) {
+export async function readSelectionSnapshot(env: Env, id: number, includeReading = false, knownBodyRevision = -1, includeTags = false, includeTagDetails = false, includeMedia = false) {
+  // Keep media metadata in the same snapshot as its current capture. Never
+  // export source URLs, upload credentials or object storage keys.
+  const mediaColumns = includeMedia ? `,
+    (SELECT json_group_array(json_object('id',m.id,'title',m.title,'kind',m.kind,
+      'content_type',m.content_type,'size',m.size,'status',m.status)) FROM
+      (SELECT id,title,kind,content_type,size,status FROM archived_media
+       WHERE link_id=l.id AND capture_id=l.last_capture_id ORDER BY ordinal) m) AS media` : "";
   const detailColumns = includeTagDetails ? `,
     CASE WHEN length(trim(COALESCE(l.original_text,'')))>0 THEN 1 ELSE 0 END AS source_available,
     (SELECT version FROM tag_catalog_state WHERE id=1) AS tag_catalog_version,
@@ -121,7 +128,7 @@ export async function readSelectionSnapshot(env: Env, id: number, includeReading
         WHERE link_id=l.id AND revision<=l.personal_revision AND field<>'operation' ORDER BY revision,id) f
       LEFT JOIN tag_operations o ON o.operation_key=f.operation_id) AS tag_origins` : "";
   const link = await env.DB.prepare(selectionSQL("l.id=?", includeReading,
-    (includeTags ? `,${tagSummaryColumns("l")}` : "") + detailColumns))
+    (includeTags ? `,${tagSummaryColumns("l")}` : "") + detailColumns + mediaColumns))
     .bind(...(includeReading ? [knownBodyRevision, knownBodyRevision, knownBodyRevision, id] : [id])).first<Row>();
   return link ? selectionFromRow(link) : null;
 }

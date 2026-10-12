@@ -73,6 +73,55 @@ it("loads body and editable state only when an article is opened", async () => {
     (await get("?q=Article%202")).data.items.every((a: any) => a.id !== 2),
   ).toBe(true);
 });
+it("includes current archived media with cached bodies but keeps storage and upload details private", async () => {
+  const image = `enrichment/2/${"a".repeat(64)}.png`;
+  await env.DB.prepare(
+    "UPDATE links SET images=?,last_capture_id='current' WHERE id=2",
+  )
+    .bind(JSON.stringify([{ key: image, content_type: "image/png" }]))
+    .run();
+  for (const [id, capture] of [
+    ["b".repeat(32), "current"],
+    ["c".repeat(32), "old"],
+  ]) {
+    await env.DB.prepare(
+      "INSERT INTO archived_media(id,link_id,capture_id,ordinal,url,title,kind,content_type,size,r2_key,upload_id,status,updated_at) VALUES(?,2,?,0,'https://private.invalid/signed','Video','video','video/mp4',100,'private-key','private-upload','ready','2026-10-12')",
+    )
+      .bind(id, capture)
+      .run();
+  }
+  const first = await get("/2");
+  expect(first.data.article.images).toEqual([
+    { src: "/api/images/" + encodeURIComponent(image) },
+  ]);
+  expect(first.data.article.media).toEqual([
+    {
+      id: "b".repeat(32),
+      title: "Video",
+      kind: "video",
+      content_type: "video/mp4",
+      size: 100,
+      status: "ready",
+    },
+  ]);
+  const cached = await get(
+    `/2?body_revision=${first.data.article.bodyRevision}`,
+  );
+  expect(cached.data.body_unchanged).toBe(true);
+  expect(cached.data.article.media).toEqual(first.data.article.media);
+  expect(cached.data.article.images).toEqual(first.data.article.images);
+  expect(JSON.stringify(first.data)).not.toContain("private.invalid");
+  expect(JSON.stringify(first.data)).not.toContain("private-upload");
+  expect(JSON.stringify(first.data)).not.toContain("private-key");
+  expect((await get()).data.items[0]).not.toHaveProperty("media");
+  await env.DB.prepare(
+    "UPDATE links SET last_capture_id='next',images='[]' WHERE id=2",
+  ).run();
+  expect((await get("/2")).data.article).toMatchObject({
+    images: [],
+    media: [],
+  });
+});
 it("rejects invalid filters and requires the internal credential", async () => {
   for (const suffix of [
     "?limit=10000",
