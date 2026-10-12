@@ -1,0 +1,181 @@
+name: prepare-android-rollback
+run-name: Android rollback artifact / ${{ inputs.version_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: "Full main-reachable commit containing the previous Android UI"
+        required: true
+        type: string
+        default: "d555f63fa3e802d6f0609e3b6acbd11cd8374b3d"
+      version_name:
+        description: "Unused version greater than the installed release (artifact only)"
+        required: true
+        type: string
+        default: "0.11.1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-android-rollback
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check signing secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          missing=""
+          test -n "${KEYSTORE_BASE64}" || missing="${missing} ANDROID_KEYSTORE_BASE64"
+          test -n "${KEYSTORE_PASSWORD}" || missing="${missing} ANDROID_KEYSTORE_PASSWORD"
+          test -n "${KEY_ALIAS}" || missing="${missing} ANDROID_KEY_ALIAS"
+          test -n "${KEY_PASSWORD}" || missing="${missing} ANDROID_KEY_PASSWORD"
+          test -n "${EXPECTED_CERT_SHA256}" || missing="${missing} ANDROID_CERT_SHA256"
+          if [ -n "${missing}" ]; then
+            echo "::error::Missing signing secrets:${missing}"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          ref: ${{ inputs.source_revision }}
+
+      - name: Resolve version
+        id: version
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          ROLLBACK_VERSION: ${{ inputs.version_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          version="$ROLLBACK_VERSION"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Rollback version must be X.Y.Z"
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$(git rev-parse HEAD)" origin/main || {
+            echo "::error::Rollback source must be reachable from origin/main"
+            exit 1
+          }
+          IFS=. read -r major minor patch <<< "$version"
+          code=$(( major * 10000 + minor * 100 + patch ))
+          {
+            echo "name=${version}"
+            echo "code=${code}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup JDK
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Install Android SDK packages
+        working-directory: android
+        run: |
+          set -euo pipefail
+          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "${sdkmanager}" --licenses >/dev/null || true
+          "${sdkmanager}" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Run release gates
+        working-directory: android
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --dependency-verification strict \
+            -PcairnShareVersionName="${VERSION_NAME}" \
+            -PcairnShareVersionCode="${VERSION_CODE}" \
+            testDebugUnitTest lintDebug assembleDebug compileDebugAndroidTestKotlin assembleRelease
+
+      - name: Sign and verify APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_CERT_SHA256 }}
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          keystore="${RUNNER_TEMP}/signing.jks"
+          trap 'shred -u "${keystore}" 2>/dev/null || rm -f "${keystore}"' EXIT
+          printf '%s' "${KEYSTORE_BASE64}" | base64 -d > "${keystore}"
+
+          build_tools="$(find "${ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          unsigned="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          test -f "${unsigned}"
+          mkdir -p release-assets
+          out="release-assets/cairn-share-android-${VERSION_NAME}.apk"
+
+          "${build_tools}/zipalign" -p -f 4 "${unsigned}" "${RUNNER_TEMP}/aligned.apk"
+          "${build_tools}/apksigner" sign \
+            --v4-signing-enabled false \
+            --ks "${keystore}" \
+            --ks-pass "pass:${KEYSTORE_PASSWORD}" \
+            --key-pass "pass:${KEY_PASSWORD}" \
+            --ks-key-alias "${KEY_ALIAS}" \
+            --out "${out}" \
+            "${RUNNER_TEMP}/aligned.apk"
+
+          "${build_tools}/apksigner" verify --print-certs --verbose "${out}" | tee "${RUNNER_TEMP}/verify.txt"
+          grep -q "APK Signature Scheme v2): true" "${RUNNER_TEMP}/verify.txt"
+          cert_sha256="$(sed -n 's/.*certificate SHA-256 digest: *\([0-9a-fA-F]\{64\}\).*/\1/p' "${RUNNER_TEMP}/verify.txt" | tr '[:upper:]' '[:lower:]' | sort -u)"
+          expected="$(printf '%s' "${EXPECTED_CERT_SHA256}" | tr -d ':[:space:]' | tr '[:upper:]' '[:lower:]')"
+          if [ "${cert_sha256}" != "${expected}" ]; then
+            echo "::error::APK certificate SHA-256 does not match expected signing certificate"
+            exit 1
+          fi
+          ( cd release-assets && sha256sum ./*.apk > SHA256SUMS )
+          {
+            echo "APK: ${out}"
+            echo "Certificate SHA-256: ${cert_sha256}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check release assets
+        run: |
+          set -euo pipefail
+          test ! -e "${RUNNER_TEMP}/signing.jks"
+          if find release-assets -type f \( -name '*.jks' -o -name '*.keystore' -o -name '*.p12' -o -name '*.pem' \) | grep -q .; then
+            echo "::error::Signing material found in release assets"
+            exit 1
+          fi
+
+      - name: Record rollback source
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+        run: |
+          printf 'source=%s\nversion=%s\nversionCode=%s\n' "$SOURCE_REVISION" "$VERSION_NAME" "$VERSION_CODE" > release-assets/ROLLBACK.txt
+          echo "Signed rollback artifact only; no release or automatic update published." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain signed rollback package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cairn-android-rollback-${{ inputs.version_name }}
+          path: release-assets/
+          retention-days: 90
+          if-no-files-found: error
