@@ -248,6 +248,7 @@ Worker：
 ```bash
 cd worker
 npm ci
+npm ci --prefix ../browser-extension --omit=dev # Worker/browser client contract dependencies
 npm run typecheck
 npm test
 npm run deploy:dry-run

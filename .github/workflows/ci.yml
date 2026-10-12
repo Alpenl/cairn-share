@@ -77,7 +77,9 @@ jobs:
           cache-dependency-path: worker/package-lock.json
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm ci
+          npm ci --prefix ../browser-extension --omit=dev
 
       - name: Typecheck
         run: npm run typecheck
