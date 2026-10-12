@@ -1,3 +1,4 @@
+import { drainCustomTagClassification } from './custom-tag-classification';
 import { captureUploads } from './capture-uploads';
 import { pendingCaptures } from './pending-captures';
 import { drainCollectionRules } from "./collection-rules";
@@ -33,6 +34,8 @@ import { CAPTURED_SOURCE_SQL, MAX_ENRICHMENT_ATTEMPTS, SOURCE_CLAIM_CANDIDATE_SQ
   sourceClaimCandidateBindings, sourceClaimSQL } from "./source-claim";
 
 export interface Env {
+  TYPESAFE_API_KEY?: string;
+  CAIRN_CUSTOM_TAG_AI_ENABLED?: string;
   CAIRN_CLASSIFICATION_MAX_CALLS?: string;
   DB: D1Database;
   ENRICHMENT_IMAGES: R2Bucket;
@@ -328,6 +331,7 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     await maintainPrivacy(env);
     await maintainLibrarySync(env);
+    await drainCustomTagClassification(env);
     await drainCollectionRules(env,100);
     await drainTagMerges(env,100);
   },

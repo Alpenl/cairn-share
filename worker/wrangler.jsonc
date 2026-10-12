@@ -4,6 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-26",
   "workers_dev": true,
+  "vars": { "CAIRN_CLASSIFICATION_MAX_CALLS": "20", "CAIRN_CUSTOM_TAG_AI_ENABLED": "1" },
   "triggers": { "crons": ["*/5 * * * *"] },
   "observability": {
     "enabled": true
