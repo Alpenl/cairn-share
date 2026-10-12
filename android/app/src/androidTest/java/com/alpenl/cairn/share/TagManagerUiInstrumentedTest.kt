@@ -13,6 +13,7 @@ import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 class TagManagerUiInstrumentedTest {
  @get:Rule val compose=createEmptyComposeRule()
@@ -32,9 +33,13 @@ class TagManagerUiInstrumentedTest {
  @Test fun createAITagThroughActualSettingsAndRetainUncertainOperation() {
   val app=InstrumentationRegistry.getInstrumentation().targetContext;val server=MockWebServer();val token="tag-ui-"+UUID.randomUUID();val catalog=JSONObject().put("version","fixture").put("topics",JSONArray()).put("resource_kinds",JSONArray()).put("content_functions",JSONArray()).put("carriers",JSONArray()).put("affordances",JSONArray()).put("forms",JSONArray()).put("uses",JSONArray())
   val payload=JSONObject().put("revision",0).put("catalog",catalog).put("counts",JSONArray()).put("custom_tags",JSONArray());val keys=mutableListOf<String>();var first=true
+  // Both the screen and WorkManager may retry. Keep the response unavailable
+  // until the test has observed the durable pending operation.
+  val reconnect=AtomicBoolean(false)
   server.dispatcher=object:Dispatcher(){override fun dispatch(r:RecordedRequest):MockResponse=synchronized(payload){
    val path=r.path.orEmpty();if(path=="/api/tag-catalog/operations"){
-    val body=JSONObject(r.body.readUtf8());keys.add(body.getString("operation_key"));if(first){first=false;val definition=body.getJSONObject("definition");definition.put("id","tag_0123456789abcdef0123456789abcdef").put("active",true);catalog.getJSONArray("topics").put(definition);payload.put("revision",1);return@synchronized MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)}
+    val body=JSONObject(r.body.readUtf8());keys.add(body.getString("operation_key"));if(first){first=false;val definition=body.getJSONObject("definition");definition.put("id","tag_0123456789abcdef0123456789abcdef").put("active",true);catalog.getJSONArray("topics").put(definition);payload.put("revision",1)}
+    if(!reconnect.get())return@synchronized MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
     return@synchronized response(payload)
    }
    if(path=="/api/tag-catalog")return@synchronized response(payload)
@@ -48,7 +53,12 @@ class TagManagerUiInstrumentedTest {
     compose.waitUntil(20000){compose.onAllNodesWithText("设置",useUnmergedTree=true).fetchSemanticsNodes().isNotEmpty()};compose.onNodeWithText("设置",useUnmergedTree=true).performClick();compose.onNodeWithTag("settings_tag_manager").performScrollTo();compose.waitForIdle();compose.onNodeWithTag("settings_tag_manager").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick){it()}
     try{compose.waitUntil(20000){compose.onAllNodesWithTag("tag_manager_search").fetchSemanticsNodes().isNotEmpty()}}catch(e:Throwable){throw AssertionError(compose.onRoot(useUnmergedTree=true).printToString(),e)};compose.onNodeWithText("新建").performClick();compose.onNodeWithTag("tag_manager_ai").assertIsOn();compose.onNodeWithTag("tag_manager_name").performTextInput("LoRA");compose.onNodeWithTag("tag_manager_definition").performTextInput("LoRA 适配器训练与使用");compose.onNodeWithText("保存",useUnmergedTree=true).performClick()
     compose.waitUntil(30000){compose.onAllNodesWithText("LoRA",substring=true,useUnmergedTree=true).fetchSemanticsNodes().isNotEmpty()}
-    compose.waitUntil(30000){compose.onAllNodesWithText("重试同步",useUnmergedTree=true).fetchSemanticsNodes().isNotEmpty()};compose.onNodeWithText("重试同步",useUnmergedTree=true).performClick()
+    compose.waitUntil(30000){compose.onAllNodesWithText("重试同步",useUnmergedTree=true).fetchSemanticsNodes().isNotEmpty()}
+    val pendingAccount=accountKeyFor(server.url("/").toString(),token)
+    assertNotNull(runBlocking{CollectionStore(app).tagManagement(pendingAccount).pending})
+    compose.waitUntil(30000){runCatching{compose.onNodeWithText("重试同步",useUnmergedTree=true).assertIsEnabled();true}.getOrDefault(false)}
+    reconnect.set(true)
+    compose.onNodeWithText("重试同步",useUnmergedTree=true).performClick()
     val account=accountKeyFor(server.url("/").toString(),token);compose.waitUntil(30000){runBlocking{CollectionStore(app).tagManagement(account).pending==null}}
     synchronized(payload){assertEquals(1,catalog.getJSONArray("topics").length());assertTrue(catalog.getJSONArray("topics").getJSONObject(0).getBoolean("ai_enabled"));assertEquals(1,keys.distinct().size);assertTrue(keys.size>=2)}
    }
