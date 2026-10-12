@@ -57,7 +57,7 @@ export async function readTagSummaries(env: Env,
 // lease material which a detail read must not fetch or expose.
 const readingColumns = `,l.url,l.note,l.created_at,l.curation,l.enrichment_status,l.enrichment_attempts,
   l.enrichment_next_retry_at,l.enrichment_paid_uncertain,l.enrichment_paid_stage,
-  l.ai_title,l.original_language,
+  l.ai_title,l.original_language,CASE WHEN length(COALESCE(l.translated_text,''))>0 THEN 1 ELSE 0 END AS translated,
   CASE WHEN l.app_body_revision=? THEN NULL ELSE l.original_text END AS original_text,
   CASE WHEN l.app_body_revision=? THEN NULL ELSE l.translated_text END AS translated_text,
   CASE WHEN l.app_body_revision=? THEN NULL ELSE (SELECT p.formatted_content FROM content_presentations p WHERE p.link_id=l.id AND p.status='completed') END AS formatted_content,

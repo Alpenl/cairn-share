@@ -101,8 +101,8 @@ function originsFromRows(rows: TagOriginsRow[]) {
   }
   return origins;
 }
-export async function tagPayload(env: Env, id: number) {
-  const snapshot = await readSelectionSnapshot(env, id, false, -1, true, true);
+export async function tagPayload(env: Env, id: number, supplied?: Awaited<ReturnType<typeof readSelectionSnapshot>>) {
+  const snapshot = supplied ?? await readSelectionSnapshot(env, id, false, -1, true, true);
   if (!snapshot) return null;
   const params = new URLSearchParams({ include_state: "1", include_automatic: "1", tag_system: "1" });
   const payload = selectionPayload(snapshot, id, params);
