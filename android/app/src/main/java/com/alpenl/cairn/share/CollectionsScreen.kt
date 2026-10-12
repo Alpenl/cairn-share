@@ -2,6 +2,20 @@ package com.alpenl.cairn.share
 
 import android.content.Context
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -106,27 +120,50 @@ internal class CollectionController(val context:Context,val base:String,val toke
     var deleting by remember{mutableStateOf(false)};var filters by remember{mutableStateOf(BookmarkFilters())};var showFilters by remember{mutableStateOf(false)}
     var reviewing by remember{mutableStateOf<CollectionPending?>(null)}
     var selecting by remember{mutableStateOf(false)};var checked by remember{mutableStateOf(setOf<Int>())}
+    // System back leaves a collection before it leaves the page, matching the 返回 button.
+    androidx.activity.compose.BackHandler(enabled=selected!=null){selected=null;checked=emptySet();selecting=false}
     val record=c.state.collections.find{it.id==selected};val members=c.state.members.filter{it.collection==selected}.sortedBy{it.position}
     val catalog=remember(links){links.associateBy{it.id}}
     val counts=remember(c.state.members){c.state.members.groupingBy{it.collection}.eachCount()}
+    val p=com.alpenl.cairn.share.ui.theme.CairnTheme.palette
     ScreenColumn {
-        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
-            TextButton(onClick={if(selected!=null){selected=null;checked=emptySet();selecting=false}else onBack()}){Text("返回")}
-            Text(record?.name?:"合集",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge,maxLines=1,overflow=TextOverflow.Ellipsis)
-            TextButton(onClick={c.refresh();onRefreshLibrary()},enabled=!c.working){Text("刷新")}
-            TextButton(onClick={if(record==null)creating=true else editor=true}){Text(if(record==null)"新建" else "编辑")}
+        // Prototype page header: back arrow, serif title, quiet icon refresh, accent 新建/编辑.
+        Row(Modifier.fillMaxWidth().heightIn(min=56.dp),verticalAlignment=Alignment.CenterVertically){
+            IconButton(onClick={if(selected!=null){selected=null;checked=emptySet();selecting=false}else onBack()}){Icon(Icons.AutoMirrored.Filled.ArrowBack,contentDescription="返回")}
+            Column(Modifier.weight(1f)){
+                Text(record?.name?:"合集",style=MaterialTheme.typography.headlineSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+                val sub=if(record==null)"${c.state.collections.count{!it.deleted&&!it.archived}} 个合集 · 手动整理或按标签自动收录" else "${members.size} 条收藏"+(if(record.archived)" · 已归档" else "")
+                Text(sub,style=MaterialTheme.typography.labelSmall,color=p.tertiary,maxLines=1,overflow=TextOverflow.Ellipsis)
+            }
+            IconButton(onClick={c.refresh();onRefreshLibrary()},enabled=!c.working){Icon(Icons.Default.Refresh,contentDescription="刷新",Modifier.size(20.dp))}
+            TextButton(onClick={if(record==null)creating=true else editor=true}){if(record==null)Icon(Icons.Default.Add,null,Modifier.size(16.dp));Text(if(record==null)"新建" else "编辑")}
         }
-        if(record?.description?.isNotBlank()==true)Text(record.description,style=MaterialTheme.typography.bodySmall,maxLines=3,overflow=TextOverflow.Ellipsis)
-        OutlinedTextField(query,{query=it},placeholder={Text(if(record==null)"查找合集" else "搜索合集内标题、正文或备注")},singleLine=true,modifier=Modifier.fillMaxWidth().testTag("collection_search"))
+        if(record?.description?.isNotBlank()==true)Text(record.description,style=MaterialTheme.typography.bodyMedium,color=p.inkSoft,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(horizontal=4.dp))
+        OutlinedTextField(query,{query=it},placeholder={Text(if(record==null)"查找合集" else "搜索合集内标题、正文或备注")},singleLine=true,
+            leadingIcon={Icon(Icons.Default.Search,null,Modifier.size(18.dp))},
+            trailingIcon={if(query.isNotEmpty())IconButton(onClick={query=""}){Icon(Icons.Default.Close,"清除")}},
+            shape=RoundedCornerShape(10.dp),
+            colors=OutlinedTextFieldDefaults.colors(unfocusedBorderColor=p.hairlineSoft,focusedBorderColor=p.terracotta,unfocusedContainerColor=p.surface,focusedContainerColor=p.surface),
+            modifier=Modifier.fillMaxWidth().testTag("collection_search"))
         CollectionStatus(c)
-        if(record==null)TextButton(onClick={organizing=true},modifier=Modifier.testTag("organize_collections")){Text("自动整理")}
-        if(record==null)Row {
-            listOf("active" to "使用中","archived" to "已归档","deleted" to "已删除").forEach{(value,label)->TextButton(onClick={mode=value}){Text(if(mode==value)"· $label" else label)}}
+        if(record==null)Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=Alignment.CenterVertically){
+            listOf("active" to "使用中","archived" to "已归档","deleted" to "已删除").forEach{(value,label)->TypePill(label,mode==value){mode=value}}
+            Spacer(Modifier.width(4.dp))
+            TextButton(onClick={organizing=true},modifier=Modifier.testTag("organize_collections")){Icon(CairnIcons.Library,null,Modifier.size(16.dp));Spacer(Modifier.width(6.dp));Text("自动整理")}
         } else Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
-            Text("${members.size} 条",Modifier.weight(1f),style=MaterialTheme.typography.labelMedium)
+            Text("${members.size} 条",Modifier.weight(1f).padding(start=4.dp),style=MaterialTheme.typography.labelMedium,color=p.muted)
             if(!record.deleted){TextButton(onClick={showAdd=true}){Text("添加")};TextButton(onClick={selecting=!selecting;checked=emptySet()}){Text(if(selecting)"完成" else "选择")};TextButton(onClick={showFilters=true}){Text("筛选")}}
         }
-        if(record!=null&&!record.deleted)TextButton(onClick={tagRules=true},modifier=Modifier.testTag("collection_tag_rules")){Text(if(record.ruleEnabled)"自动收录 · 匹配"+(if(record.ruleMode=="all")"全部"else"任一")+"标签" else "设置自动收录标签")}
+        // Rule entry as a settings-style card; the full page summarises the rule in one sentence.
+        if(record!=null&&!record.deleted)Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(p.surface).border(1.dp,p.hairlineSoft,RoundedCornerShape(12.dp))
+            .clickable{tagRules=true}.padding(horizontal=14.dp,vertical=12.dp).testTag("collection_tag_rules"),verticalAlignment=Alignment.CenterVertically){
+            Column(Modifier.weight(1f)){
+                Text(if(record.ruleEnabled)"自动收录 · 匹配"+(if(record.ruleMode=="all")"全部"else"任一")+"标签" else "设置自动收录标签",style=MaterialTheme.typography.bodyMedium,fontWeight=FontWeight.Medium)
+                Text(if(record.ruleEnabled)"${record.ruleTags.size} 个标签"+(if(record.ruleExclude.isNotEmpty())" · 排除 ${record.ruleExclude.size} 个" else "")+(if(record.ruleAdmission=="review")" · 审核后加入" else " · 直接加入") else "按标签把收藏自动放进这个合集",
+                    style=MaterialTheme.typography.labelSmall,color=p.muted)
+            }
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight,null,tint=p.muted)
+        }
         if(checked.isNotEmpty())CollectionMembershipButton(base,token,checked.toList())
         val errors=c.state.pending.filter{it.error.isNotBlank()&&(selected==null||it.collection==selected)}
         errors.firstOrNull()?.let{p->
@@ -138,27 +175,31 @@ internal class CollectionController(val context:Context,val base:String,val toke
         }
         LazyColumn(Modifier.weight(1f).testTag("collections_list"),contentPadding=PaddingValues(bottom=24.dp)){
             if(record==null)items(c.state.collections.filter{when(mode){"deleted"->it.deleted;"archived"->!it.deleted&&it.archived;else->!it.deleted&&!it.archived}}.filter{(it.name+it.description).contains(query,true)}.sortedWith(compareByDescending<CollectionRecord>{it.pinned}.thenBy{it.name}),key={it.id}){item->
-                Row(Modifier.fillMaxWidth().clickable{selected=item.id}.padding(vertical=16.dp),verticalAlignment=Alignment.CenterVertically){
-                    Column(Modifier.weight(1f)){Text((if(item.pinned)"☆ " else "")+item.name,style=MaterialTheme.typography.titleMedium);Text("${counts[item.id]?:0} 条"+(if(c.state.pending.any{it.collection==item.id})" · 待同步" else ""),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}
-                    Text("›",color=MaterialTheme.colorScheme.onSurfaceVariant)
-                };HorizontalDivider()
+                Row(Modifier.fillMaxWidth().clickable{selected=item.id}.padding(horizontal=4.dp,vertical=14.dp),verticalAlignment=Alignment.CenterVertically){
+                    Column(Modifier.weight(1f)){
+                        Text((if(item.pinned)"☆ " else "")+item.name,style=MaterialTheme.typography.titleMedium)
+                        if(item.description.isNotBlank())Text(item.description,style=MaterialTheme.typography.bodySmall,color=p.muted,maxLines=1,overflow=TextOverflow.Ellipsis)
+                        Text("${counts[item.id]?:0} 条"+(if(item.ruleEnabled)" · 自动收录" else "")+(if(c.state.pending.any{it.collection==item.id})" · 待同步" else ""),style=MaterialTheme.typography.labelSmall,color=p.tertiary)
+                    }
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight,null,tint=p.muted)
+                };HorizontalDivider(color=p.hairlineSoft)
             } else items(members.filter{member->val link=catalog[member.link];val text=listOf(link?.displayTitle(),link?.note,link?.enrichment?.summary,link?.enrichment?.originalText,link?.enrichment?.translatedText,member.note).joinToString(" ");query.split(Regex("\\s+")).all{text.contains(it,true)}&&(link==null||filters.matches(link))},key={it.link}){member->
                 var menu by remember{mutableStateOf(false)}
                 Row(Modifier.fillMaxWidth().padding(vertical=14.dp),verticalAlignment=Alignment.CenterVertically){
                     if(selecting)Checkbox(member.link in checked,{value->if(!value||checked.size<100)checked=if(value)checked+member.link else checked-member.link})
-                    Column(Modifier.weight(1f).clickable{onOpen(member.link)}){
+                    Column(Modifier.weight(1f).clickable{onOpen(member.link)}.padding(start=4.dp)){
                         Text(catalog[member.link]?.displayTitle()?:"收藏 #${member.link}（正文尚未下载）",style=MaterialTheme.typography.titleMedium,maxLines=2,overflow=TextOverflow.Ellipsis)
-                        if(member.origin=="rule")Text("按标签自动收录",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                        if(member.note.isNotBlank())Text(member.note,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                        if(member.origin=="rule")Text("按标签自动收录",style=MaterialTheme.typography.labelSmall,color=p.terracotta)
+                        if(member.note.isNotBlank())Text(member.note,style=MaterialTheme.typography.bodySmall,color=p.inkSoft)
                     }
-                    Box{TextButton(onClick={menu=true}){Text("⋯")};DropdownMenu(menu,{menu=false}){
+                    Box{IconButton(onClick={menu=true}){Icon(CairnIcons.More,contentDescription="更多",tint=p.muted)};DropdownMenu(menu,{menu=false}){
                         DropdownMenuItem(text={Text("合集内备注")},onClick={menu=false;note=member})
                         val index=members.indexOf(member)
                         if(index>0)DropdownMenuItem(text={Text("上移")},onClick={menu=false;c.action{c.write(record.id,"move",JSONObject().put("link_id",member.link).put("before_id",members[index-1].link))}})
                         if(index<members.lastIndex)DropdownMenuItem(text={Text("下移")},onClick={menu=false;c.action{c.write(record.id,"move",JSONObject().put("link_id",member.link).put("before_id",members.getOrNull(index+2)?.link?:JSONObject.NULL))}})
                         DropdownMenuItem(text={Text("移出合集")},onClick={menu=false;c.action{c.write(record.id,"remove",JSONObject().put("link_ids",JSONArray(listOf(member.link))))}})
                     }}
-                };HorizontalDivider()
+                };HorizontalDivider(color=p.hairlineSoft)
             }
             if(record!=null&&members.isEmpty())item{Text("还没有内容，点击“添加”选择收藏。",Modifier.padding(vertical=24.dp),color=MaterialTheme.colorScheme.onSurfaceVariant)}
         }
@@ -205,25 +246,159 @@ internal class CollectionController(val context:Context,val base:String,val toke
     }},confirmButton={TextButton(onClick={onDone(selected)},enabled=selected.isNotEmpty()){Text("加入 ${selected.size} 条")}},dismissButton={TextButton(onClick=onDismiss){Text("取消")}})
 }
 
+/** Sentence describing a rule, as on the prototype's olive summary card. */
+internal fun ruleSentence(tags: List<String>, exclude: List<String>, mode: String, admission: String, confirmedOnly: Boolean, enabled: Boolean, label: (String) -> String): String {
+    if (tags.isEmpty()) return "还没有命中标签。添加标签后，带这些标签的收藏会自动归入这个合集。"
+    val hit = tags.joinToString(if (mode == "all") "」和「" else "」或「", "「", "」") { label(it) }
+    val without = if (exclude.isEmpty()) "" else "，且没有" + exclude.joinToString("」「", "「", "」") { label(it) }
+    val head = if (confirmedOnly) "已确认标签里有" else "标签里有"
+    val verb = if (admission == "review") "审核后加入" else "直接加入"
+    return "$head$hit${without}的收藏，$verb。" + if (enabled) "" else "（规则已暂停）"
+}
+
+/** 合集规则 (prototype and-collection-rule). Full screen; one 保存 queues one rule write. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable private fun CollectionTagRulesDialog(controller:CollectionController,record:CollectionRecord,onDismiss:()->Unit){
- val context=LocalContext.current.applicationContext;val scope=rememberCoroutineScope();val store=remember{CollectionStore(context)}
- var enabled by rememberSaveable(record.id){mutableStateOf(record.ruleEnabled)};var all by rememberSaveable(record.id){mutableStateOf(record.ruleMode=="all")};var selected by remember(record.id){mutableStateOf(record.ruleTags.toSet())};var query by rememberSaveable{mutableStateOf("")}
- var tags by remember{mutableStateOf(listOf<ManagedTag>())};var preview by remember{mutableStateOf<org.json.JSONObject?>(null)};var previewRevision by remember{mutableStateOf<Long?>(null)};var message by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var confirmFill by remember{mutableStateOf(false)}
- LaunchedEffect(record.id){tags=catalogTags(store.tagManagement(controller.account).payload);try{TagManagementSync.run(context,controller.base,controller.token);tags=catalogTags(store.tagManagement(controller.account).payload)}catch(e:Exception){if(e is kotlinx.coroutines.CancellationException)throw e;message="当前显示本地目录"}}
- fun previewExisting(){scope.launch{busy=true;try{val result=com.alpenl.cairn.share.network.CollectionsClient(controller.base).request(controller.token,"/${record.id}/rules/preview");preview=result;previewRevision=result.getLong("revision");message=if(result.getBoolean("rule_valid"))"已保存规则可补收 ${result.getJSONArray("items").length()}"+(if(result.getBoolean("has_more"))"+"else"")+" 条"else"规则标签尚未保存或已停用，请先保存。"}catch(e:Exception){if(e is kotlinx.coroutines.CancellationException)throw e;message="暂时无法预览，请联网重试。"}finally{busy=false}}}
- AlertDialog(onDismissRequest=onDismiss,title={Text("合集自动收录")},text={Column(Modifier.verticalScroll(rememberScrollState())){
-  Row(verticalAlignment=Alignment.CenterVertically){Switch(enabled,{enabled=it});Text("自动加入新收藏")}
-  Row(verticalAlignment=Alignment.CenterVertically){Switch(all,{all=it});Text(if(all)"匹配全部标签"else"匹配任一标签")}
-  OutlinedTextField(query,{query=it},placeholder={Text("查找标签")},singleLine=true)
-  LazyColumn(Modifier.heightIn(max=230.dp)){items(tags.filter{it.active&&(it.label+it.definition.stringList("aliases").joinToString()).contains(query,true)},key={it.ref}){tag->Row(Modifier.fillMaxWidth().clickable{selected=if(tag.ref in selected)selected-tag.ref else if(selected.size<20)selected+tag.ref else selected},verticalAlignment=Alignment.CenterVertically){Checkbox(tag.ref in selected,{checked->if(!checked||selected.size<20)selected=if(checked)selected+tag.ref else selected-tag.ref});Column{Text(tag.label);Text(tagDimensionLabels[tag.dimension].orEmpty(),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}}}}
-  val missing=selected-tags.filter{it.active}.map{it.ref}.toSet();if(missing.isNotEmpty())Column{Text("以下标签已停用或尚未加载：",style=MaterialTheme.typography.labelSmall);missing.forEach{ref->TextButton(onClick={selected=selected-ref}){Text("移除 $ref")}}}
-  Text("保存后作用于新收藏。手动移出后不会再次自动加入；停用规则会保留已有成员。",style=MaterialTheme.typography.bodySmall)
-  TextButton(onClick=::previewExisting,enabled=!busy&&controller.state.pending.none{it.collection==record.id}){Text("预览已保存规则的已有收藏")}
-  if(message.isNotBlank())Text(message,style=MaterialTheme.typography.bodySmall)
-  preview?.let{result->val rows=result.optJSONArray("items");if(rows!=null&&rows.length()>0){LazyColumn(Modifier.heightIn(max=120.dp)){items(rows.length()){i->Text(rows.getJSONObject(i).getString("title"),style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=4.dp))}};TextButton(onClick={confirmFill=true},enabled=!busy){Text("补收这 ${rows.length()} 条")}}}
- }},confirmButton={TextButton(onClick={controller.action{controller.write(record.id,"rule",JSONObject().put("enabled",enabled).put("mode",if(all)"all"else"any").put("tag_refs",JSONArray(selected.toList())));onDismiss()}},enabled=!enabled||selected.isNotEmpty()){Text("保存规则")}},dismissButton={TextButton(onClick=onDismiss){Text("取消")}})
- if(confirmFill)AlertDialog(onDismissRequest={confirmFill=false},title={Text("按已保存规则补收？")},text={Text("匹配的已有收藏会加入合集，手动排除的条目会跳过。")},confirmButton={TextButton(onClick={controller.action{
-  controller.reload();val latest=controller.remote.collections.find{it.id==record.id};if(latest?.revision!=previewRevision){message="合集已变化，请重新预览。";confirmFill=false;return@action}
-  controller.write(record.id,"backfill");confirmFill=false;onDismiss()
- }}){Text("补收")}},dismissButton={TextButton(onClick={confirmFill=false}){Text("取消")}})
+    val context=LocalContext.current.applicationContext;val scope=rememberCoroutineScope();val store=remember{CollectionStore(context)}
+    val p=com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    val v2=com.alpenl.cairn.share.network.CollectionsClient.version(controller.base)>=2
+    var enabled by rememberSaveable(record.id){mutableStateOf(record.ruleEnabled)}
+    var mode by rememberSaveable(record.id){mutableStateOf(record.ruleMode)}
+    var selected by rememberSaveable(record.id){mutableStateOf(record.ruleTags)}
+    var exclude by rememberSaveable(record.id){mutableStateOf(record.ruleExclude)}
+    var admission by rememberSaveable(record.id){mutableStateOf(record.ruleAdmission)}
+    var confirmedOnly by rememberSaveable(record.id){mutableStateOf(record.ruleConfirmedOnly)}
+    var picking by remember{mutableStateOf<String?>(null)}
+    var tags by remember{mutableStateOf(listOf<ManagedTag>())};var preview by remember{mutableStateOf<JSONObject?>(null)};var previewRevision by remember{mutableStateOf<Long?>(null)}
+    var queue by remember{mutableStateOf<List<JSONObject>?>(null)}
+    var message by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var confirmFill by remember{mutableStateOf(false)}
+    LaunchedEffect(record.id){tags=catalogTags(store.tagManagement(controller.account).payload);try{TagManagementSync.run(context,controller.base,controller.token);tags=catalogTags(store.tagManagement(controller.account).payload)}catch(e:Exception){if(e is kotlinx.coroutines.CancellationException)throw e;message="当前显示本地目录"}}
+    fun label(ref:String)=tags.firstOrNull{it.ref==ref}?.label?:"已停用的标签"
+    fun loadQueue(){if(!v2||record.ruleAdmission!="review")return;scope.launch{try{val r=com.alpenl.cairn.share.network.CollectionsClient(controller.base).request(controller.token,"/${record.id}/rules/candidates?status=pending&limit=100");val a=r.getJSONArray("items");queue=List(a.length()){a.getJSONObject(it)}}catch(e:Exception){if(e is kotlinx.coroutines.CancellationException)throw e;queue=null}}}
+    LaunchedEffect(record.id,record.revision){loadQueue()}
+    fun previewExisting(){scope.launch{busy=true;try{val result=com.alpenl.cairn.share.network.CollectionsClient(controller.base).request(controller.token,"/${record.id}/rules/preview");preview=result;previewRevision=result.getLong("revision");message=if(result.getBoolean("rule_valid"))"已保存的规则匹配 ${result.getJSONArray("items").length()}"+(if(result.getBoolean("has_more"))"+"else"")+" 条已有收藏"else"规则标签尚未保存或已停用，请先保存。"}catch(e:Exception){if(e is kotlinx.coroutines.CancellationException)throw e;message="暂时无法预览，请联网重试。"}finally{busy=false}}}
+    val dirty=enabled!=record.ruleEnabled||mode!=record.ruleMode||selected!=record.ruleTags||exclude!=record.ruleExclude||admission!=record.ruleAdmission||confirmedOnly!=record.ruleConfirmedOnly
+    val pendingWrite=controller.state.pending.any{it.collection==record.id}
+    fun save(){controller.action{
+        val body=JSONObject().put("enabled",enabled&&selected.isNotEmpty()).put("mode",mode).put("tag_refs",JSONArray(selected))
+        if(v2)body.put("exclude_tag_refs",JSONArray(exclude.filter{it !in selected})).put("admission",admission).put("confirmed_only",confirmedOnly)
+        controller.write(record.id,"rule",body);onDismiss()
+    }}
+    androidx.compose.ui.window.Dialog(onDismissRequest=onDismiss,properties=androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth=false)){
+    Surface(Modifier.fillMaxSize(),color=p.canvas){Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()){
+        Row(Modifier.fillMaxWidth().heightIn(min=56.dp).padding(horizontal=4.dp),verticalAlignment=Alignment.CenterVertically){
+            IconButton(onClick=onDismiss){Icon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,"返回")}
+            Column(Modifier.weight(1f)){Text("合集规则",style=MaterialTheme.typography.titleMedium);Text(record.name,style=MaterialTheme.typography.labelSmall,color=p.tertiary,maxLines=1,overflow=TextOverflow.Ellipsis)}
+            Button(onClick=::save,enabled=dirty&&!busy,shape=androidx.compose.foundation.shape.RoundedCornerShape(10.dp),modifier=Modifier.padding(end=8.dp).testTag("save_collection_rule")){Text("保存规则")}
+        }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal=16.dp),verticalArrangement=Arrangement.spacedBy(14.dp)){
+            RuleCard{RuleSwitchRow("按标签自动收录","作用于新收藏和标签变化后的收藏",enabled&&selected.isNotEmpty(),selected.isNotEmpty()){enabled=it}}
+            Text(ruleSentence(selected,if(v2)exclude else emptyList(),mode,if(v2)admission else "direct",v2&&confirmedOnly,enabled&&selected.isNotEmpty(),::label),
+                style=MaterialTheme.typography.bodyMedium.copy(fontFamily=com.alpenl.cairn.share.ui.theme.CairnSerif),color=p.inkSoft,
+                modifier=Modifier.fillMaxWidth().clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp)).background(p.cactus.copy(alpha=.35f)).padding(14.dp).testTag("rule_sentence"))
+            Row(verticalAlignment=Alignment.CenterVertically){Text("包含标签",style=MaterialTheme.typography.labelLarge,modifier=Modifier.weight(1f));Text("${selected.size} / 20",style=MaterialTheme.typography.labelSmall,color=p.faint)}
+            com.alpenl.cairn.share.ui.components.SegmentedToggle(listOf("any" to "任一标签","all" to "全部标签"),mode,{mode=it})
+            androidx.compose.foundation.layout.FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
+                for(ref in selected)RuleChip(label(ref),false){selected=selected-ref}
+                AddChip("添加标签",selected.size<20){picking="tags"}
+            }
+            Row(verticalAlignment=Alignment.CenterVertically){Text("排除标签",style=MaterialTheme.typography.labelLarge,modifier=Modifier.weight(1f));Text("带有这些标签的收藏不会加入",style=MaterialTheme.typography.labelSmall,color=p.faint)}
+            if(v2)androidx.compose.foundation.layout.FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
+                for(ref in exclude)RuleChip(label(ref),true){exclude=exclude-ref}
+                AddChip("排除标签",exclude.size<20){picking="exclude"}
+            } else Unsupported()
+            RuleCard{RuleSwitchRow("只按已确认的标签","关闭后，AI 建议的虚线标签也会参与匹配",v2&&confirmedOnly,v2){confirmedOnly=it}}
+            Text("收录方式",style=MaterialTheme.typography.labelLarge)
+            AdmissionOption("审核后再加入","匹配的收藏先进入待审核，你确认后才加入",admission=="review",v2){admission="review"}
+            AdmissionOption("直接加入","匹配后立即加入，可以随时手动移出",admission!="review",true){admission="direct"}
+            if(!v2)Unsupported()
+            queue?.takeIf{it.isNotEmpty()&&record.ruleAdmission=="review"}?.let{rows->
+                Row(verticalAlignment=Alignment.CenterVertically){Text("待审核",style=MaterialTheme.typography.labelLarge,modifier=Modifier.weight(1f));com.alpenl.cairn.share.ui.components.CountBadge(rows.size)}
+                RuleCard{rows.forEachIndexed{i,row->
+                    val id=row.getInt("link_id")
+                    Row(Modifier.fillMaxWidth().padding(start=14.dp,end=6.dp,top=8.dp,bottom=8.dp),verticalAlignment=Alignment.CenterVertically){
+                        Text(row.optString("title"),style=MaterialTheme.typography.bodyMedium,maxLines=2,overflow=TextOverflow.Ellipsis,modifier=Modifier.weight(1f))
+                        TextButton(onClick={controller.action{controller.write(record.id,"review_ignore",JSONObject().put("link_ids",JSONArray(listOf(id))));queue=rows-row}},enabled=!pendingWrite){Text("忽略",color=p.tertiary)}
+                        TextButton(onClick={controller.action{controller.write(record.id,"review_accept",JSONObject().put("link_ids",JSONArray(listOf(id))));queue=rows-row}},enabled=!pendingWrite,modifier=Modifier.testTag("review_accept_$id")){Text("加入")}
+                    }
+                    if(i<rows.lastIndex)HorizontalDivider(color=p.hairlineSoft)
+                }}
+            }
+            Text("匹配预览",style=MaterialTheme.typography.labelLarge)
+            Text("规则保存后作用于新收藏；手动移出的收藏不会再被自动加入，暂停规则会保留已有成员。",style=MaterialTheme.typography.bodySmall,color=p.tertiary)
+            TextButton(onClick=::previewExisting,enabled=!busy&&!pendingWrite&&!dirty){Text(if(dirty)"先保存规则再预览已有收藏" else "预览已有收藏")}
+            if(message.isNotBlank())Text(message,style=MaterialTheme.typography.bodySmall,color=p.muted)
+            preview?.let{result->val rows=result.optJSONArray("items");if(rows!=null&&rows.length()>0){
+                RuleCard{for(i in 0 until minOf(rows.length(),20)){Text(rows.getJSONObject(i).getString("title"),style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(horizontal=14.dp,vertical=8.dp))}}
+                OutlinedButton(onClick={confirmFill=true},enabled=!busy){Text(if(record.ruleAdmission=="review"&&v2)"把这 ${rows.length()} 条放进待审核" else "补收这 ${rows.length()} 条")}
+            }}
+            Spacer(Modifier.height(24.dp))
+        }
+    }}}
+    picking?.let{list->
+        val taken=if(list=="tags")selected else exclude
+        val blocked=if(list=="tags")exclude else selected
+        RuleTagPicker(if(list=="tags")"添加命中标签" else "添加排除标签",tags.filter{it.active&&it.dimension in listOf("topics","resource_kinds","content_functions","custom")&&it.ref !in blocked},taken,
+            onToggle={ref->if(list=="tags")selected=if(ref in selected)selected-ref else if(selected.size<20)selected+ref else selected else exclude=if(ref in exclude)exclude-ref else if(exclude.size<20)exclude+ref else exclude},
+            onDismiss={picking=null})
+    }
+    if(confirmFill)AlertDialog(onDismissRequest={confirmFill=false},title={Text("按已保存规则补收？")},text={Text("匹配的已有收藏会"+(if(record.ruleAdmission=="review"&&v2)"进入待审核" else "加入合集")+"，手动排除的条目会跳过。")},confirmButton={TextButton(onClick={controller.action{
+        controller.reload();val latest=controller.remote.collections.find{it.id==record.id};if(latest?.revision!=previewRevision){message="合集已变化，请重新预览。";confirmFill=false;return@action}
+        controller.write(record.id,"backfill");confirmFill=false;onDismiss()
+    }}){Text("补收")}},dismissButton={TextButton(onClick={confirmFill=false}){Text("取消")}})
+}
+
+@Composable private fun RuleCard(content:@Composable ColumnScope.()->Unit){
+    val p=com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    Column(Modifier.fillMaxWidth().clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp)).background(p.surface).border(1.dp,p.hairlineSoft,androidx.compose.foundation.shape.RoundedCornerShape(12.dp)),content=content)
+}
+@Composable private fun RuleSwitchRow(title:String,subtitle:String,checked:Boolean,enabled:Boolean,onChange:(Boolean)->Unit){
+    val p=com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    Row(Modifier.fillMaxWidth().padding(horizontal=14.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){
+        Column(Modifier.weight(1f)){Text(title,style=MaterialTheme.typography.bodyMedium.copy(fontWeight=FontWeight.Medium));Text(if(enabled)subtitle else "服务尚未支持，或先添加命中标签",style=MaterialTheme.typography.bodySmall,color=p.tertiary)}
+        Switch(checked,onChange,enabled=enabled,colors=SwitchDefaults.colors(checkedTrackColor=p.terracotta,checkedBorderColor=p.terracotta,uncheckedTrackColor=p.hairline,uncheckedBorderColor=p.hairline,uncheckedThumbColor=p.surface))
+    }
+}
+@Composable private fun RuleChip(label:String,excluded:Boolean,onRemove:()->Unit){
+    val p=com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    val shape=androidx.compose.foundation.shape.RoundedCornerShape(999.dp)
+    Row(Modifier.heightIn(min=32.dp).clip(shape).background(if(excluded)p.fig.copy(alpha=.08f) else p.olive.copy(alpha=.14f)).then(if(excluded)Modifier.border(1.dp,p.fig.copy(alpha=.5f),shape) else Modifier)
+        .clickable(onClick=onRemove).padding(start=12.dp,end=8.dp),verticalAlignment=Alignment.CenterVertically){
+        Text((if(excluded)"− " else "")+label,style=MaterialTheme.typography.labelMedium,color=if(excluded)p.fig else p.oliveInk)
+        Icon(androidx.compose.material.icons.Icons.Default.Close,"移除「$label」",Modifier.padding(start=4.dp).size(14.dp),tint=if(excluded)p.fig else p.oliveInk)
+    }
+}
+@Composable private fun AddChip(label:String,enabled:Boolean,onClick:()->Unit){
+    val p=com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    val shape=androidx.compose.foundation.shape.RoundedCornerShape(999.dp)
+    Row(Modifier.heightIn(min=32.dp).clip(shape).border(1.dp,p.hairline,shape).clickable(enabled=enabled,onClick=onClick).padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically){
+        Icon(androidx.compose.material.icons.Icons.Default.Add,null,Modifier.size(14.dp),tint=p.inkSoft);Text(label,style=MaterialTheme.typography.labelMedium,color=p.inkSoft,modifier=Modifier.padding(start=4.dp))
+    }
+}
+@Composable private fun AdmissionOption(title:String,subtitle:String,selected:Boolean,enabled:Boolean,onClick:()->Unit){
+    val p=com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    val shape=androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
+    Row(Modifier.fillMaxWidth().clip(shape).background(if(selected)p.terracotta.copy(alpha=.06f) else p.surface).border(1.dp,if(selected)p.terracotta.copy(alpha=.6f) else p.hairlineSoft,shape)
+        .selectable(selected,enabled=enabled,role=androidx.compose.ui.semantics.Role.RadioButton,onClick=onClick).padding(horizontal=12.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){
+        RadioButton(selected,null,enabled=enabled,colors=RadioButtonDefaults.colors(selectedColor=p.terracotta))
+        Column(Modifier.padding(start=10.dp)){Text(title,style=MaterialTheme.typography.bodyMedium.copy(fontWeight=FontWeight.Medium),color=if(enabled)p.ink else p.faint);Text(subtitle,style=MaterialTheme.typography.bodySmall,color=p.tertiary)}
+    }
+}
+@Composable private fun Unsupported(){Text("服务尚未支持：更新服务端后可用",style=MaterialTheme.typography.bodySmall,color=com.alpenl.cairn.share.ui.theme.CairnTheme.palette.tertiary)}
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable private fun RuleTagPicker(title:String,tags:List<ManagedTag>,selected:List<String>,onToggle:(String)->Unit,onDismiss:()->Unit){
+    var q by rememberSaveable{mutableStateOf("")}
+    AlertDialog(onDismissRequest=onDismiss,title={Text(title)},text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){
+        OutlinedTextField(q,{q=it},singleLine=true,placeholder={Text("搜索标签或别名")},modifier=Modifier.fillMaxWidth())
+        Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)){
+            for((d,group) in tags.filter{(it.label+" "+it.definition.stringList("aliases").joinToString(" ")).contains(q.trim(),true)}.groupBy{it.dimension}){
+                Text(tagDimensionLabels[d]?:d,style=MaterialTheme.typography.labelMedium,color=com.alpenl.cairn.share.ui.theme.CairnTheme.palette.muted)
+                androidx.compose.foundation.layout.FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalArrangement=Arrangement.spacedBy(6.dp)){
+                    for(t in group)com.alpenl.cairn.share.ui.components.TagChip(t.label,tone=when(d){"topics"->com.alpenl.cairn.share.ui.components.TagTone.Topic;"resource_kinds"->com.alpenl.cairn.share.ui.components.TagTone.Resource;"custom"->com.alpenl.cairn.share.ui.components.TagTone.Personal;else->com.alpenl.cairn.share.ui.components.TagTone.Feature},
+                        state=com.alpenl.cairn.share.ui.components.TagState.Automatic,selected=t.ref in selected,onClick={onToggle(t.ref)},modifier=Modifier.testTag("rule_pick_${t.ref}"))
+                }
+            }
+        }
+        Text("已选 ${selected.size} 个，可以多选",style=MaterialTheme.typography.labelSmall,color=com.alpenl.cairn.share.ui.theme.CairnTheme.palette.tertiary)
+    }},confirmButton={TextButton(onClick=onDismiss){Text("完成")}})
 }

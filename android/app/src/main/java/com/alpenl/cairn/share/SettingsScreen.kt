@@ -2,6 +2,8 @@ package com.alpenl.cairn.share
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -72,6 +74,7 @@ internal fun SettingsScreen(
     onAutomaticSync: (Boolean) -> Unit = {},
     onImagesWifiOnly: (Boolean) -> Unit = {},
     onStorageLimit: (Long) -> Unit = {},
+    onOpenAi: () -> Unit = {},
 ) {
     var storageDialog by rememberSaveable { mutableStateOf(false) }
     var tokenDialogOpen by rememberSaveable { mutableStateOf(false) }
@@ -90,7 +93,7 @@ internal fun SettingsScreen(
                 state.apiTokenSaveError.ifBlank { apiTokenSubtitle(state.preferences.apiToken) }, editToken,
                 modifier = Modifier.testTag("settings_token").semantics { liveRegion = LiveRegionMode.Polite })
         }
-        SettingsGroup("阅读与同步") {
+        SettingsGroup("同步与上传") {
             SettingsRow(Icons.Default.Refresh, "待上传队列", when {
                 !state.pendingUploadsLoaded -> "正在读取本机队列"
                 state.retryingUploads -> "正在上传 · ${state.pendingUploads.size} 条仍在本机"
@@ -107,8 +110,11 @@ internal fun SettingsScreen(
                 state.preferences.apiToken.isBlank() -> editToken
                 else -> onFlushPersonal
             }, modifier = Modifier.testTag("settings_personal_sync"))
-            SettingsDivider()
-            SettingsRow(CairnIcons.Offline, "本地资料", "已保存 ${state.offlineReads.size} 条正文 · 点按离线阅读", onOpenOffline)
+            SettingsSwitchRow(Icons.Default.Refresh, "自动更新", "打开时更新，后台定期检查；联网后继续", state.preferences.automaticSync, onAutomaticSync,
+                Modifier.testTag("settings_auto_sync"))
+        }
+        SettingsGroup("离线") {
+            SettingsRow(CairnIcons.Offline, "离线阅读与下载", "已保存 ${state.offlineReads.size} 条正文 · 点按离线阅读", onOpenOffline)
             Text(state.localStorageText.ifBlank { "正文与图片保存在本机，可断网阅读。" },
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 32.dp, end = 4.dp))
@@ -119,10 +125,10 @@ internal fun SettingsScreen(
                 modifier = Modifier.padding(start = 20.dp).heightIn(min = 48.dp).testTag("download_library")) {
                 Text(if (state.downloadingLibrary) "暂停下载" else "下载 / 更新全部资料", style = MaterialTheme.typography.labelMedium)
             }
-            SettingsSwitchRow(Icons.Default.Refresh, "自动更新", "打开时更新，后台定期检查；联网后继续", state.preferences.automaticSync, onAutomaticSync,
-                Modifier.testTag("settings_auto_sync"))
+            SettingsDivider()
             SettingsSwitchRow(CairnIcons.Offline, "仅通过 Wi-Fi 保存图片", "文字资料可通过移动网络更新", state.preferences.imagesWifiOnly, onImagesWifiOnly,
                 Modifier.testTag("settings_wifi_images"))
+            SettingsDivider()
             SettingsRow(CairnIcons.Offline, "本地存储上限", "${state.preferences.storageLimitMb} MB · 达到上限后暂停下载", { storageDialog = true })
             TextButton(onClick = { confirmClearCache = true }, enabled = !state.downloadingLibrary,
                 modifier = Modifier.padding(start = 20.dp).heightIn(min = 48.dp).testTag("clear_offline_cache")) {
@@ -136,10 +142,12 @@ internal fun SettingsScreen(
             SettingsSwitchRow(CairnIcons.External, "保留完整链接", "保留链接中的参数与页面定位", state.preferences.preserveCompleteUrl,
                 onPreserveCompleteUrlChange, Modifier.testTag("settings_preserve_url"))
         }
-        SettingsGroup("分类管理") {
-            SettingsRow(CairnIcons.Filter, "标签管理", "名称、含义、粒度与 AI 开关", onOpenTags, Modifier.testTag("settings_tag_manager"))
+        SettingsGroup("整理") {
+            SettingsRow(CairnIcons.Filter, "标签库", "名称、含义、例子与 AI 开关", onOpenTags, Modifier.testTag("settings_tag_manager"))
             SettingsDivider()
-            SettingsRow(CairnIcons.Library, "合集管理", "分类与按标签自动收录", onOpenCollections)
+            SettingsRow(CairnIcons.Library, "合集规则", "按多个标签自动收录、排除与审核", onOpenCollections)
+            SettingsDivider()
+            SettingsRow(Icons.Default.Check, "AI 打标", "建议数量、确认后生效与低置信度", onOpenAi, Modifier.testTag("settings_ai"))
         }
         SettingsGroup("应用") {
             SettingsRow(Icons.Default.Refresh, "检查更新", updateSettingSubtitle(state), onOpenUpdate)
@@ -188,15 +196,19 @@ internal fun SettingsScreen(
 @Composable
 private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxWidth()) {
-        Text(title, style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.4.sp),
-            fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 8.dp, bottom = 8.dp).semantics { heading() })
-        Column(content = content)
+        val p = com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+        Text(title, style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 0.4.sp),
+            fontWeight = FontWeight.Medium, color = p.tertiary,
+            modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 8.dp).semantics { heading() })
+        // 2026-10: each group is a white card on the parchment canvas (prototype .grp .card).
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(com.alpenl.cairn.share.ui.theme.CairnTokens.Radius.Card))
+            .background(p.surface).border(1.dp, p.hairlineSoft, RoundedCornerShape(com.alpenl.cairn.share.ui.theme.CairnTokens.Radius.Card))
+            .padding(horizontal = 14.dp, vertical = 2.dp), content = content)
     }
 }
 @Composable
 private fun SettingsDivider() {
-    HorizontalDivider(modifier = Modifier.padding(start = 32.dp), thickness = 0.5.dp,
+    HorizontalDivider(modifier = Modifier.padding(start = 44.dp), thickness = 0.5.dp,
         color = MaterialTheme.colorScheme.outlineVariant)
 }
 
@@ -205,7 +217,7 @@ internal fun SettingsRow(icon: ImageVector, title: String, subtitle: String, onC
     Row(modifier = modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(4.dp))
         .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
         .padding(vertical = 9.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f), modifier = Modifier.size(20.dp))
+        SettingsIcon(icon)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 20.sp))
             Text(subtitle, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 17.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -219,17 +231,25 @@ private fun SettingsSwitchRow(icon: ImageVector, title: String, subtitle: String
     Row(modifier = modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(4.dp))
         .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
         .padding(vertical = 9.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f), modifier = Modifier.size(20.dp))
+        SettingsIcon(icon)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 20.sp))
             Text(subtitle, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 17.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         // The whole row owns the toggle semantics and touch target; this is only its visual state.
         Box(Modifier.width(36.dp).height(22.dp).clip(RoundedCornerShape(11.dp))
-            .background(if (checked) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else MaterialTheme.colorScheme.outlineVariant)
+            .background(if (checked) com.alpenl.cairn.share.ui.theme.CairnTheme.palette.olive else com.alpenl.cairn.share.ui.theme.CairnTheme.palette.hairline)
             .padding(3.dp)) {
             Box(Modifier.align(if (checked) Alignment.CenterEnd else Alignment.CenterStart).size(16.dp).clip(CircleShape)
-                .background(if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)))
+                .background(Color.White))
         }
+    }
+}
+
+@Composable
+private fun SettingsIcon(icon: ImageVector) {
+    val p = com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    Box(Modifier.size(32.dp).clip(RoundedCornerShape(9.dp)).background(p.secondary), contentAlignment = Alignment.Center) {
+        Icon(icon, contentDescription = null, tint = p.inkSoft, modifier = Modifier.size(17.dp))
     }
 }

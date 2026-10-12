@@ -102,7 +102,8 @@ internal fun BookmarkCuration(
     Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceVariant) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(enrichment.curationStatus.label, style = MaterialTheme.typography.titleMedium)
+                // 2026-10: 整理状态 is no longer shown or edited (the field is kept server-side).
+                Text("收藏原因", style = MaterialTheme.typography.titleMedium)
                 TextButton(onClick = { editing = true; onLoadTaxonomy() }, enabled = !busy, modifier = Modifier.testTag("edit_curation")) {
                     Text("整理")
                 }
@@ -136,7 +137,8 @@ private fun CurationDialog(
     onSave: (CurationUpdate) -> Unit,
 ) {
     var why by rememberSaveable { mutableStateOf(enrichment.why) }
-    var status by rememberSaveable { mutableStateOf(enrichment.curationStatus) }
+    // Saved back unchanged: the redesign keeps the legacy status but never edits it.
+    val status = enrichment.curationStatus
     var topics by rememberSaveable { mutableStateOf(enrichment.classification?.topics.orEmpty()) }
     var form by rememberSaveable { mutableStateOf(enrichment.classification?.form.orEmpty()) }
     var use by rememberSaveable { mutableStateOf(enrichment.classification?.use.orEmpty()) }
@@ -146,12 +148,6 @@ private fun CurationDialog(
         title = { Text("整理收藏") },
         text = {
             Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    for (value in CurationStatus.entries) FilterChip(
-                        selected = value == status, onClick = { status = value }, enabled = !busy,
-                        label = { Text(value.label) }, modifier = Modifier.testTag("curation_status_${value.apiValue}"),
-                    )
-                }
                 OutlinedTextField(
                     value = why, onValueChange = { why = it }, label = { Text("收藏原因") },
                     supportingText = { Text("$whyLength / 200") }, isError = whyLength > 200,
@@ -283,6 +279,15 @@ internal fun bookmarkFilterLabels(filters: BookmarkFilters, taxonomy: BookmarkTa
     fun label(id: String, terms: List<TaxonomyTerm>?) = terms.orEmpty().firstOrNull { it.id == id }?.label ?: id
     return buildList {
         if (filters.curationStatus.isNotBlank()) add(CurationStatus.entries.firstOrNull { it.apiValue == filters.curationStatus }?.label ?: filters.curationStatus)
+        for (ref in filters.tags.distinct()) {
+            val (kind, dimension, id) = ref.split('/').let { if (it.size == 3) Triple(it[0], it[1], it[2]) else Triple("", "", ref) }
+            add(if (kind == "custom") customTags.firstOrNull { it.id == id }?.label ?: "个人标签" else label(id, when (dimension) {
+                "topics" -> taxonomy?.topics; "resource_kinds" -> taxonomy?.resourceKinds; "content_functions" -> taxonomy?.contentFunctions
+                "carriers" -> taxonomy?.carriers; "affordances" -> taxonomy?.affordances; "forms" -> taxonomy?.forms; "uses" -> taxonomy?.uses
+                else -> null
+            }))
+        }
+        if (filters.tags.distinct().size > 1 && filters.tagsMode == "all") add("全部满足")
         for (id in (filters.topics + listOf(filters.topic).filter { it.isNotBlank() }).distinct()) add(label(id, taxonomy?.topics))
         for (id in filters.topicRefinements) add("进一步：${label(id, taxonomy?.topics)}")
         for (id in filters.resourceKinds) add(label(id, taxonomy?.resourceKinds))
@@ -359,100 +364,39 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
             }
         }
     }
-    if (expanded) ModalBottomSheet(onDismissRequest = { expanded = false },
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp,
-        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)) {
-        Column(Modifier.fillMaxWidth().fillMaxHeight(0.9f).testTag("bookmark_filter_sheet")) {
-            Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("筛选收藏", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                TextButton(onClick = { onChange(BookmarkFilters()) }, enabled = filters != BookmarkFilters(),
-                    modifier = Modifier.heightIn(min = 48.dp).testTag("reset_filter_sheet")) {
-                    Text("重置", style = MaterialTheme.typography.labelMedium)
-                }
-            }
-            Text("点选即生效 · 分组间同时满足", style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 8.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Column(Modifier.padding(horizontal = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                TopicNavigation(filters, taxonomy?.topics.orEmpty(), baseUrl, apiToken, query, learned, onChange)
-                if (taxonomy == null) Text("标签词表暂未加载；已选条件保留，也可清除后重试。", style = MaterialTheme.typography.bodySmall)
-                if (!taxonomy?.resourceKinds.isNullOrEmpty() || filters.resourceKinds.isNotEmpty()) {
-                    if ((filters.topics + filters.topic).filter { it.isNotBlank() }.distinct().size >= 2) {
-                        TagFilterMode("主题匹配", filters.topicsMode) { onChange(filters.copy(topicsMode = it)) }
-                    }
-                    FilterDimension("资源类型", "resource_kinds", filters.resourceKinds, taxonomy?.resourceKinds.orEmpty()) { onChange(filters.copy(resourceKinds = it)) }
-                    if (filters.resourceKinds.filter { it.isNotBlank() }.distinct().size >= 2) {
-                        TagFilterMode("资源类型匹配", filters.resourceMode) { onChange(filters.copy(resourceMode = it)) }
-                    }
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.padding(top = 8.dp))
-                TextButton(onClick = { advanced = !advanced }, contentPadding = PaddingValues(horizontal = 0.dp),
-                    modifier = Modifier.heightIn(min = 48.dp).testTag("advanced_bookmark_filters")
-                    .semantics { stateDescription = if (advanced) "已展开" else "已折叠" }) {
-                    Text(if (advanced) "收起更多条件" else "更多筛选条件", style = MaterialTheme.typography.labelMedium)
-                    Icon(if (advanced) CairnIcons.Down else CairnIcons.Chevron, contentDescription = null,
-                        modifier = Modifier.padding(start = 6.dp).size(14.dp))
-                }
-                if (advanced) {
-                    Text("整理状态", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for (status in CurationStatus.entries) QuietFilterTag(label = status.label,
-                            selected = filters.curationStatus == status.apiValue,
-                            onClick = { onChange(filters.copy(curationStatus = if (filters.curationStatus == status.apiValue) "" else status.apiValue)) },
-                            modifier = Modifier.testTag("filter_curation_${status.apiValue}"),
-                        )
-                    }
-                    Text("来源与时间", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for ((value, label) in listOf("x" to "X", "wechat" to "公众号", "other" to "其他来源")) QuietFilterTag(label = label,
-                            selected = filters.source == value, onClick = { onChange(filters.copy(source = if (filters.source == value) "" else value)) },
-                        )
-                        QuietFilterTag(label = "分类待确认", selected = filters.uncertain, onClick = { onChange(filters.copy(uncertain = !filters.uncertain)) })
-                        for (days in listOf(7, 30)) QuietFilterTag(label = "近 $days 天", selected = filters.recentDays == days, onClick = { onChange(filters.copy(recentDays = if (filters.recentDays == days) 0 else days)) })
-                    }
-                    if (customCatalog.isNotEmpty() || filters.customTags.isNotEmpty()) {
-                        FilterDimension("自定义标记", "custom_tags", filters.customTags, customCatalog.map { TaxonomyTerm(it.id, it.label, it.active) }) { onChange(filters.copy(customTags = it)) }
-                        if (filters.customTags.filter { it.isNotBlank() }.distinct().size >= 2) {
-                            TagFilterMode("自定义标记匹配", filters.customMode) { onChange(filters.copy(customMode = it)) }
-                        }
-                    }
-                    if (catalogError) {
-                        Text("自定义标记暂时无法读取，已选条件保留。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                        TextButton(onClick = { catalogRetry++ }) { Text("重试读取自定义标记") }
-                    }
-                    if (taxonomy?.multiDimensional == true || filters.contentFunctions.isNotEmpty()) {
-                        FilterDimension("内容功能", "content_functions", filters.contentFunctions, taxonomy?.contentFunctions.orEmpty()) { onChange(filters.copy(contentFunctions = it)) }
-                        if (!taxonomy?.resourceKinds.isNullOrEmpty() && filters.contentFunctions.filter { it.isNotBlank() }.distinct().size >= 2) {
-                            TagFilterMode("内容功能匹配", filters.functionsMode) { onChange(filters.copy(functionsMode = it)) }
-                        }
-                    }
-                    if (taxonomy?.multiDimensional == true || filters.carriers.isNotEmpty() || filters.affordances.isNotEmpty()) {
-                        FilterDimension("载体（任一）", "carriers", filters.carriers, taxonomy?.carriers.orEmpty()) { onChange(filters.copy(carriers = it)) }
-                        FilterDimension("潜在用途", "affordances", filters.affordances, taxonomy?.affordances.orEmpty()) { onChange(filters.copy(affordances = it)) }
-                    }
-                    FlowRow {
-                        TermSelector("形态", filters.form, taxonomy?.forms.orEmpty()) { onChange(filters.copy(form = it)) }
-                        TermSelector("用途", filters.use, taxonomy?.uses.orEmpty()) { onChange(filters.copy(use = it)) }
-                    }
-                    Text("实体处理状态（任一）", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        val selected = filters.entityState.split(',').filter { it.isNotEmpty() }
-                        for ((value, label) in entityFilterLabels) QuietFilterTag(label = label, selected = value in selected,
-                            onClick = { onChange(filters.copy(entityState = (if (value in selected) selected - value else selected + value).joinToString(","))) },
-                            modifier = Modifier.testTag("filter_entity_state_$value"))
-                    }
-                }
-            }
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Button(onClick = { expanded = false }, shape = RoundedCornerShape(8.dp), elevation = null,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)
-                    .heightIn(min = 48.dp).testTag("view_filter_results")) {
-                Text("查看结果", style = MaterialTheme.typography.labelLarge)
-            }
+    if (expanded) ChipFilterSheet(
+        filters = filters, taxonomy = taxonomy, customCatalog = customCatalog,
+        catalogError = catalogError, onRetryCatalog = { catalogRetry++ },
+        onChange = onChange, onDismiss = { expanded = false },
+        topicNavigation = { TopicNavigation(filters, taxonomy?.topics.orEmpty(), baseUrl, apiToken, query, learned, onChange) },
+        advanced = advanced, onToggleAdvanced = { advanced = !advanced },
+    ) {
+        Text("来源与时间", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for ((value, label) in listOf("x" to "X", "wechat" to "公众号", "other" to "其他来源")) QuietFilterTag(label = label,
+                selected = filters.source == value, onClick = { onChange(filters.copy(source = if (filters.source == value) "" else value)) },
+            )
+            QuietFilterTag(label = "分类待确认", selected = filters.uncertain, onClick = { onChange(filters.copy(uncertain = !filters.uncertain)) })
+            for (days in listOf(7, 30)) QuietFilterTag(label = "近 $days 天", selected = filters.recentDays == days, onClick = { onChange(filters.copy(recentDays = if (filters.recentDays == days) 0 else days)) })
+        }
+        // Legacy per-dimension selections (old deep links) stay visible and removable.
+        if (filters.customTags.isNotEmpty()) FilterDimension("自定义标记（旧条件）", "custom_tags", filters.customTags, customCatalog.map { TaxonomyTerm(it.id, it.label, it.active) }) { onChange(filters.copy(customTags = it)) }
+        if (filters.contentFunctions.isNotEmpty()) FilterDimension("内容功能（旧条件）", "content_functions", filters.contentFunctions, taxonomy?.contentFunctions.orEmpty()) { onChange(filters.copy(contentFunctions = it)) }
+        if (filters.resourceKinds.isNotEmpty()) FilterDimension("资源类型（旧条件）", "resource_kinds", filters.resourceKinds, taxonomy?.resourceKinds.orEmpty()) { onChange(filters.copy(resourceKinds = it)) }
+        if (taxonomy?.multiDimensional == true || filters.carriers.isNotEmpty() || filters.affordances.isNotEmpty()) {
+            FilterDimension("载体（任一）", "carriers", filters.carriers, taxonomy?.carriers.orEmpty()) { onChange(filters.copy(carriers = it)) }
+            FilterDimension("潜在用途", "affordances", filters.affordances, taxonomy?.affordances.orEmpty()) { onChange(filters.copy(affordances = it)) }
+        }
+        FlowRow {
+            TermSelector("形态", filters.form, taxonomy?.forms.orEmpty()) { onChange(filters.copy(form = it)) }
+            TermSelector("用途", filters.use, taxonomy?.uses.orEmpty()) { onChange(filters.copy(use = it)) }
+        }
+        Text("实体处理状态（任一）", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            val selected = filters.entityState.split(',').filter { it.isNotEmpty() }
+            for ((value, label) in entityFilterLabels) QuietFilterTag(label = label, selected = value in selected,
+                onClick = { onChange(filters.copy(entityState = (if (value in selected) selected - value else selected + value).joinToString(","))) },
+                modifier = Modifier.testTag("filter_entity_state_$value"))
         }
     }
 }

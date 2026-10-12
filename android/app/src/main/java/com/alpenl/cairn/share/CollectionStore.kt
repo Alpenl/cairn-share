@@ -15,11 +15,16 @@ import org.json.JSONObject
 
 internal data class CollectionRecord(val id: String, val name: String, val description: String = "", val pinned: Boolean = false,
     val archived: Boolean = false, val deleted: Boolean = false, val revision: Long = 0,
-    val ruleEnabled:Boolean=false,val ruleMode:String="any",val ruleTags:List<String> = emptyList(),val ruleAfterId:Int=0,val ruleRevision:Long=0) {
+    val ruleEnabled:Boolean=false,val ruleMode:String="any",val ruleTags:List<String> = emptyList(),val ruleAfterId:Int=0,val ruleRevision:Long=0,
+    // Collections protocol 2 (2026-10): exclude tags, review-before-adding, confirmed-only.
+    val ruleExclude:List<String> = emptyList(),val ruleAdmission:String="direct",val ruleConfirmedOnly:Boolean=false) {
     fun json(): JSONObject = JSONObject().put("id", id).put("name", name).put("description", description).put("pinned", if(pinned) 1 else 0)
-        .put("archived", if(archived) 1 else 0).put("deleted", if(deleted) 1 else 0).put("revision", revision).put("rule_enabled",if(ruleEnabled)1 else 0).put("rule_mode",ruleMode).put("rule_tags",JSONArray(ruleTags).toString()).put("rule_after_id",ruleAfterId).put("rule_revision",ruleRevision)
+        .put("archived", if(archived) 1 else 0).put("deleted", if(deleted) 1 else 0).put("revision", revision).put("rule_enabled",if(ruleEnabled)1 else 0).put("rule_mode",ruleMode).put("rule_tags",JSONArray(ruleTags).toString()).put("rule_after_id",ruleAfterId).put("rule_revision",ruleRevision).put("rule_exclude_tags",JSONArray(ruleExclude).toString()).put("rule_admission",ruleAdmission).put("rule_confirmed_only",if(ruleConfirmedOnly)1 else 0)
     companion object { fun decode(j: JSONObject) = CollectionRecord(j.getString("id"), j.getString("name"), j.optString("description"),
-        j.optInt("pinned") == 1, j.optInt("archived") == 1, j.optInt("deleted") == 1, j.getLong("revision"),j.optInt("rule_enabled")==1,j.optString("rule_mode","any"),JSONArray(j.optString("rule_tags","[]")).let{a->List(a.length()){a.getString(it)}},j.optInt("rule_after_id"),j.optLong("rule_revision")) }
+        j.optInt("pinned") == 1, j.optInt("archived") == 1, j.optInt("deleted") == 1, j.getLong("revision"),j.optInt("rule_enabled")==1,j.optString("rule_mode","any"),JSONArray(j.optString("rule_tags","[]")).let{a->List(a.length()){a.getString(it)}},j.optInt("rule_after_id"),j.optLong("rule_revision"),
+        refs(j.opt("rule_exclude_tags")),if(j.optString("rule_admission")=="review")"review" else "direct",j.optInt("rule_confirmed_only")==1||j.optBoolean("rule_confirmed_only"))
+        // D1 returns JSON columns as text; cached records may hold either form.
+        private fun refs(v: Any?): List<String> = when (v) { is JSONArray -> List(v.length()) { v.getString(it) }; is String -> runCatching { JSONArray(v.ifBlank { "[]" }) }.getOrNull()?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList(); else -> emptyList() } }
 }
 internal data class CollectionMember(val collection: String, val link: Int, val position: Int, val note: String = "",val origin:String="manual",val matchedTags:List<String> = emptyList()) {
     fun json(): JSONObject = JSONObject().put("collection_id", collection).put("link_id", link).put("position", position).put("note", note).put("origin",origin).put("matched_tags",JSONArray(matchedTags).toString())

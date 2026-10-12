@@ -12,6 +12,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import com.alpenl.cairn.share.ui.components.SegmentedToggle
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -136,6 +138,7 @@ private object Routes {
     const val Offline = "offline"
     const val Collections = "collections"
     const val Tags = "tags"
+    const val Ai = "settings/ai"
 
     fun detail(id: Int): String = "detail/$id"
     fun edit(id: Int): String = "edit/$id"
@@ -222,14 +225,17 @@ internal fun CairnLinksApp(
         },
         floatingActionButton = {
             if (currentRoute == Routes.Library) {
-                FloatingActionButton(
+                // Terracotta is reserved for the one primary action on a screen.
+                androidx.compose.material3.ExtendedFloatingActionButton(
                     onClick = viewModel::openManualAdd,
-                    shape = CircleShape,
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.primary,
-                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 1.dp),
-                    modifier = Modifier.size(52.dp).testTag("add_link"),
-                ) { Icon(Icons.Default.Add, contentDescription = "收藏链接", modifier = Modifier.size(22.dp)) }
+                    shape = RoundedCornerShape(16.dp),
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 3.dp),
+                    icon = { Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                    text = { Text("收藏链接", style = MaterialTheme.typography.labelLarge) },
+                    modifier = Modifier.heightIn(min = 52.dp).testTag("add_link"),
+                )
             }
         },
         containerColor = MaterialTheme.colorScheme.background,
@@ -297,7 +303,11 @@ internal fun CairnLinksApp(
                     onCancelDownload = viewModel::cancelLibraryDownload,
                     onFlushPersonal = viewModel::flushPersonalTags,
                     onOpenOffline = { navController.navigate(Routes.Offline) },
+                    onOpenAi = { navController.navigate(Routes.Ai) },
                 )
+            }
+            composable(Routes.Ai) {
+                AiSettingsScreen(state.apiBaseUrl, state.preferences.apiToken, onBack = { navController.popBackStack() })
             }
             composable(Routes.Search) {
                 SearchScreen(
@@ -321,7 +331,7 @@ internal fun CairnLinksApp(
             }
             composable(Routes.Offline) {
                 ScreenColumn {
-                    DetailTopBar(title = "离线阅读", onBack = { navController.popBackStack() })
+                    DetailTopBar(title = "离线阅读", onBack = { navController.popBackStack() }, large = true)
                     Text("本机保存的正文与图片；可在设置中下载或更新全部资料。", style = MaterialTheme.typography.bodySmall)
                     LinkList(items = state.offlineLinks.sortedWith(compareByDescending<SavedLink> { state.offlineReads[it.id]?.pinned == true }.thenByDescending { it.id }),
                         onTagFilter = onTagFilter,
@@ -455,24 +465,28 @@ internal fun CairnLinksApp(
 
 @Composable
 private fun CairnBottomBar(currentRoute: String?, uploadCount: Int, onNavigate: (String) -> Unit) {
-    Surface(color = MaterialTheme.colorScheme.surface) {
+    val palette = com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    Surface(color = palette.canvas) {
         Column(Modifier.navigationBarsPadding()) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Row(Modifier.fillMaxWidth()) {
                 TopDestinations.forEach { destination ->
                     val selected = currentRoute == destination.route
-                    val tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    val tint = if (selected) palette.ink else palette.tertiary
                     Surface(color = Color.Transparent, contentColor = tint,
                         modifier = Modifier.weight(1f).selectable(selected, role = Role.Tab,
                             onClick = { onNavigate(destination.route) }).testTag("nav_${destination.route}")) {
                         Column(Modifier.heightIn(min = 64.dp).padding(vertical = 9.dp),
                             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)) {
-                            BadgedIcon(destination.icon, destination.label, when (destination.route) {
-                                Routes.Settings -> uploadCount.takeIf { it > 0 }
-                                else -> null
-                            })
+                            Box(Modifier.clip(RoundedCornerShape(16.dp)).background(if (selected) palette.manilla.copy(alpha = .7f) else Color.Transparent)
+                                .padding(horizontal = 18.dp, vertical = 4.dp), contentAlignment = Alignment.Center) {
+                                BadgedIcon(destination.icon, destination.label, when (destination.route) {
+                                    Routes.Settings -> uploadCount.takeIf { it > 0 }
+                                    else -> null
+                                })
+                            }
                             Text(destination.label, style = MaterialTheme.typography.labelSmall,
-                                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
                         }
                     }
                 }
@@ -526,7 +540,7 @@ private fun LibraryScreen(
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp).heightIn(min = 48.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("收藏", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium)
+                        Text("收藏", style = MaterialTheme.typography.headlineLarge)
                         Text(if (querying && !state.libraryStale && !loading) "${items.size} 条筛选结果" else "${stats.total} 条 · ${stats.pending} 未读",
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -674,6 +688,7 @@ private fun PendingUploadsScreen(
         DetailTopBar(
             title = "待上传队列",
             onBack = onBack,
+            large = true,
             actions = {
                 IconButton(
                     onClick = onRetryAll,
@@ -907,6 +922,18 @@ private fun DetailScreen(
                         CollectionMembershipButton(state.apiBaseUrl,state.preferences.apiToken,listOf(id))
                     }
                 }
+                // 2026-10: 原文 / 整理版 first, then 收藏原因, then the body.
+                if (enrichment?.formattedContent?.isNotBlank() == true) item(key = "version_toggle") {
+                    SegmentedToggle(
+                        options = listOf(true to "原文", false to "整理版"),
+                        selected = showUnformatted,
+                        onSelect = { showUnformatted = it; showOriginal = false },
+                        modifier = Modifier.testTag("reader_version"),
+                    )
+                }
+                if (enrichment?.why?.isNotBlank() == true && !curateExpanded) item(key = "reason") {
+                    ReasonCard(enrichment.why)
+                }
                 item(key = "curation_overview") {
                     Column(Modifier.fillMaxWidth().testTag("reader_curation"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         val effective = state.v2Drafts[id] ?: state.v2Selections[id]
@@ -921,8 +948,6 @@ private fun DetailScreen(
                                     Icon(CairnIcons.Chevron, contentDescription = "编辑标签与备注", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
-                            if (enrichment?.why?.isNotBlank() == true) Text(enrichment.why, maxLines = 1,
-                                overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                             if ((state.v2Queued[id] ?: 0) > 0 || state.v2Conflicts.containsKey(id) || (state.personalTagQueued[id] ?: 0) > 0) Text("有待同步或冲突的标签修改，展开后处理。", style = MaterialTheme.typography.bodySmall)
                         } else {
                             TextButton(onClick = { curateExpanded = false }, modifier = Modifier.testTag("reader_curation_toggle").semantics { stateDescription = "已展开" }) {
@@ -971,7 +996,6 @@ private fun DetailScreen(
                                 if (enrichment.originalText.isNotBlank() && enrichment.translatedText.isNotBlank()) TextButton(
                                     onClick = { showOriginal = !showOriginal }, modifier = Modifier.testTag("toggle_original"),
                                 ) { Text(if (showOriginal) "查看译文" else "查看原文") }
-                                if (enrichment.formattedContent.isNotBlank()) TextButton(onClick = { showUnformatted = !showUnformatted; showOriginal = false }) { Text(if(showUnformatted) "查看整理版" else "查看原内容") }
                                 TextButton(onClick = onFormatBody, enabled = enrichment.formattingStatus !in listOf("pending", "processing")) { Text(if(enrichment.formattingStatus in listOf("pending", "processing")) "等待正文整理" else if(enrichment.formattedContent.isNotBlank()) "重新整理正文" else "整理正文") }
                                 TextButton(onClick = onRefreshBody) { Text("刷新正文") }
                                 TextButton(onClick = { onCopy(readingText) }) { Text("复制全文", style = MaterialTheme.typography.labelMedium) }
@@ -1165,7 +1189,7 @@ private fun UpdateScreen(
         AppUpdateState.UpToDate -> null
     }
     ScreenColumn(scroll = true) {
-        DetailTopBar(title = "检查更新", onBack = onBack)
+        DetailTopBar(title = "检查更新", onBack = onBack, large = true)
         UpdatePanel(
             updateState = state.updateState,
             currentVersionName = state.currentVersionName,
@@ -1197,6 +1221,7 @@ private fun ApiConsoleScreen(
         DetailTopBar(
             title = "API 调试台",
             onBack = onBack,
+            large = true,
             actions = {
                 IconButton(
                     onClick = {
@@ -1223,6 +1248,7 @@ private fun ApiConsoleScreen(
             onValueChange = onPathChange,
             label = { Text("路径") },
             singleLine = true,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
             shape = RoundedCornerShape(18.dp),
             modifier = Modifier.fillMaxWidth(),
         )
@@ -1285,7 +1311,7 @@ private fun AboutScreen(
     onOpenExternal: (String) -> Unit,
 ) {
     ScreenColumn(scroll = true) {
-        DetailTopBar(title = "关于", onBack = onBack)
+        DetailTopBar(title = "关于", onBack = onBack, large = true)
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1373,6 +1399,7 @@ internal fun AppHeader(
 private fun DetailTopBar(
     title: String,
     onBack: () -> Unit,
+    large: Boolean = false,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     Row(
@@ -1383,10 +1410,11 @@ private fun DetailTopBar(
         IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", modifier = Modifier.size(20.dp))
         }
+        // Settings sub-pages use the serif page title (like 标签库 / AI 打标); the reader keeps a quiet label.
         Text(
             title,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Normal,
+            style = if (large) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.bodyMedium,
+            fontWeight = if (large) null else FontWeight.Normal,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1447,15 +1475,16 @@ private fun FilterRow(
 
 @Composable
 private fun FilterTab(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(
-        color = Color.Transparent,
-        contentColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = modifier.selectable(selected = selected, enabled = enabled, role = Role.Tab, onClick = onClick)) {
-        val accent = MaterialTheme.colorScheme.primary
-        Box(Modifier.heightIn(min = 48.dp).drawBehind {
-            if (selected) drawLine(accent, Offset(size.width * 0.4f, size.height - 1.dp.toPx()), Offset(size.width * 0.6f, size.height - 1.dp.toPx()), 2.dp.toPx())
-        }.padding(horizontal = 8.dp, vertical = 8.dp), contentAlignment = Alignment.Center) {
-            Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
+    // Prototype pills: ink when selected, quiet outline otherwise.
+    val p = com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    Box(modifier.heightIn(min = 48.dp).selectable(selected = selected, enabled = enabled, role = Role.Tab, onClick = onClick),
+        contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxWidth().heightIn(min = 34.dp).clip(RoundedCornerShape(10.dp))
+            .background(if (selected) p.ink else p.surface)
+            .then(if (selected) Modifier else Modifier.border(1.dp, p.hairlineSoft, RoundedCornerShape(10.dp)))
+            .padding(horizontal = 8.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
+            Text(label, style = MaterialTheme.typography.labelLarge, color = if (selected) p.canvas else p.inkSoft,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium)
         }
     }
 }
@@ -1554,7 +1583,7 @@ private fun LinkRow(link: SavedLink, fifo: Boolean, taxonomy: com.alpenl.cairn.s
     val title = remember(link.url, link.enrichment?.aiTitle) { link.displayTitle() }
     val preview = link.searchExcerpt.takeIf { it.isNotBlank() } ?: link.enrichment?.summary?.takeIf { it.isNotBlank() }
         ?: link.note.ifBlank { link.enrichment?.why.orEmpty() }
-    Surface(onClick = onClick, color = MaterialTheme.colorScheme.surface,
+    Surface(onClick = onClick, color = MaterialTheme.colorScheme.background,
         modifier = Modifier.fillMaxWidth().testTag("link_${link.id}")) {
         Column {
         Column(Modifier.padding(vertical = 18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1565,7 +1594,7 @@ private fun LinkRow(link: SavedLink, fifo: Boolean, taxonomy: com.alpenl.cairn.s
                 Text((if (fifo) "收藏于 " else "") + link.createdAt.shortDateTime(), style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+            Text(title, style = MaterialTheme.typography.titleMedium.copy(fontFamily = com.alpenl.cairn.share.ui.theme.CairnSerif, fontWeight = FontWeight.SemiBold),
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (preview.isNotBlank()) Text(preview, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1840,3 +1869,18 @@ internal fun updateSettingSubtitle(state: CairnLinksUiState): String =
         is AppUpdateState.InstallStarted -> "系统安装器已打开"
         AppUpdateState.UpToDate -> "当前 ${state.currentVersionName} · 已是最新"
     }
+
+
+/** 收藏原因: the user's own reason, quoted on a manilla card (prototype .reason-card). */
+@Composable
+private fun ReasonCard(why: String) {
+    val p = com.alpenl.cairn.share.ui.theme.CairnTheme.palette
+    Column(
+        Modifier.fillMaxWidth().background(p.manilla.copy(alpha = .38f), MaterialTheme.shapes.large)
+            .padding(horizontal = 14.dp, vertical = 12.dp).testTag("reader_reason"),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text("收藏原因", style = MaterialTheme.typography.labelMedium, color = p.tertiary)
+        SelectionContainer { Text(why, style = MaterialTheme.typography.bodyMedium.copy(fontFamily = com.alpenl.cairn.share.ui.theme.CairnSerif, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic), color = p.inkSoft) }
+    }
+}

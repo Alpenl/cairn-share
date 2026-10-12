@@ -384,7 +384,6 @@ internal fun v2ExportMarkdown(
         link.customTags.forEach { builder.appendLine("- 自定义标记身份：${it.tagRef} · 显示版本 ${it.revision}") }
     }
     enrichment?.why?.takeIf { it.isNotBlank() }?.let { builder.appendLine("- 收藏原因：$it") }
-    builder.appendLine("- 整理状态：${enrichment?.curationStatus?.label ?: ""}")
     val entities = selection?.state?.entities
     builder.appendLine("- 实体状态：${selection?.state?.entityStatusLabel ?: "运行状态未知"}")
     if (!entities?.values.isNullOrEmpty()) builder.appendLine("- 实体：${entities!!.values.joinToString(" / ") { "${it.term}（${it.label}）" }}")
