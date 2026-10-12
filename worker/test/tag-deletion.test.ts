@@ -72,8 +72,7 @@ it('protects the last AI candidate and rolls the complete deletion back if any s
   await env.DB.prepare('UPDATE tag_catalog_state SET revision=1 WHERE id=1').run();
   expect((await call('tag-catalog/operations', operation('uses', 'quote', 1))).data.error).toBe('last_ai_tag');
   await env.DB.exec("CREATE TRIGGER fail_tag_deletion BEFORE INSERT ON tag_change_facts WHEN NEW.term='llm' BEGIN SELECT RAISE(ABORT,'test transaction failure'); END;");
-  const failure = await call('tag-catalog/operations', operation('topics', 'llm', 1));
-  expect(failure.status).toBeGreaterThanOrEqual(500);
+  await expect(call('tag-catalog/operations', operation('topics', 'llm', 1))).rejects.toThrow('test transaction failure');
   expect((await managedCatalog(binding())).revision).toBe(1);
   expect((await readSelectionSnapshot(binding(), 1))?.view.topics).toContain('llm');
   expect(await env.DB.prepare("SELECT COUNT(*) n FROM tag_catalog_operations WHERE action='delete'").first('n')).toBe(0);
