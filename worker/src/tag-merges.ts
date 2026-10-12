@@ -1,3 +1,4 @@
+import { currentRuleRefsSQL } from "./tag-deletion";
 import type { Env } from "./index";
 import { displayedCatalog, catalogTerm } from "./tag-catalog";
 import { tagSystemRoute } from "./tag-system";
@@ -130,7 +131,7 @@ async function undoMerge(request:Request,env:Env,key:string){
  if(m.status==="undone")return reply({...await view(env,key),replayed:true});
  const stamp=new Date().toISOString(),rewrites=JSON.parse(m.rule_rewrites) as Rewrite[];
  // Restore a rule only if nobody edited it after the merge.
- const restoreRules=rewrites.map(r=>env.DB.prepare(`UPDATE collections SET ${r.field}=?,rule_revision=rule_revision+1,revision=revision+1,updated_at=? WHERE id=? AND rule_revision=? AND ${r.field}=?`).bind(r.before,stamp,r.id,r.rule_revision,r.after));
+ const restoreRules=rewrites.map(r=>env.DB.prepare(`UPDATE collections SET ${r.field}=?,rule_revision=rule_revision+1,revision=revision+1,updated_at=? WHERE id=? AND rule_revision=? AND ${r.field}=? AND ${currentRuleRefsSQL}`).bind(r.before,stamp,r.id,r.rule_revision,r.after,r.before,r.before));
  const queue=[
   env.DB.prepare("UPDATE tag_merge_queue SET state='skipped' WHERE merge_key=? AND phase='apply' AND state='pending'").bind(key),
   env.DB.prepare("INSERT INTO tag_merge_queue(merge_key,link_id,phase,operation_key) SELECT merge_key,link_id,'undo',lower(hex(randomblob(16))) FROM tag_merge_queue WHERE merge_key=? AND phase='apply' AND state='done' ON CONFLICT DO NOTHING").bind(key),
@@ -151,7 +152,8 @@ async function undoMerge(request:Request,env:Env,key:string){
   if(!await catalogWrite(env,current as never,b.operation_key,hash,"topics",from.id,"unmerge",{from,into},{from:fromAfter,into:intoAfter},()=>[]))return fail("revision_conflict",409,{revision:(await displayedCatalog(env)).revision});
  }
  // A personal source tag must be active again before its bookmarks can re-attach it.
- if(m.kind==="custom")queue.push(env.DB.prepare("UPDATE custom_tags SET status='active',revision=revision+1,updated_at=? WHERE id=? AND status='deprecated'").bind(stamp,m.from_id));
+ if(m.kind==="custom" && await env.DB.prepare("SELECT 1 FROM custom_tag_operations WHERE tag_id IN(?,?) AND action='delete'").bind(m.from_id,m.into_id).first())return fail("tag_not_found",404);
+ if(m.kind==="custom")queue.push(env.DB.prepare("UPDATE custom_tags SET status='active',revision=revision+1,updated_at=? WHERE id=? AND status='deprecated' AND NOT EXISTS(SELECT 1 FROM custom_tag_operations d WHERE d.tag_id=custom_tags.id AND d.action='delete')").bind(stamp,m.from_id));
  await env.DB.batch([...queue,...restoreRules]);
  await drainTagMerges(env,10);
  return reply({...await view(env,key),replayed:false});
@@ -191,7 +193,7 @@ export async function drainTagMerges(env:Env,limit=50):Promise<number>{
  // A merged personal tag is archived once its memberships have moved.
  await env.DB.prepare(`UPDATE custom_tags SET status='deprecated',revision=revision+1,updated_at=? WHERE status='active' AND id IN(SELECT m.from_id FROM tag_merges m WHERE m.kind='custom' AND m.status='active'
   AND NOT EXISTS(SELECT 1 FROM tag_merge_queue q WHERE q.merge_key=m.merge_key AND q.state='pending'))`).bind(new Date().toISOString()).run();
- await env.DB.prepare(`UPDATE custom_tags SET status='active',revision=revision+1,updated_at=? WHERE status='deprecated' AND id IN(SELECT m.from_id FROM tag_merges m WHERE m.kind='custom' AND m.status='undone')
+ await env.DB.prepare(`UPDATE custom_tags SET status='active',revision=revision+1,updated_at=? WHERE status='deprecated' AND NOT EXISTS(SELECT 1 FROM custom_tag_operations d WHERE d.tag_id=custom_tags.id AND d.action='delete') AND id IN(SELECT m.from_id FROM tag_merges m WHERE m.kind='custom' AND m.status='undone')
   AND NOT EXISTS(SELECT 1 FROM tag_merges x WHERE x.kind='custom' AND x.status='active' AND x.from_id=custom_tags.id)`).bind(new Date().toISOString()).run();
  return rows.results.length;
 }

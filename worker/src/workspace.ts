@@ -280,7 +280,7 @@ export async function workspace(request: Request, env: Env): Promise<Response> {
       ),
       make("SELECT * FROM custom_dimensions ORDER BY rowid"),
       make(
-        "SELECT *, 'custom/default/'||id tag_ref FROM custom_tags WHERE owner_id='default' ORDER BY label,id",
+        "SELECT *, 'custom/default/'||id tag_ref FROM custom_tags WHERE owner_id='default' AND NOT EXISTS(SELECT 1 FROM custom_tag_operations d WHERE d.tag_id=custom_tags.id AND d.action='delete') ORDER BY label,id",
       ),
     ]),
   ]);
