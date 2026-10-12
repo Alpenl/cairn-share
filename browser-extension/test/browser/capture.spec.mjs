@@ -11,7 +11,7 @@ const imageUploads=new Map();
 let holdImages=false,failImage=null;
 const imageRequests=[];
 let failSecondPart=false;const partRequests=[];
-const movie=Buffer.alloc(9*1024*1024,42);movie.write("ftypisom",4);
+const movie=Buffer.alloc(257*1024*1024,42);movie.write("ftypisom",4);
 const picture=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a42kAAAAASUVORK5CYII=","base64");
 let offline = false, holdResponse = false, releaseResponse;
 const posts = [];
@@ -232,18 +232,19 @@ test("capture rendered content with real scripting and keep success visible in a
 });
 
 
-test('archives lazy cross-origin image bytes and resumes a video using durable multipart state',async()=>{
+test('archives lazy cross-origin image bytes and resumes a 257 MiB video using durable multipart state',async()=>{
+ test.setTimeout(180000);
  await worker.evaluate(()=>chrome.storage.local.remove('cairn_capture_draft'));failSecondPart=true;
  const article=await context.newPage();await article.goto(`${origin}/lazy-media`);
  await article.evaluate(mediaOrigin=>{document.body.innerHTML=`<article><h1>懒加载图文</h1><p>配图与视频归档。</p><img data-src="${mediaOrigin}/photo.png" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"><video preload="none"><source src="${mediaOrigin}/movie.mp4" type="video/mp4"></video></article>`;},mediaOrigin);
  const tab=await worker.evaluate(async url=>(await chrome.tabs.query({})).find(t=>t.url===url),article.url());
  const popup=await context.newPage();await popup.addInitScript(tab=>{chrome.tabs.query=async()=>[tab];},tab);await popup.goto(`${extensionURL}/popup.html`);
- await popup.locator('#save').click();await expect(popup.locator('#queue')).toContainText('服务暂时不可用');
+ await popup.locator('#save').click();await expect(popup.locator('#queue')).toContainText('服务暂时不可用',{timeout:90000});
  await popup.close();const cdp=await context.newCDPSession(article);await cdp.send('ServiceWorker.enable');await cdp.send('ServiceWorker.stopAllWorkers');failSecondPart=false;
- const resumed=await context.newPage();await resumed.goto(`${extensionURL}/options.html#queue`);await resumed.locator('#retry-all').click();await expect(resumed.locator('#pending-count')).toHaveText('0');
+ const resumed=await context.newPage();await resumed.goto(`${extensionURL}/options.html#queue`);await resumed.locator('#retry-all').click();await expect(resumed.locator('#pending-count')).toHaveText('0',{timeout:90000});
  const result=await worker.evaluate(async()=>(await chrome.storage.local.get('cairn_capture_v1')).cairn_capture_v1.lastResult);expect(result.mediaSaved).toBe(1);expect(partRequests.filter(n=>n===1)).toHaveLength(1);await resumed.close();
  const saved=posts.find(p=>p.url===article.url());expect(saved.capture.images).toHaveLength(1);expect(imageUploads.get(saved.client_id+':0').bytes).toEqual(picture);expect(saved.capture.missing_images).toBe(0);
- expect(saved.capture.media).toHaveLength(1);const upload=[...mediaUploads.values()].at(-1);expect(upload.parts).toHaveLength(2);expect(Buffer.concat(upload.bytes)).toEqual(movie);
+ expect(saved.capture.media).toHaveLength(1);const upload=[...mediaUploads.values()].at(-1);expect(upload.parts).toHaveLength(33);expect(Buffer.concat(upload.bytes).equals(movie)).toBe(true);
  expect(await worker.evaluate(async()=>new Promise((resolve,reject)=>{const r=indexedDB.open('cairn-media-queue',1);r.onsuccess=()=>{const c=r.result.transaction('files').objectStore('files').count();c.onsuccess=()=>{resolve(c.result);r.result.close();};};r.onerror=reject;}))).toBe(0);
  await article.close();
 });

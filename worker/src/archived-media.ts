@@ -1,6 +1,6 @@
 import type { Env } from './index';
 import { readBoundedJSON } from './json-body';
-const CHUNK = 8 * 1024 * 1024, MAX = 256 * 1024 * 1024;
+const CHUNK = 8 * 1024 * 1024;
 const types: Record<string,string> = {'video/mp4':'mp4','video/webm':'webm','video/quicktime':'mov','audio/mpeg':'mp3','audio/mp4':'m4a','audio/ogg':'ogg','audio/wav':'wav','audio/x-wav':'wav','audio/webm':'webm','audio/aac':'aac','audio/flac':'flac','application/zip':'zip'};
 const reply = (body:unknown,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'private, no-store'}});
 type Media = {id:string;link_id:number;capture_id:string;ordinal:number;url:string;title:string;kind:string;content_type:string;size:number;digest:string;r2_key:string;upload_id:string;upload_started_at:string;parts:string;status:string};
@@ -11,7 +11,7 @@ async function sha(value:string|Uint8Array) {
 }
 export function validMediaDeclarations(value:unknown): boolean {
  if(value===undefined)return true;
- return Array.isArray(value)&&value.length<=16&&value.every(m=>{
+ return Array.isArray(value)&&value.every(m=>{
   if(!m||!['video','audio'].includes(m.kind)||typeof m.url!=='string'||m.url.length>8192||typeof m.title!=='string'||m.title.length>300)return false;
   if(!m.url)return true;
   try{const u=new URL(m.url);return /^https?:$/.test(u.protocol)&&!u.username&&!u.password;}catch{return false;}
@@ -23,7 +23,8 @@ export async function registerMedia(env:Env,captureID:string,items:{url:string;t
   SELECT ?,l.id,?,?,?,?,?,? FROM links l JOIN browser_captures b ON b.link_id=l.id
   WHERE b.client_id=? AND b.completed=1 AND l.last_capture_id=b.client_id ON CONFLICT(capture_id,ordinal) DO NOTHING`)
   .bind((await sha(captureID+':'+ordinal)).slice(0,32),captureID,ordinal,item.url,item.title,item.kind,new Date().toISOString(),captureID)));
- await env.DB.batch(statements);
+ // Keep each D1 batch bounded without limiting the number of media items.
+ for(let i=0;i<statements.length;i+=50)await env.DB.batch(statements.slice(i,i+50));
 }
 async function current(env:Env,id:string) {
  return env.DB.prepare(`SELECT m.* FROM archived_media m JOIN links l ON l.id=m.link_id WHERE m.id=? AND l.last_capture_id=m.capture_id`).bind(id).first<Media>();
@@ -44,7 +45,7 @@ export async function mediaRoute(request:Request,env:Env,path:string):Promise<Re
   if(request.method==='GET'&&!upload[2])return reply({id:m.id,status:m.status,parts:JSON.parse(m.parts),chunk_size:CHUNK});
   if(request.method==='POST'&&!upload[2]){
    const b=await json(request);
-   if(!b||!types[b.content_type]||!Number.isSafeInteger(b.size)||b.size<1||b.size>MAX||!/^[a-f0-9]{64}$/.test(b.digest||''))return reply({error:'invalid_media'},400);
+   if(!b||!types[b.content_type]||!Number.isSafeInteger(b.size)||b.size<1||!/^[a-f0-9]{64}$/.test(b.digest||''))return reply({error:'invalid_media'},400);
    if(m.size&&(m.size!==b.size||m.digest!==b.digest||m.content_type!==b.content_type))return reply({error:'media_conflict'},409);
    if(m.status==='ready')return reply({id:m.id,status:m.status,parts:JSON.parse(m.parts),chunk_size:CHUNK});
    const key=`enrichment/${m.link_id}/media/${b.digest}.${types[b.content_type]}`;

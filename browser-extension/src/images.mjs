@@ -10,7 +10,7 @@ export async function keepImageFallback(id,i,data) {
   const match=data.match(/^data:(image\/(?:png|jpeg|webp|gif|avif));base64,([A-Za-z0-9+/=]+)$/);
   if(!match)return;
   const raw=Uint8Array.from(atob(match[2]),c=>c.charCodeAt(0));
-  if(raw.length>MAX)throw new CaptureError('media_too_large');
+  if(raw.length>MAX)throw new CaptureError('image_too_large');
   const blob=new Blob([raw],{type:match[1]});
   await fileStore('put',imageKey(id,i)+':fallback',{blob,digest:await mediaDigest(blob)});
 }
@@ -32,9 +32,9 @@ export async function localImage(id,i,descriptor) {
     const r=await fetch(u.href,{credentials:'omit',cache:'force-cache',signal:AbortSignal.timeout(20000)});
     const type=r.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
     if(!r.ok||!imageType(type))throw new CaptureError('media_unavailable');
-    if(Number(r.headers.get('content-length'))>MAX)throw new CaptureError('media_too_large');
+    if(Number(r.headers.get('content-length'))>MAX)throw new CaptureError('image_too_large');
     const reader=r.body.getReader(),chunks=[];let size=0;
-    for(;;){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>MAX){await reader.cancel();throw new CaptureError('media_too_large');}chunks.push(value);}
+    for(;;){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>MAX){await reader.cancel();throw new CaptureError('image_too_large');}chunks.push(value);}
     if(!size)throw new CaptureError('media_unavailable');
     const blob=new Blob(chunks,{type});file={blob,digest:await mediaDigest(blob)};
   }catch(error){if(fallback)file=fallback;else throw error;}

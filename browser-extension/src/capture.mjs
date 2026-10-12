@@ -43,7 +43,7 @@ export async function discoverMedia(pageURL, found, fetcher = fetch) {
       if (videos.length) return videos;
     } catch { /* The missing media remains visible and retryable. */ }
   }
-  return found.filter((m,i,a)=>!m.url || a.findIndex(x=>x.url===m.url)===i).slice(0,16);
+  return found.filter((m,i,a)=>!m.url || a.findIndex(x=>x.url===m.url)===i);
 }
 
 export async function mediaPermissions(ext, tabId, url) {
