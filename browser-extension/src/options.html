@@ -1,21 +1,56 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cairn · 设置</title><link rel="stylesheet" href="styles.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cairn · 设置</title><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="styles.css"></head>
 <body class="options">
-  <header class="app-header"><div class="brand"><img src="icons/48.png" alt="" width="24" height="24"><span>Cairn</span></div><span class="muted">设置</span></header>
-  <main>
-    <section class="card"><h2>手机收藏，浏览器补正文</h2><p class="muted">一次启动，逐篇打开缺少正文的收藏并采集，支持暂停和继续。</p><a href="batch.html">打开批量采集面板 →</a></section>
-    <form id="settings-form" class="card">
-      <h2>连接</h2>
-      <p class="muted">与 Android 使用同一份收藏库，填写 Android 设置中的访问令牌。</p>
-      <label for="token">访问令牌</label><div class="token-field"><input id="token" type="password" autocomplete="off" maxlength="512" placeholder="填写访问令牌"><button id="show-token" type="button" class="text-button" aria-label="显示访问令牌">显示</button></div>
-      <p class="hint">服务器 <span id="server"></span> · 令牌只保存在当前浏览器。</p>
-      <label class="check"><input id="keep-full-url" type="checkbox" checked><span>保留完整链接 <small>包含问号后的参数和 # 片段，与 Android 一致。</small></span></label>
-      <label id="move-pending-label" class="check" hidden><input id="move-pending" type="checkbox"><span id="move-pending-text"></span></label>
-      <button id="connect" type="submit" class="primary" disabled>测试并保存</button><p id="status" class="status" role="status" aria-live="polite" hidden></p>
-    </form>
-    <section class="queue-section card"><div class="section-heading"><h2>待同步 <span id="pending-count">0</span></h2><button id="retry-all" class="text-button" type="button" hidden>全部重试</button></div><p class="muted">关闭弹窗后仍会在后台上传，失败时保留在本机。</p><div id="queue"></div></section>
-    <section class="card"><h2>图片与媒体</h2><p class="muted">保存时只会申请当前文章用到的图片站点。若跨站图片经常缺失，可一次性允许读取所有网站的图片；只在你主动保存或启动批量采集时使用。</p><button id="image-permission" class="secondary" type="button">允许读取所有网站的图片</button></section>
-    <section class="privacy"><p>点击工具栏图标、按 <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>，或右键页面/链接即可收藏。</p><p>只在你保存或启动批量采集时读取页面已加载的正文和媒体，不读取表单、Cookie 或浏览历史。卸载扩展会清除本机草稿和待同步内容。详见随附的隐私说明。</p></section>
-  </main><footer>Cairn 浏览器扩展 <span id="version"></span></footer><script type="module" src="options.mjs"></script>
+<div class="opt-shell">
+  <nav class="opt-nav" aria-label="设置分区">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><ellipse cx="12" cy="18.6" rx="7.6" ry="2.7"/><ellipse cx="11.5" cy="12.7" rx="5.4" ry="2.5"/><ellipse cx="12.3" cy="7.4" rx="3.4" ry="2.1"/></svg></span><span class="brand-name">Cairn</span><span class="brand-sub">插件设置</span></div>
+    <div class="nav-label">连接与同步</div>
+    <a href="#connection" data-section="connection"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15.5 7.5a3.5 3.5 0 1 1-4.9 3.2L4 17.3V20h2.7l.8-.8V17.5h1.7l.8-.8V15h1.7l1.1-1.1a3.5 3.5 0 0 1 2.7-6.4Z"/></svg><span>连接</span></a>
+    <a href="#queue" data-section="queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg><span>待同步队列</span><span id="nav-pending" class="count" hidden></span></a>
+    <div class="nav-label">采集</div>
+    <a href="#capture" data-section="capture"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v14H4zM8 9h8M8 13h5"/></svg><span>采集</span></a>
+    <a href="#media" data-section="media"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5c0 4.4 3 8.3 7 9.5 4-1.2 7-5.1 7-9.5V6Z"/></svg><span>媒体授权</span></a>
+    <div class="nav-label">工具</div>
+    <a href="batch.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5h3M17 5h3v3M20 16v3h-3M7 19H4v-3M8 12h8"/></svg><span>批量补采正文</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-8 8M18 14v5H5V6h5"/></svg></a>
+    <div class="nav-label">系统</div>
+    <a href="#about" data-section="about"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 11v5M12 8h.01"/></svg><span>关于</span></a>
+    <div class="opt-foot"><span id="svc" class="svc"><i></i><span id="svc-text">未连接</span></span><small>Cairn 浏览器扩展 <span id="version"></span></small></div>
+  </nav>
+  <main class="opt-main">
+    <header class="opt-head"><p class="crumb">插件设置 / <span id="crumb-current">连接</span></p><h1 id="section-title">连接</h1><p id="section-desc">插件、App 和网页工作区共用一份收藏库。填好访问令牌，收藏才能同步。</p></header>
+    <div class="opt-body">
+      <p id="status" class="status" role="status" aria-live="polite" hidden></p>
+      <section id="pane-connection" data-section="connection" class="opt-pane" data-title="连接" data-desc="插件、App 和网页工作区共用一份收藏库。填好访问令牌，收藏才能同步。">
+        <div class="opt-section"><h2>收藏库</h2><p class="muted">与 Android App 使用同一份收藏库。</p>
+          <div class="card"><div class="card-row"><div class="txt"><div class="ttl">服务器</div><div class="dsc">收藏会提交到这里，再由服务处理 X 增强内容。</div></div><span class="val"><span id="server"></span><span class="tag">固定</span></span></div>
+          <div class="card-row"><div class="txt"><div class="ttl">连接状态</div></div><span id="connection-state" class="val">未连接</span></div></div></div>
+        <form id="settings-form" class="opt-section"><h2>访问令牌</h2><p class="muted">在 Cairn App 的「设置 → 访问令牌」中复制。令牌只保存在当前浏览器，不参与浏览器账号同步。</p>
+          <div class="card"><div class="card-block"><label for="token">更换令牌 <small>留空则重新测试当前令牌</small></label>
+            <div class="token-field"><input id="token" type="password" autocomplete="off" maxlength="512" placeholder="填写访问令牌"><button id="show-token" type="button" class="secondary" aria-label="显示访问令牌">显示</button><button id="connect" type="submit" class="primary" disabled>测试并保存</button></div>
+            <label id="move-pending-label" class="check" hidden><input id="move-pending" type="checkbox"><span id="move-pending-text"></span></label></div></div>
+        </form>
+      </section>
+      <section id="pane-queue" data-section="queue" class="opt-pane" data-title="待同步队列" data-desc="关闭弹窗后仍会在后台上传；失败的收藏保留在本机，可在这里重试或移除。" hidden>
+        <div class="opt-section"><div class="section-heading"><h2>待同步 <span id="pending-count">0</span></h2><button id="retry-all" class="text-button" type="button" hidden>全部重试</button></div>
+          <div class="card"><div id="queue" class="queue-wrap"></div></div></div>
+      </section>
+      <section id="pane-capture" data-section="capture" class="opt-pane" data-title="采集" data-desc="决定保存时提交哪些内容。" hidden>
+        <div class="opt-section"><h2>链接</h2><p class="muted">与 Android 保持一致。</p>
+          <div class="card"><label class="check"><input id="keep-full-url" type="checkbox" checked form="settings-form"><span>保留完整链接 <small>包含问号后的参数和 # 片段。修改后点「连接」页的测试并保存生效。</small></span></label></div></div>
+        <div class="opt-section"><h2>快捷方式</h2>
+          <div class="card"><div class="card-row"><div class="txt"><div class="ttl">打开收藏弹窗</div><div class="dsc">也可以点工具栏图标，或右键页面 / 链接。</div></div><span class="val"><kbd>Alt</kbd><kbd>Shift</kbd><kbd>C</kbd></span></div>
+          <div class="card-row"><div class="txt"><div class="ttl">在弹窗中保存</div></div><span class="val"><kbd>Ctrl</kbd><kbd>↵</kbd></span></div></div></div>
+      </section>
+      <section id="pane-media" data-section="media" class="opt-pane" data-title="媒体授权" data-desc="保存时只会申请当前文章用到的图片和视频站点。" hidden>
+        <div class="opt-section"><h2>跨站图片</h2><p class="muted">若跨站图片经常缺失，可以一次性允许读取所有网站的图片；只在你主动保存或启动批量采集时使用。</p>
+          <div class="card"><div class="card-row"><div class="txt"><div class="ttl">读取所有网站的图片</div><div class="dsc">浏览器会弹出授权确认，可随时在扩展管理页撤销。</div></div><button id="image-permission" class="secondary" type="button">允许</button></div></div></div>
+      </section>
+      <section id="pane-about" data-section="about" class="opt-pane" data-title="关于" data-desc="版本与隐私说明。" hidden>
+        <div class="opt-section"><h2>隐私</h2><div class="card"><div class="card-block privacy"><p>只在你保存或启动批量采集时读取页面已加载的正文和媒体，不读取表单、Cookie 或浏览历史。</p><p>卸载扩展会清除本机草稿和待同步内容。详见随附的隐私说明。</p></div></div></div>
+      </section>
+    </div>
+  </main>
+</div>
+<script type="module" src="options-nav.mjs"></script><script type="module" src="options.mjs"></script>
 </body></html>

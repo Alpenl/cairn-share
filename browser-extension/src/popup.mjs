@@ -1,6 +1,6 @@
 import { STATE_KEY, CaptureError, MAX_NOTE, submissionUrl, validateCapture } from "./config.mjs";
 import { $, ext, renderQueue, queueStatus, send, showError, status } from "./ui.mjs";
-import { mediaPermissions } from './capture.mjs';
+import { pagePreview } from './capture.mjs';
 
 let state;
 let title = "";
@@ -12,6 +12,7 @@ let initialized = false;
 let editingUrl = false;
 let requestedOrigins = [];
 let selectedCollections=new Set();let definitions=[];
+let preview=null;let known=null;
 let draftWrites = Promise.resolve();
 const DRAFT_KEY = "cairn_capture_draft";
 const PERMISSION_ERRORS = new Set(["media_permission", "capture_images_incomplete"]);
@@ -34,8 +35,8 @@ function inputsChanged() {
   $("capture-form").hidden = !configured;
   $("save-dock").hidden = !configured;
   const length = $("note").value.length;
-  $("note-count").hidden = length < MAX_NOTE - 200;
   $("note-count").textContent = `${length} / ${MAX_NOTE}`;
+  $("note-count").classList.toggle("near", length >= MAX_NOTE - 200);
   $("save").disabled = saving || saved || !configured || !valid();
   $("url").readOnly = saving;
   $("note").readOnly = saving;
@@ -44,18 +45,89 @@ function inputsChanged() {
   // The current tab is shown as a card; the raw URL only matters when the
   // user pastes another link or the tab is not a web page.
   const showCard = !editingUrl && valid() && $("url").value === activeTab?.url;
-  $("page-card").hidden = !showCard;
   $("url-field").hidden = showCard;
+  $("edit-url").hidden = !showCard;
   $("page-title").textContent = title || hostOf($("url").value);
   $("page-host").textContent = hostOf($("url").value);
   $("favicon").hidden = !showCard || !$("favicon").getAttribute("src");
   $("capture-option").hidden = !samePage;
   $("capture-page").disabled = saving;
-  $("save").textContent = saving ? "正在保存…" : saved ? "已保存" : "保存";
+  renderStats(samePage);
+  const isKnown = Boolean(known?.saved) && known.url === $("url").value;
+  $("saved-badge").hidden = !isKnown;
+  $("saved-note").hidden = !isKnown || saved;
+  if (isKnown) renderKnown();
+  $("save-label").textContent = saving ? "正在保存…" : saved ? "已保存" : isKnown ? "更新收藏" : "保存";
+  const chosen = selectedCollections.size;
+  $("collections-aux").textContent = chosen ? `已选 ${chosen}` : "可多选";
+  $("collections-aux").classList.toggle("on", chosen > 0);
+  renderSync();
   $("recapture").hidden = !saved || saving;
   const stripped = valid() && state?.keepFullUrl === false && submissionUrl($("url").value, false) !== $("url").value.trim();
   $("url-policy").hidden = !stripped;
   if (stripped) $("url-policy").textContent = "按设置，保存时去掉链接中的参数。";
+}
+
+const ICONS = {
+  text: [["path", { d: "M4 6h16M4 12h16M4 18h10" }]],
+  image: [["rect", { x: 3, y: 4, width: 18, height: 16, rx: 2 }], ["circle", { cx: 9, cy: 10, r: 2 }], ["path", { d: "m21 16-5-5-9 9" }]],
+  video: [["rect", { x: 3, y: 5, width: 13, height: 14, rx: 2 }], ["path", { d: "m16 10 5-3v10l-5-3" }]],
+  coll: [["path", { d: "M4 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z" }]]
+};
+const SVG = "http://www.w3.org/2000/svg";
+function icon(name) {
+  const svg = document.createElementNS(SVG, "svg");
+  for (const [k, v] of Object.entries({ viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" })) svg.setAttribute(k, v);
+  for (const [tag, attrs] of ICONS[name]) { const el = document.createElementNS(SVG, tag); for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v)); svg.append(el); }
+  return svg;
+}
+function stat(name, text) { const span = document.createElement("span"); span.append(icon(name), document.createTextNode(text)); return span; }
+const count = n => n >= 10000 ? `${(n / 10000).toFixed(1).replace(/\.0$/, "")} 万` : n.toLocaleString("zh-CN");
+
+// One line under the card: what this save will capture.
+function renderStats(samePage) {
+  const root = $("cap-stats");
+  if (!samePage) { root.replaceChildren(); return; }
+  if (!$("capture-page").checked) { root.replaceChildren(document.createTextNode("只保存链接和收藏原因")); return; }
+  if (!preview) { root.replaceChildren(document.createTextNode("正在识别正文和媒体…")); return; }
+  if (preview.failed) { root.replaceChildren(document.createTextNode("暂未识别到正文，保存时会再读取一次")); return; }
+  const parts = [stat("text", preview.chars ? `${count(preview.chars)} 字${preview.truncated ? "+" : ""}` : "无正文")];
+  if (preview.images) parts.push(stat("image", `${preview.images} 张图`));
+  if (preview.videos + preview.audios) parts.push(stat("video", `${preview.videos + preview.audios} 个${preview.videos ? "视频" : "音频"}`));
+  root.replaceChildren(...parts);
+}
+
+function renderKnown() {
+  const link = known.link || {};
+  const note = $("saved-note"); note.replaceChildren();
+  const when = link.created_at ? new Date(link.created_at) : null;
+  const date = when && !Number.isNaN(when.getTime()) ? when.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" }) : "";
+  const b = document.createElement("b"); b.textContent = date ? `${date}已收藏` : "已在收藏库中";
+  note.append(b);
+  const names = (link.collections || []).map(c => c.name).filter(Boolean);
+  if (names.length) note.append(document.createTextNode(` · 在「${names.slice(0, 3).join("」「")}」${names.length > 3 ? ` 等 ${names.length} 个合集` : ""}`));
+  note.append(document.createTextNode("。再次保存会更新原收藏，不会重复。"));
+}
+
+function renderSync() {
+  const pill = $("sync-pill");
+  pill.hidden = !state?.configured;
+  if (pill.hidden) return;
+  const queue = state.queue || [];
+  const failed = queue.filter(j => j.errorKind).length;
+  pill.className = `sync-pill ${failed ? "warn" : queue.length ? "busy" : "ok"}`;
+  $("sync-text").textContent = failed ? `${failed} 条待重试` : queue.length ? `同步中 · ${queue.length}` : "已同步";
+}
+
+async function loadKnown() {
+  const url = $("url").value;
+  if (!state?.configured || !/^https?:/.test(url)) return;
+  try {
+    const answer = await send("lookup", { url: submissionUrl(url, state.keepFullUrl !== false) });
+    if (answer.binding !== state?.binding || !answer.result) return;
+    known = { ...answer.result, url };
+    inputsChanged();
+  } catch { /* lookup is advisory */ }
 }
 
 function persistDraft() {
@@ -168,7 +240,7 @@ try {
   const tab = tabs[0];
   activeTab = tab;
   if (tab?.id && /^https?:/.test(tab.url || '')) {
-    try { requestedOrigins=await mediaPermissions(ext,tab.id,tab.url); } catch { /* Save still offers a useful extraction error. */ }
+    try { const result=await pagePreview(ext,tab.id,tab.url); requestedOrigins=result.origins; preview=result.stats; } catch { preview={failed:true}; /* Save still offers a useful extraction error. */ }
   }
   if (/^https?:/.test(tab?.favIconUrl || '')) $("favicon").src = tab.favIconUrl;
   const draft = stored[DRAFT_KEY];
@@ -195,6 +267,7 @@ try {
   initialized = true;
   await refresh();
   void loadCollections();
+  void loadKnown();
 } catch (error) { showError($("status"), error); }
 
 function renderCollections(){
@@ -204,7 +277,7 @@ function renderCollections(){
  for(const c of active){
   const label=document.createElement("label");label.className="collection-choice";const input=document.createElement("input");input.type="checkbox";input.checked=selectedCollections.has(c.id);input.disabled=saving||saved;
   input.addEventListener("change",()=>{input.checked?selectedCollections.add(c.id):selectedCollections.delete(c.id);operationId=crypto.randomUUID();void persistDraft();inputsChanged();});
-  const name=document.createElement("span");name.textContent=c.name;label.append(input,name);root.append(label);
+  const name=document.createElement("span");name.textContent=c.name;label.append(input,icon("coll"),name);root.append(label);
  }
 }
 // Collections are optional; when the list can't be read the row stays hidden

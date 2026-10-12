@@ -43,6 +43,12 @@ test("background rejects page messages and routes page/link menus and retry alar
     let responded = false;
     assert.equal(listener({ type: "snapshot" }, { id: "extension-id", url: "https://untrusted.example" }, () => { responded = true; }), false);
     assert.equal(responded, false);
+    // A fragment on an extension page is allowed; a lookalike page is not.
+    assert.equal(listener({ type: "snapshot" }, { id: "extension-id", url: "chrome-extension://extension-id/popup.html.evil#x" }, () => { responded = true; }), false);
+    const sectioned = await new Promise((resolve) => {
+      assert.equal(listener({ type: "snapshot" }, { id: "extension-id", url: "chrome-extension://extension-id/options.html#queue" }, resolve), true);
+    });
+    assert.equal(sectioned.ok, true);
     const result = await new Promise((resolve) => {
       assert.equal(listener({ type: "snapshot" }, { id: "extension-id", url: "chrome-extension://extension-id/popup.html" }, resolve), true);
     });

@@ -26,7 +26,7 @@ test("installation archives contain all referenced local assets and no tokens", 
     for (const browser of ["chrome", "firefox"]) {
       const zip = await JSZip.loadAsync(await readFile(join(folder, `cairn-${browser}-${version}.zip`)));
       const config = JSON.parse(await zip.file("manifest.json").async("string"));
-      for (const name of ["popup.html", "options.html", "background.mjs", "api.mjs", "config.mjs", "controller.mjs", "ui.mjs", "styles.css", "LICENSE", "PRIVACY.md", ...Object.values(config.icons)]) {
+      for (const name of ["popup.html", "options.html", "background.mjs", "api.mjs", "config.mjs", "controller.mjs", "ui.mjs", "styles.css", "tokens.css", "options-nav.mjs", "fonts/dm-sans-latin-wght-normal.woff2", "fonts/source-serif-4-latin-wght-normal.woff2", "fonts/OFL-DM-Sans.txt", "LICENSE", "PRIVACY.md", ...Object.values(config.icons)]) {
         assert.ok(zip.file(name), `${browser}: ${name}`);
       }
       assert.equal(zip.file("package-lock.json"), null);

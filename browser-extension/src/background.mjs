@@ -57,6 +57,7 @@ async function dispatch(message) {
     case "batch-start": return batch.start(message.mode);
     case "batch-pause": return batch.pause();
     case "collections": return controller.collections();
+    case "lookup": return controller.lookup(message.url);
     case "save": {
       const capture = message.capture;
       const known = await controller.snapshot();
@@ -88,7 +89,10 @@ async function dispatch(message) {
 
 ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const allowed = ["popup.html", "options.html", "batch.html"].map((path) => ext.runtime.getURL(path));
-  if (sender.id !== ext.runtime.id || !allowed.includes(sender.url)) return false;
+  // Settings sections live in the fragment (options.html#queue); the page
+  // itself must still be one of the extension's own pages.
+  const page = typeof sender.url === "string" ? sender.url.split("#")[0] : "";
+  if (sender.id !== ext.runtime.id || !allowed.includes(page)) return false;
   dispatch(message).then((state) => sendResponse({ ok: true, state }),
     (error) => sendResponse({ ok: false, error: error.kind ?? "unexpected" }));
   return true;

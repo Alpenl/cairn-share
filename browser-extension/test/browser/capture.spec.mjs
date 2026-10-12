@@ -57,6 +57,14 @@ test.beforeAll(async () => {
       if(action==='complete'){saved.status='ready';response.end(JSON.stringify({status:'ready'}));return;}
       const number=Number(action);partRequests.push(number);if(number===2&&failSecondPart){response.writeHead(503);response.end('{}');return;}saved.parts[number-1]={partNumber:number};saved.bytes[number-1]=raw;response.end(JSON.stringify({part:number}));return;
     }
+    if (request.url.startsWith("/api/links/lookup")) {
+      if (offline) { response.writeHead(503); response.end(); return; }
+      const target = new URL(request.url, "http://x").searchParams.get("url");
+      const hit = [...records.values()].find(r => r.url === target);
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify(hit ? { saved: true, link: { id: hit.id, url: hit.url, created_at: "2026-10-01T00:00:00Z", collections: [{ id: "c1", name: "设计参考" }] } } : { saved: false }));
+      return;
+    }
     if (request.url.startsWith("/api/")) {
       if (offline) { response.writeHead(503); response.end(); return; }
       if (request.headers.authorization !== "Bearer browser-test-token") { response.writeHead(401); response.end(); return; }
@@ -148,6 +156,7 @@ test("real extension: connection, exact capture, close popup, queue retry and ba
   await expect(queued.locator("#queue")).toContainText("服务暂时不可用");
   const clientId = await worker.evaluate(async () => (await chrome.storage.local.get("cairn_capture_v1")).cairn_capture_v1.queue[0].client_id);
   await queued.close();
+  await options.goto(`${extensionURL}/options.html#queue`);
   // Kill the service worker to exercise reconstruction from durable storage.
   const cdp = await context.newCDPSession(page);
   await cdp.send("ServiceWorker.enable");
@@ -189,6 +198,11 @@ test("capture rendered content with real scripting and keep success visible in a
   await popup.addInitScript(tab => { chrome.tabs.query=async()=>[tab]; },tab);
   await popup.goto(`${extensionURL}/popup.html`);
   await expect(popup.locator('#save')).toBeEnabled();
+  // One-line capture summary under the page card.
+  await expect(popup.locator('#cap-stats')).toContainText('字');
+  await expect(popup.locator('#cap-stats')).toContainText('1 张图');
+  await expect(popup.locator('#saved-badge')).toBeHidden();
+  await popup.screenshot({path:'test-results/capture-idle.png'});
   await popup.locator('#save').click();
   await expect(popup.locator('#status')).toContainText('张图片');
   const saved=posts.find(p=>p.url===article.url());
@@ -209,7 +223,11 @@ test("capture rendered content with real scripting and keep success visible in a
   await expect(popup.locator('#save')).toBeDisabled();
   await popup.screenshot({path:'test-results/capture-success.png'});
   await popup.reload();await expect(popup.locator('#status')).toContainText('已同步');
+  await expect(popup.locator('#saved-badge')).toBeVisible();
   await popup.locator('#note').fill('补充备注');await expect(popup.locator('#save')).toBeEnabled();
+  await expect(popup.locator('#save')).toHaveText('更新收藏');
+  await expect(popup.locator('#saved-note')).toContainText('设计参考');
+  await popup.screenshot({path:'test-results/capture-known.png'});
   await article.close();await popup.close();
 });
 
@@ -222,7 +240,7 @@ test('archives lazy cross-origin image bytes and resumes a video using durable m
  const popup=await context.newPage();await popup.addInitScript(tab=>{chrome.tabs.query=async()=>[tab];},tab);await popup.goto(`${extensionURL}/popup.html`);
  await popup.locator('#save').click();await expect(popup.locator('#queue')).toContainText('服务暂时不可用');
  await popup.close();const cdp=await context.newCDPSession(article);await cdp.send('ServiceWorker.enable');await cdp.send('ServiceWorker.stopAllWorkers');failSecondPart=false;
- const resumed=await context.newPage();await resumed.goto(`${extensionURL}/options.html`);await resumed.locator('#retry-all').click();await expect(resumed.locator('#pending-count')).toHaveText('0');
+ const resumed=await context.newPage();await resumed.goto(`${extensionURL}/options.html#queue`);await resumed.locator('#retry-all').click();await expect(resumed.locator('#pending-count')).toHaveText('0');
  const result=await worker.evaluate(async()=>(await chrome.storage.local.get('cairn_capture_v1')).cairn_capture_v1.lastResult);expect(result.mediaSaved).toBe(1);expect(partRequests.filter(n=>n===1)).toHaveLength(1);await resumed.close();
  const saved=posts.find(p=>p.url===article.url());expect(saved.capture.images).toHaveLength(1);expect(imageUploads.get(saved.client_id+':0').bytes).toEqual(picture);expect(saved.capture.missing_images).toBe(0);
  expect(saved.capture.media).toHaveLength(1);const upload=[...mediaUploads.values()].at(-1);expect(upload.parts).toHaveLength(2);expect(Buffer.concat(upload.bytes)).toEqual(movie);
@@ -253,7 +271,7 @@ test("choose a collection during capture and resume its committed lost response 
  const popup=await context.newPage();await popup.goto(`${extensionURL}/popup.html`);await popup.locator('#url').fill('https://example.com/collection-capture');
  await expect(popup.locator('#collection-choices')).toContainText('设计参考');await popup.getByRole('checkbox',{name:'设计参考'}).check();await popup.locator('#save').click();
  await expect(popup.locator('#queue')).toContainText('服务器响应异常');await popup.close();
- const retry=await context.newPage();await retry.goto(`${extensionURL}/options.html`);await retry.locator('#retry-all').click();await expect(retry.locator('#pending-count')).toHaveText('0');
+ const retry=await context.newPage();await retry.goto(`${extensionURL}/options.html#queue`);await retry.locator('#retry-all').click();await expect(retry.locator('#pending-count')).toHaveText('0');
  expect(posts.length-before).toBe(1);expect(collectionPosts.length).toBe(2);expect(collectionPosts[0]).toEqual(collectionPosts[1]);expect(collectionReceipts.size).toBe(1);expect(collectionPosts[0].link_ids).toEqual([records.get(posts.at(-1).client_id).id]);
  collectionEnabled=false;
 });
@@ -262,7 +280,7 @@ test("choose a collection during capture and resume its committed lost response 
 test('text confirmation stays visible during slow images; background restart confirms saved files instead of reuploading',async()=>{
  const id=crypto.randomUUID(),url='https://example.com/slow-image';
  holdImages=true;
- const options=await context.newPage();await options.goto(`${extensionURL}/options.html`);
+ const options=await context.newPage();await options.goto(`${extensionURL}/options.html#queue`);
  await options.evaluate(async({id,url,data})=>{
    const state=(await chrome.storage.local.get('cairn_capture_v1')).cairn_capture_v1;
    const {keepImageFallback}=await import(chrome.runtime.getURL('images.mjs'));
@@ -284,7 +302,7 @@ test('text confirmation stays visible during slow images; background restart con
 
 test('upgrades a 0.4.0 base64 queue durably and retries only the missing image',async()=>{
  const id=crypto.randomUUID(),url='https://example.com/legacy-upload';failImage=1;
- const options=await context.newPage();await options.goto(`${extensionURL}/options.html`);
+ const options=await context.newPage();await options.goto(`${extensionURL}/options.html#queue`);
  await options.evaluate(async({id,url,data})=>{
    const state=(await chrome.storage.local.get('cairn_capture_v1')).cairn_capture_v1;
    state.queue.push({client_id:id,url,note:'旧备注',title:'旧队列',binding:await (await import(chrome.runtime.getURL('config.mjs'))).tokenIdentity(state.settings.token),createdAt:Date.now(),attempts:1,nextAttemptAt:0,capture:{title:'旧队列',language:'zh',text:'旧的完整原文 ![一](cairn-image:0) ![二](cairn-image:1)',images:[{content_type:'image/png',data},{content_type:'image/png',data}],media:[]}});
