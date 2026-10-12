@@ -60,8 +60,8 @@ class ReaderOptimizationInstrumentedTest {
                 compose.onNodeWithText("清晰标题").assertIsDisplayed()
                 compose.onNodeWithTag("detail_content").performScrollToNode(hasText("val x = 123"))
                 compose.onNodeWithText("val x = 123").assertIsDisplayed()
-                compose.onNodeWithTag("detail_content").performScrollToNode(hasText("查看原内容"))
-                compose.onNodeWithText("查看原内容").performClick()
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("reader_version"))
+                compose.onNodeWithTag("reader_version").onChildren().filter(hasText("原文")).onFirst().performClick()
                 compose.onNodeWithTag("detail_content").performScrollToNode(hasText("原内容译文。"))
                 compose.onNodeWithText("原内容译文。").assertIsDisplayed()
             }

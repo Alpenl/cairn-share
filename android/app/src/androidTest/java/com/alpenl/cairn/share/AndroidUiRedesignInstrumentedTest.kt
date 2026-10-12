@@ -210,9 +210,11 @@ class AndroidUiRedesignInstrumentedTest {
             assertTrue("Reading state and filters share one row", kotlin.math.abs(tabs.center.y - filter.center.y) < 2f)
             screenshot("library", compose.onNodeWithTag("bookmark_filters"))
             compose.onNodeWithTag("bookmark_filters").performScrollTo().performClick()
-            waitTag("filter_topics_image_creation")
-            compose.onNodeWithTag("filter_topics_image_creation").performScrollTo().performClick()
-            val selectedTopic = compose.onNodeWithTag("filter_topics_image_creation")
+            // The library cards behind the sheet also expose the same tag ref.
+            val selectedTopic = compose.onNode(hasTestTag("tag_filter_system/topics/image_creation") and
+                hasAnyAncestor(hasTestTag("bookmark_filter_sheet")))
+            compose.waitUntil(20_000) { runCatching { selectedTopic.assertExists(); true }.getOrDefault(false) }
+            selectedTopic.performScrollTo().performClick()
             selectedTopic.performScrollTo().assertIsDisplayed()
             screenshot("filters", selectedTopic)
             selectedTopic.assertIsDisplayed()

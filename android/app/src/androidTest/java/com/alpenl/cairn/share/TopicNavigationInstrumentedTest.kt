@@ -91,8 +91,9 @@ class TopicNavigationInstrumentedTest {
                 compose.onNodeWithTag("link_tags_9", useUnmergedTree = true).onChildren().onFirst().performClick()
                 compose.waitUntil(15_000) { requests.any { it.startsWith("/api/links?") && it.contains("topics=portrait") } }
                 compose.onNodeWithTag("detail_content").assertDoesNotExist()
-                compose.onNodeWithText("清除筛选").performClick()
+                // Card navigation retains the legacy topic condition; its navigation is under More.
                 compose.onNodeWithTag("bookmark_filters").performClick()
+                compose.onNodeWithTag("advanced_bookmark_filters").performScrollTo().performClick()
                 waitTag("topic_search")
                 compose.onNodeWithTag("bookmark_filter_sheet").assertIsDisplayed()
                 compose.onNodeWithTag("pin_topic_portrait").assertDoesNotExist()
@@ -105,6 +106,7 @@ class TopicNavigationInstrumentedTest {
                 compose.onNodeWithTag("topic_search").performScrollTo().performTextClearance()
                 compose.onNodeWithTag("filter_topics_image_creation").performScrollTo().performClick()
                 compose.onNodeWithTag("filter_topics_design").performScrollTo().performClick()
+                compose.onNodeWithTag("filter_topics_portrait").performScrollTo().performClick()
                 compose.onNodeWithTag("filter_topic_refinements_portrait").performScrollTo().performClick()
                 compose.waitUntil(15_000) { requests.any { it.startsWith("/api/links?") && it.contains("topics=image_creation%2Cdesign") && it.contains("topic_refinements=portrait") } }
                 assertFalse(requests.last { it.startsWith("/api/links?") }.contains("topics_mode=all"))
