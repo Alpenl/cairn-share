@@ -28,9 +28,8 @@ const wu = new URL(worker.url()); const ext = `${wu.protocol}//${wu.host}`;
 const opt = await ctx.newPage(); await opt.setViewportSize({ width: 1024, height: 640 });
 await opt.goto(`${ext}/options.html`); await opt.locator("#token").fill("shot-token"); await opt.locator("#connect").click();
 await opt.locator("#status").filter({ hasText: "连接成功" }).waitFor();
-await opt.waitForTimeout(400); await opt.screenshot({ path: `${out}/options-connection.png` });
-for (const s of ["queue", "capture", "media", "about"]) { await opt.goto(`${ext}/options.html#${s}`); await opt.waitForTimeout(250); await opt.screenshot({ path: `${out}/options-${s}.png` }); }
-await opt.goto(`${ext}/batch.html`); await opt.waitForTimeout(400); await opt.screenshot({ path: `${out}/batch.png` });
+await opt.waitForTimeout(400); await opt.screenshot({ path: `${out}/options.png`, fullPage: true });
+await opt.goto(`${ext}/batch.html`); await opt.waitForTimeout(400); await opt.screenshot({ path: `${out}/batch.png`, fullPage: true });
 for (const [name, url] of [["popup-idle", "/post"], ["popup-known", "/known-post"]]) {
   await worker.evaluate(() => chrome.storage.local.remove("cairn_capture_draft"));
   const article = await ctx.newPage(); await article.goto(origin + url); await article.waitForLoadState("load");

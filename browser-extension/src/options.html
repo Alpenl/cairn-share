@@ -1,56 +1,112 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cairn · 设置</title><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="styles.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cairn · 插件设置</title><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="styles.css"></head>
 <body class="options">
-<div class="opt-shell">
-  <nav class="opt-nav" aria-label="设置分区">
+<div class="set-shell">
+  <header class="set-top">
     <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><ellipse cx="12" cy="18.6" rx="7.6" ry="2.7"/><ellipse cx="11.5" cy="12.7" rx="5.4" ry="2.5"/><ellipse cx="12.3" cy="7.4" rx="3.4" ry="2.1"/></svg></span><span class="brand-name">Cairn</span><span class="brand-sub">插件设置</span></div>
-    <div class="nav-label">连接与同步</div>
-    <a href="#connection" data-section="connection"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15.5 7.5a3.5 3.5 0 1 1-4.9 3.2L4 17.3V20h2.7l.8-.8V17.5h1.7l.8-.8V15h1.7l1.1-1.1a3.5 3.5 0 0 1 2.7-6.4Z"/></svg><span>连接</span></a>
-    <a href="#queue" data-section="queue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg><span>待同步队列</span><span id="nav-pending" class="count" hidden></span></a>
-    <div class="nav-label">采集</div>
-    <a href="#capture" data-section="capture"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v14H4zM8 9h8M8 13h5"/></svg><span>采集</span></a>
-    <a href="#media" data-section="media"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5c0 4.4 3 8.3 7 9.5 4-1.2 7-5.1 7-9.5V6Z"/></svg><span>媒体授权</span></a>
-    <div class="nav-label">工具</div>
-    <a href="batch.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5h3M17 5h3v3M20 16v3h-3M7 19H4v-3M8 12h8"/></svg><span>批量补采正文</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-8 8M18 14v5H5V6h5"/></svg></a>
-    <div class="nav-label">系统</div>
-    <a href="#about" data-section="about"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 11v5M12 8h.01"/></svg><span>关于</span></a>
-    <div class="opt-foot"><span id="svc" class="svc"><i></i><span id="svc-text">未连接</span></span><small>Cairn 浏览器扩展 <span id="version"></span></small></div>
-  </nav>
-  <main class="opt-main">
-    <header class="opt-head"><p class="crumb">插件设置 / <span id="crumb-current">连接</span></p><h1 id="section-title">连接</h1><p id="section-desc">连接 Cairn 网页收藏库；旧令牌保留原连接。</p></header>
-    <div class="opt-body">
-      <p id="status" class="status" role="status" aria-live="polite" hidden></p>
-      <section id="pane-connection" data-section="connection" class="opt-pane" data-title="连接" data-desc="连接 Cairn 网页收藏库；旧令牌保留原连接。">
-        <div class="opt-section"><h2>收藏库</h2><p class="muted">新采集令牌连接 cairn.alpenl.com，旧令牌仍连接原收藏库。</p>
-          <div class="card"><div class="card-row"><div class="txt"><div class="ttl">服务器</div><div class="dsc">收藏会提交到这里，再由服务处理 X 增强内容。</div></div><span class="val"><span id="server"></span><span class="tag">固定</span></span></div>
-          <div class="card-row"><div class="txt"><div class="ttl">连接状态</div></div><span id="connection-state" class="val">未连接</span></div></div></div>
-        <form id="settings-form" class="opt-section"><h2>访问令牌</h2><p class="muted">在 cairn.alpenl.com「设置 → 状态与账户 → 浏览器插件」中创建。令牌只保存在当前浏览器，不参与浏览器账号同步。</p>
-          <div class="card"><div class="card-block"><label for="token">更换令牌 <small>留空则重新测试当前令牌</small></label>
-            <div class="token-field"><input id="token" type="password" autocomplete="off" maxlength="512" placeholder="从 cairn.alpenl.com 设置中创建采集令牌"><button id="show-token" type="button" class="secondary" aria-label="显示访问令牌">显示</button><button id="connect" type="submit" class="primary" disabled>测试并保存</button></div>
-            <label id="move-pending-label" class="check" hidden><input id="move-pending" type="checkbox"><span id="move-pending-text"></span></label></div></div>
-        </form>
-      </section>
-      <section id="pane-queue" data-section="queue" class="opt-pane" data-title="待同步队列" data-desc="关闭弹窗后仍会在后台上传；失败的收藏保留在本机，可在这里重试或移除。" hidden>
-        <div class="opt-section"><div class="section-heading"><h2>待同步 <span id="pending-count">0</span></h2><button id="retry-all" class="text-button" type="button" hidden>全部重试</button></div>
-          <div class="card"><div id="queue" class="queue-wrap"></div></div></div>
-      </section>
-      <section id="pane-capture" data-section="capture" class="opt-pane" data-title="采集" data-desc="决定保存时提交哪些内容。" hidden>
-        <div class="opt-section"><h2>链接</h2><p class="muted">新旧收藏库各自保存，不会自动迁移旧数据。</p>
-          <div class="card"><label class="check"><input id="keep-full-url" type="checkbox" checked form="settings-form"><span>保留完整链接 <small>包含问号后的参数和 # 片段。修改后点「连接」页的测试并保存生效。</small></span></label></div></div>
-        <div class="opt-section"><h2>快捷方式</h2>
-          <div class="card"><div class="card-row"><div class="txt"><div class="ttl">打开收藏弹窗</div><div class="dsc">也可以点工具栏图标，或右键页面 / 链接。</div></div><span class="val"><kbd>Alt</kbd><kbd>Shift</kbd><kbd>C</kbd></span></div>
-          <div class="card-row"><div class="txt"><div class="ttl">在弹窗中保存</div></div><span class="val"><kbd>Ctrl</kbd><kbd>↵</kbd></span></div></div></div>
-      </section>
-      <section id="pane-media" data-section="media" class="opt-pane" data-title="媒体授权" data-desc="保存时只会申请当前文章用到的图片和视频站点。" hidden>
-        <div class="opt-section"><h2>跨站图片</h2><p class="muted">若跨站图片经常缺失，可以一次性允许读取所有网站的图片；只在你主动保存或启动批量采集时使用。</p>
-          <div class="card"><div class="card-row"><div class="txt"><div class="ttl">读取所有网站的图片</div><div class="dsc">浏览器会弹出授权确认，可随时在扩展管理页撤销。</div></div><button id="image-permission" class="secondary" type="button">允许</button></div></div></div>
-      </section>
-      <section id="pane-about" data-section="about" class="opt-pane" data-title="关于" data-desc="版本与隐私说明。" hidden>
-        <div class="opt-section"><h2>隐私</h2><div class="card"><div class="card-block privacy"><p>只在你保存或启动批量采集时读取页面已加载的正文和媒体，不读取表单、Cookie 或浏览历史。</p><p>卸载扩展会清除本机草稿和待同步内容。详见随附的隐私说明。</p></div></div></div>
-      </section>
+    <span id="sync-pill" class="sync-pill warn"><i></i><span id="sync-text">未连接</span></span>
+    <button id="open-popup" class="text-button" type="button" hidden>打开收藏弹窗</button>
+  </header>
+  <main class="set-main">
+    <div class="set-title">
+      <h1>插件设置</h1>
+      <p>连接收藏库，查看待同步的收藏，管理本机的标签缓存和采集方式。</p>
     </div>
+    <p id="status" class="status" role="status" aria-live="polite" hidden></p>
+
+    <section id="connection" class="set-group" aria-labelledby="g-conn">
+      <h2 id="g-conn">连接</h2>
+      <div class="set-card">
+        <div id="conn-row" class="set-row" hidden>
+          <span class="ico ok" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></svg></span>
+          <div class="txt"><div id="server" class="ttl">cairn-go.alpenl.com</div><div id="conn-desc" class="dsc"></div></div>
+          <button id="change-token" type="button" class="secondary">更换令牌</button>
+        </div>
+        <form id="settings-form" class="set-block" hidden>
+          <div class="token-field">
+            <input id="token" type="password" autocomplete="off" maxlength="512" placeholder="粘贴 cairn.alpenl.com 创建的采集令牌" aria-label="访问令牌">
+            <button id="show-token" type="button" class="secondary" aria-label="显示访问令牌">显示</button>
+            <button id="connect" type="submit" class="primary" disabled>测试并保存</button>
+          </div>
+          <p class="hint">在 cairn.alpenl.com「设置 → 状态与账户 → 浏览器插件」中创建采集令牌，不会参与浏览器账号同步。</p>
+          <label id="move-pending-label" class="check" hidden><input id="move-pending" type="checkbox"><span id="move-pending-text"></span></label>
+        </form>
+      </div>
+    </section>
+
+    <section id="queue-group" class="set-group" aria-labelledby="g-queue">
+      <div class="set-head"><h2 id="g-queue">待同步</h2><span id="pending-count" class="count" hidden>0</span><button id="retry-all" type="button" class="text-button" hidden>全部重试</button></div>
+      <div class="set-card">
+        <div id="queue" class="set-queue" hidden></div>
+        <div id="queue-empty" class="set-row">
+          <span class="ico ok" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4.5 4.5L19 7"/></svg></span>
+          <div class="txt"><div class="ttl">所有收藏已同步</div><div class="dsc">关闭弹窗后仍会在后台上传；失败的收藏会留在这里，可以重试或移除。</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tags" class="set-group" aria-labelledby="g-tags">
+      <h2 id="g-tags">标签</h2>
+      <div class="set-card">
+        <div class="set-row">
+          <span id="tag-ico" class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12V4h8l9 9-8 8-9-9Z"/><path d="M7.5 7.5h.01"/></svg></span>
+          <div class="txt"><div id="tag-title" class="ttl">尚未拉取标签</div><div id="tag-desc" class="dsc">连接收藏库后，第一次打开弹窗会把标签拉取到本机。</div></div>
+          <button id="tags-refresh" type="button" class="secondary" disabled>立即刷新</button>
+        </div>
+        <div class="set-row">
+          <div class="txt"><div class="ttl">打开弹窗时检查更新</div><div class="dsc">只比对词表版本，有更新时在弹窗里提示，由你决定何时刷新。</div></div>
+          <label class="switch"><input id="tag-auto" type="checkbox" checked aria-label="打开弹窗时检查更新"><span class="track"></span></label>
+        </div>
+        <div class="set-row">
+          <div class="txt"><div class="ttl">清除本地标签缓存</div><div class="dsc">清除后，下次打开弹窗会重新从收藏库拉取。</div></div>
+          <button id="tags-clear" type="button" class="text-button" disabled>清除</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="capture" class="set-group" aria-labelledby="g-capture">
+      <h2 id="g-capture">采集</h2>
+      <div class="set-card">
+        <div class="set-row">
+          <div class="txt"><div class="ttl">默认保存正文和媒体</div><div class="dsc">关闭后弹窗默认只保存链接和收藏原因，单次仍可切换。</div></div>
+          <label class="switch"><input id="capture-default" type="checkbox" checked aria-label="默认保存正文和媒体"><span class="track"></span></label>
+        </div>
+        <div class="set-row">
+          <div class="txt"><div class="ttl">保留完整链接</div><div class="dsc">包含问号后的参数和 # 片段。</div></div>
+          <label class="switch"><input id="keep-full-url" type="checkbox" checked aria-label="保留完整链接"><span class="track"></span></label>
+        </div>
+        <div class="set-row">
+          <div class="txt"><div class="ttl">读取所有网站的图片</div><div id="image-desc" class="dsc">默认只申请当前文章用到的站点；跨站图片经常缺失时再开启。</div></div>
+          <label class="switch"><input id="image-permission" type="checkbox" aria-label="读取所有网站的图片"><span class="track"></span></label>
+        </div>
+      </div>
+    </section>
+
+    <section id="more" class="set-group" aria-labelledby="g-more">
+      <h2 id="g-more">更多</h2>
+      <div class="set-card">
+        <a class="set-row" href="batch.html">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5h3M17 5h3v3M20 16v3h-3M7 19H4v-3M8 12h8"/></svg></span>
+          <span class="txt"><span class="ttl">批量补采正文</span><span class="dsc">为缺少正文的收藏逐篇打开页面采集，可随时暂停。</span></span>
+          <svg class="chev-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+        </a>
+        <div class="set-row">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg></span>
+          <div class="txt"><div class="ttl">快捷键</div><div class="dsc">打开收藏弹窗；弹窗内按 Ctrl ↵ 保存。也可以右键页面或链接收藏。</div></div>
+          <span class="val"><kbd>Alt</kbd><kbd>Shift</kbd><kbd>C</kbd></span>
+        </div>
+        <button id="privacy-toggle" type="button" class="set-row" aria-expanded="false" aria-controls="privacy">
+          <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.4 3 8.3 7 9.5 4-1.2 7-5.1 7-9.5V6Z"/></svg></span>
+          <span class="txt"><span class="ttl">隐私说明</span><span class="dsc">插件读取哪些内容、存在哪里。</span></span>
+          <svg class="chev-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path id="privacy-chevron" d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <div id="privacy" class="privacy-box" hidden><p>只在你保存或启动批量采集时读取页面已加载的正文和媒体，不读取表单、Cookie 或浏览历史。</p><p>标签目录、草稿和待同步内容保存在本机；卸载扩展会一并清除。详见随附的隐私说明。</p></div>
+      </div>
+    </section>
+
+    <p class="set-foot"><span>Cairn 浏览器扩展 <span id="version"></span></span><span>标签词表 <span id="tag-version">未拉取</span></span></p>
   </main>
 </div>
-<script type="module" src="options-nav.mjs"></script><script type="module" src="options.mjs"></script>
+<script type="module" src="options.mjs"></script>
 </body></html>
