@@ -1,6 +1,27 @@
 export const API_BASE = "https://share.alpenl.com";
 export const COLLECTOR_API_BASE = "https://cairn-go.alpenl.com/api/v1/collector";
 export const AUTH_API_BASE = COLLECTOR_API_BASE.replace(/\/collector$/, "/auth");
+export const DEFAULT_SERVER = new URL(COLLECTOR_API_BASE).origin;
+
+// A service origin only; paths, credentials and insecure remote HTTP are refused.
+export function normalizeServer(value) {
+  try {
+    const u = new URL(value.trim());
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+    if (u.username || u.password || u.search || u.hash || u.pathname !== "/" ||
+        (u.protocol !== "https:" && !(u.protocol === "http:" && loopback))) throw new Error();
+    return u.origin;
+  } catch { throw new CaptureError("invalid_server"); }
+}
+export function connectionServer(settings) {
+  return settings.server || (settings.token?.startsWith("cairn_c_") ? DEFAULT_SERVER : API_BASE);
+}
+export function connectionIdentity(settings) {
+  const origin = connectionServer(settings);
+  const original = settings.token?.startsWith("cairn_c_") ? DEFAULT_SERVER : API_BASE;
+  // Keep existing queues valid on upgrade. Custom origins are part of identity.
+  return tokenIdentity(origin === original ? settings.token : `${origin}\n${settings.token}`);
+}
 export const STATE_KEY = "cairn_capture_v1";
 export const RETRY_ALARM = "cairn-upload";
 export const MAX_QUEUE = 100;
@@ -42,6 +63,8 @@ export async function tokenIdentity(token) {
 }
 
 export const ERROR_TEXT = {
+  invalid_server: "请填写 HTTPS 服务器地址（不含路径）；仅本机回环地址允许 HTTP。",
+  server_permission: "未获得服务器访问权限，原连接保持不变。",
   capture_not_pending: "原收藏已有正文或已变更，本次补采未覆盖。可移除此任务。",
   batch_account: "请先完成或移除已保存或带资料版本的待同步任务，再更换令牌。",
   batch_upgrade: "收藏服务尚未支持批量补采，请更新服务后重试。",

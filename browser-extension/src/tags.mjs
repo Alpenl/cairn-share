@@ -34,23 +34,25 @@ export function nextTagCache(cache, { binding, result, mode, now }) {
 export function createTagSync({ storage, controller, now = Date.now }) {
   const read = async () => (await storage.get(TAG_CACHE_KEY))[TAG_CACHE_KEY] ?? null;
   let running = null;
+  let generation = 0;
   async function sync(mode) {
     // Popup and settings may both ask at once; share one request.
     if (running) return running;
     running = (async () => {
+      const started = generation;
       const cache = await read();
       const { binding: current } = await controller.snapshot();
       const own = cache?.binding === current ? cache : null;
       const conditional = mode === "check" && own?.dimensions ? own.etag : undefined;
       const { binding, result } = await controller.tags(conditional);
-      if (binding !== current) return { cache: null, added: [] };
+      if (started !== generation || binding !== current || binding !== (await controller.snapshot()).binding) return { cache: null, added: [] };
       const next = nextTagCache(own, { binding, result, mode: own?.dimensions ? mode : "refresh", now: now() });
       await storage.set({ [TAG_CACHE_KEY]: next.cache });
       return next;
     })().finally(() => { running = null; });
     return running;
   }
-  return { sync, clear: () => storage.remove(TAG_CACHE_KEY) };
+  return { sync, clear: () => { generation++; return storage.remove(TAG_CACHE_KEY); } };
 }
 
 // Chip size steps relative to the most used tag in the current view.

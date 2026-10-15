@@ -91,3 +91,39 @@ test("a library without extension sign-in shows the redirect to register", async
   await expect(options.getByRole("button", { name: "使用 GitHub 登录" })).toHaveCount(0);
   providers = ["github"];
 });
+
+test('a second server is selected through settings and owns login, tags and captures', async () => {
+  const calls=[];
+  const second=createServer(async(req,res)=>{
+    const ok=data=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({code:'OK',data}));};
+    calls.push({path:req.url,authorization:req.headers.authorization});
+    if(req.url.startsWith('/api/v1/auth/methods'))return ok({password:true,providers:['github']});
+    if(req.url==='/api/v1/auth/extension/token')return ok({token});
+    if(req.headers.authorization!==`Bearer ${token}`){res.writeHead(401);res.end();return;}
+    if(req.url==='/api/v1/collector/tags')return ok({catalog_version:1,dimensions:[]});
+    if(req.method==='GET')return ok({items:[]});
+    let raw='';for await(const part of req)raw+=part;
+    const body=JSON.parse(raw);return ok({id:321,url:body.url,note:body.note});
+  });
+  await new Promise(resolve=>second.listen(0,'127.0.0.1',resolve));
+  const secondOrigin=`http://127.0.0.1:${second.address().port}`;
+  const options=await openOptions('code=second-grant');
+  try {
+    await options.locator('#change-token').click();
+    await options.getByLabel('服务器地址',{exact:true}).fill(secondOrigin);
+    await options.getByRole('button',{name:'检查登录方式',exact:true}).click();
+    await options.getByRole('button',{name:'使用 GitHub 登录',exact:true}).click();
+    await expect(options.locator('#status')).toHaveText('已通过 GitHub 连接收藏库。');
+    await expect(options.locator('#server')).toHaveText(new URL(secondOrigin).host);
+    await options.evaluate(async()=>{
+      const {send}=await import('./ui.mjs');
+      await send('tags-sync',{mode:'refresh'});
+      await send('save',{capture:{client_id:crypto.randomUUID(),url:'https://article.example/custom-server',note:''}});
+      await send('retry');
+    });
+    expect(calls.some(c=>c.path==='/api/v1/auth/extension/token')).toBe(true);
+    expect(calls.some(c=>c.path==='/api/v1/collector/tags')).toBe(true);
+    expect(calls.some(c=>c.path==='/api/v1/collector/links')).toBe(true);
+    expect(calls.filter(c=>c.authorization).every(c=>c.authorization===`Bearer ${token}`)).toBe(true);
+  } finally {await options.close();second.closeAllConnections();await new Promise(resolve=>second.close(resolve));}
+});

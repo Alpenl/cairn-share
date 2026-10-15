@@ -416,7 +416,7 @@ async function syncTags(mode, { quiet = false } = {}) {
 
 async function loadTags(stored) {
   // Only the Go collector has a tag catalog; other libraries hide the section.
-  if (!state?.configured || state.server !== "cairn-go.alpenl.com") return;
+  if (!state?.configured || !state.collector) return;
   tagCache = stored?.binding === state.binding && stored.dimensions ? stored : null;
   if (tagCache) {
     tagsVisible = true;

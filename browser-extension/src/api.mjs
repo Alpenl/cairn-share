@@ -3,6 +3,10 @@ import {discoverMedia} from './capture.mjs';
 import { API_BASE, COLLECTOR_API_BASE, CaptureError } from "./config.mjs";
 import { localMedia, mediaDigest, forgetMedia } from './media.mjs';
 
+export function clientForConnection(settings) {
+  return createClient(settings.server ? { apiBase: settings.server, collectorBase: `${settings.server}/api/v1/collector` } : {});
+}
+
 export function createClient({ fetchImpl = fetch, apiBase = API_BASE, collectorBase = COLLECTOR_API_BASE, timeoutMs = 10000 } = {}) {
   async function request(token, path, body, {method,raw=false,collections=false,missing=false,stage,etag} = {}) {
     if (!token) throw new CaptureError("not_configured");

@@ -344,7 +344,7 @@ test('new capture token selects Go protocol, stores clean text and reports the c
       await controller.enqueue({client_id:crypto.randomUUID(),url:'https://example.test/new#body',capture:{protocol:2,text:'Clean **original**',title:'Capture title',images:[],media:[]}});
       await controller.flush();
       const snap=await controller.snapshot();
-      if(snap.server!=='cairn-go.alpenl.com'||snap.queue.length||snap.lastResult.status!=='uploaded')throw new Error('Go upload not completed');
+      if(!snap.collector||snap.queue.length||snap.lastResult.status!=='uploaded')throw new Error('Go upload not completed');
       if(JSON.stringify(snap).includes(token))throw new Error('snapshot leaked token');
     },{token:captureToken,port:goServer.address().port});
     expect(goPosts).toHaveLength(1);

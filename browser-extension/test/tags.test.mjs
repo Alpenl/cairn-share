@@ -88,3 +88,16 @@ test('chip sizes step with usage relative to the busiest tag; long dimension nam
  assert.equal(tagSize(0,0),'s1');
  assert.deepEqual(['主题','资源类型','内容功能','载体','自定义'].map(shortLabel),['主题','类型','功能','载体','自定义']);
 });
+
+test('an old-server response cannot repopulate tags after the connection is cleared',async()=>{
+ const data={};let binding='old',resolve;
+ const storage={get:async k=>({[k]:data[k]}),set:async v=>Object.assign(data,v),remove:async k=>{delete data[k];}};
+ const controller={snapshot:async()=>({binding}),tags:()=>new Promise(r=>{resolve=r;})};
+ const sync=createTagSync({storage,controller});
+ const pending=sync.sync('refresh');
+ while(!resolve)await new Promise(r=>setTimeout(r,0));
+ binding='new';await sync.clear();
+ resolve({binding:'old',result:{catalog:catalog(18),etag:'old'}});
+ assert.equal((await pending).cache,null);
+ assert.equal(data[TAG_CACHE_KEY],undefined);
+});

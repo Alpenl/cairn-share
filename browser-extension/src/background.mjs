@@ -1,7 +1,7 @@
 import { API_BASE, STATE_KEY, RETRY_ALARM, errorText } from "./config.mjs";
 import { captureTab } from "./capture.mjs";
 import { CaptureError } from "./config.mjs";
-import { createClient } from "./api.mjs";
+import { createClient, clientForConnection } from "./api.mjs";
 import { createController } from "./controller.mjs";
 import { pruneMedia,forgetMedia } from './media.mjs';
 import { createBatch, BATCH_ALARM } from './batch.mjs';
@@ -15,6 +15,7 @@ const controller = createController({
     async write(state) { await ext.storage.local.set({ [STATE_KEY]: state }); }
   },
   client,
+  clientFor: clientForConnection,
   async onUploaded(job) {
     for(let i=0;i<(job.capture?.images?.length||0);i++) {
       await forgetMedia(`${job.client_id}:image:${i}`);
@@ -31,7 +32,7 @@ const controller = createController({
     if(Number.isFinite(next))await ext.alarms.create(RETRY_ALARM+'-soon',{when:next});
   }
 });
-const batch = createBatch({ext,controller,client});
+const batch = createBatch({ext,controller,client,clientFor:clientForConnection});
 const tagSync = createTagSync({ storage: ext.storage.local, controller });
 
 async function ensureAlarm() {
@@ -79,6 +80,7 @@ async function dispatch(message) {
     case "settings": {
       await batch.pause();
       const result = await controller.saveSettings(message.settings);
+      await tagSync.clear();
       void controller.flush({ force: true }).catch(handleFailure);
       return result;
     }

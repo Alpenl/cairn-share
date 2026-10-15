@@ -1,4 +1,4 @@
-import { CaptureError, MAX_QUEUE, MAX_TAGS, submissionUrl, tokenIdentity, validateCapture } from "./config.mjs";
+import { CaptureError, MAX_QUEUE, MAX_TAGS, submissionUrl, connectionIdentity, connectionServer, normalizeServer, validateCapture } from "./config.mjs";
 
 export function emptyState() {
   return { settings: { token: "", keepFullUrl: true }, queue: [], lastResult: null };
@@ -8,7 +8,7 @@ const PAUSED_ERRORS = new Set(["invalid_tags","capture_not_pending","invalid_ima
 
 // Only this background controller writes storage. A mutex prevents independent
 // popup/menu/alarm events from overwriting one another's persisted changes.
-export function createController({ store, client, now = Date.now, uuid = () => crypto.randomUUID(), onChange = async () => {}, onUploaded = async () => {} }) {
+export function createController({ store, client, clientFor = () => client, now = Date.now, uuid = () => crypto.randomUUID(), onChange = async () => {}, onUploaded = async () => {} }) {
   let mutations = Promise.resolve();
   let flushPromise = null;
   let connectionTest = null;
@@ -32,8 +32,10 @@ export function createController({ store, client, now = Date.now, uuid = () => c
     // Never send the saved token to the popup, content pages, or queue views.
     return {
       configured: Boolean(state.settings.token),
-      server: state.settings.token?.startsWith("cairn_c_") ? "cairn-go.alpenl.com" : "share.alpenl.com",
-      binding:state.settings.token?await tokenIdentity(state.settings.token):"",
+      server: new URL(connectionServer(state.settings)).host,
+      serverUrl: connectionServer(state.settings),
+      collector: Boolean(state.settings.token?.startsWith("cairn_c_")),
+      binding:state.settings.token?await connectionIdentity(state.settings):"",
       keepFullUrl: state.settings.keepFullUrl,
       connectedAt: state.settings.connectedAt ?? null,
       queue: state.queue.map(({ binding, capture, ...job }) => job),
@@ -41,7 +43,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
     };
   }
 
-  async function saveSettings({ token, keepFullUrl, movePending = false }) {
+  async function saveSettings({ token, server, keepFullUrl, movePending = false }) {
     if (typeof keepFullUrl !== "boolean" || typeof token !== "string" || token.trim().length > 512) throw new CaptureError("invalid_token");
     // An empty field keeps the existing token; the options page never needs
     // to read it back. A candidate is tested before the active token changes.
@@ -49,17 +51,22 @@ export function createController({ store, client, now = Date.now, uuid = () => c
     const candidate = token.trim() || previous.settings.token;
     if (!candidate) throw new CaptureError("not_configured");
     if (connectionTest) throw new CaptureError("unexpected");
+    const candidateSettings = { token: candidate, server: server === undefined ? previous.settings.server : normalizeServer(server) };
     connectionTest = candidate;
     try {
-      await client.test(candidate);
-      const binding = await tokenIdentity(candidate);
-      await update((state) => {
-        if (candidate !== state.settings.token && state.queue.some(job => job.target || job.expected || job.savedLink)) throw new CaptureError("batch_account");
-        if (candidate !== state.settings.token && state.queue.length && !movePending) throw new CaptureError("queue_connection");
-        if (candidate !== state.settings.token) {
+      // Finish an in-flight upload before switching its destination.
+      if (flushPromise) await flushPromise;
+      await clientFor(candidateSettings).test(candidate);
+      const binding = await connectionIdentity(candidateSettings);
+      await update(async (state) => {
+        const changed = binding !== await connectionIdentity(state.settings);
+        if (changed && state.queue.some(job => job.target || job.expected || job.savedLink)) throw new CaptureError("batch_account");
+        if (changed && state.queue.length && !movePending) throw new CaptureError("queue_connection");
+        if (changed) {
           state.queue.forEach((job) => { job.binding = binding; job.collection_ids=[];job.tag_refs=[];job.collectionOperations={};job.collectionIndex=0;delete job.savedLink;delete job.mediaIndex;delete job.mediaProgress;delete job.legacyHash;delete job.uploadMedia;delete job.mediaRegistered;delete job.imageProgress;delete job.stage; job.errorKind = null; job.nextAttemptAt = 0; });
         }
-        state.settings = { token: candidate, keepFullUrl, connectedAt: candidate === state.settings.token && state.settings.connectedAt ? state.settings.connectedAt : now() };
+        if (changed) { delete state.collectionCatalog; state.lastResult = null; }
+        state.settings = { ...candidateSettings, keepFullUrl, connectedAt: !changed && state.settings.connectedAt ? state.settings.connectedAt : now() };
       });
     } finally { connectionTest = null; }
     return snapshot();
@@ -83,7 +90,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
       if (existing) return existing;
       if (state.lastResult?.client_id === client_id) return state.lastResult;
       if (!state.settings.token) throw new CaptureError("not_configured");
-      if((collection_ids.length || tag_refs.length || target || expected) && captureBinding!==await tokenIdentity(state.settings.token))throw new CaptureError("queue_connection");
+      if((collection_ids.length || tag_refs.length || target || expected) && captureBinding!==await connectionIdentity(state.settings))throw new CaptureError("queue_connection");
       if (state.queue.length >= MAX_QUEUE) throw new CaptureError("queue_full");
       if(!Array.isArray(collection_ids)||collection_ids.length>100||new Set(collection_ids).size!==collection_ids.length||collection_ids.some(id=>typeof id!=="string"||!/^[a-f0-9-]{36}$/.test(id)))throw new CaptureError("invalid_collection");
       // Tags come from the Go collector's catalog; other libraries have none.
@@ -91,7 +98,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
       const capture = validateCapture(submissionUrl(url, target ? true : state.settings.keepFullUrl), note);
       if (pageCapture && JSON.stringify(state.queue).length + JSON.stringify(pageCapture).length > 24000000) throw new CaptureError("queue_full");
       const job = { ...capture, ...(target ? {target} : {}), ...(expected ? {expected} : {}), collection_ids, ...(tag_refs.length ? { tag_refs } : {}), collectionOperations:{}, collectionIndex:0, ...(pageCapture ? { capture: pageCapture } : {}), title: typeof title === "string" ? title.slice(0, 300) : "", client_id,
-        binding: await tokenIdentity(state.settings.token), createdAt: now(), attempts: 0, nextAttemptAt: 0, errorKind: null };
+        binding: await connectionIdentity(state.settings), createdAt: now(), attempts: 0, nextAttemptAt: 0, errorKind: null };
       state.queue.push(job);
       state.lastResult = { client_id, url: job.url, title: job.title, status: "queued", at: now() };
       return job;
@@ -99,6 +106,7 @@ export function createController({ store, client, now = Date.now, uuid = () => c
   }
 
   function flush({ force = false, onlyId } = {}) {
+    if (connectionTest) return snapshot();
     // A new menu/capture event can arrive after an existing flush has read
     // its final empty queue. Run another pass after it settles, so that the
     // newly committed item does not have to wait for the next alarm.
@@ -113,7 +121,8 @@ export function createController({ store, client, now = Date.now, uuid = () => c
         await mutations;
         const state = await read();
         if (!state.settings.token) break;
-        const binding = await tokenIdentity(state.settings.token);
+        const binding = await connectionIdentity(state.settings);
+        const client = clientFor(state.settings);
         const job = state.queue.find((item) => item.binding === binding && !attempted.has(item.client_id) &&
           (!onlyId || item.client_id === onlyId) && (force || (!PAUSED_ERRORS.has(item.errorKind) && item.nextAttemptAt <= now())));
         if (!job) break;
@@ -179,10 +188,10 @@ export function createController({ store, client, now = Date.now, uuid = () => c
     return snapshot();
   }
 
-  async function collections(){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await tokenIdentity(state.settings.token);try{const items=await client.collections(state.settings.token);if((await read()).settings.token!==state.settings.token)throw new CaptureError("queue_connection");await update(current=>{current.collectionCatalog={binding,items,at:now()}});return {items,cached:false,binding};}catch(error){if(state.collectionCatalog?.binding===binding)return {items:state.collectionCatalog.items,cached:true,binding};throw error;}}
-  async function lookup(url){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await tokenIdentity(state.settings.token);const result=await client.lookup(state.settings.token,url);return {binding,result};}
+  async function collections(){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await connectionIdentity(state.settings);try{const items=await clientFor(state.settings).collections(state.settings.token);if(await connectionIdentity((await read()).settings)!==binding)throw new CaptureError("queue_connection");await update(current=>{current.collectionCatalog={binding,items,at:now()}});return {items,cached:false,binding};}catch(error){if(state.collectionCatalog?.binding===binding)return {items:state.collectionCatalog.items,cached:true,binding};throw error;}}
+  async function lookup(url){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await connectionIdentity(state.settings);const result=await clientFor(state.settings).lookup(state.settings.token,url);return {binding,result};}
   // The token never leaves background; callers get the binding to discard a
   // response that arrives after the connection changed.
-  async function tags(etag){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await tokenIdentity(state.settings.token);return {binding,result:await client.tags(state.settings.token,etag)};}
+  async function tags(etag){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await connectionIdentity(state.settings);return {binding,result:await clientFor(state.settings).tags(state.settings.token,etag)};}
   return { snapshot, saveSettings, savePreferences, tags, enqueue, flush, remove, collections, lookup, newId: uuid };
 }

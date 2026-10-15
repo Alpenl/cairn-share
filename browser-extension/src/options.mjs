@@ -1,4 +1,4 @@
-import { CaptureError, STATE_KEY } from "./config.mjs";
+import { CaptureError, STATE_KEY, DEFAULT_SERVER, normalizeServer } from "./config.mjs";
 import { $, ext, renderQueue, send, showError, status } from "./ui.mjs";
 import { DEFAULT_PREFS, PREFS_KEY, TAG_CACHE_KEY, tagCount } from "./tags.mjs";
 import { AUTH_PROVIDERS, createAuth } from "./auth.mjs";
@@ -10,7 +10,16 @@ let changingToken = false;
 let tagCache = null;
 let tagsSyncing = false;
 let prefs = { ...DEFAULT_PREFS };
-const auth = createAuth({ identity: ext.identity });
+let auth = createAuth({ identity: ext.identity });
+let authServer = DEFAULT_SERVER;
+let providerLoad = 0;
+function grantServer(server) {
+  // Call directly in the click/submit handler to preserve user activation.
+  const endpoint = new URL(server);
+  return ext.permissions.request({ origins: [`${endpoint.protocol}//${endpoint.hostname}/*`] }).then(granted => {
+    if (!granted) throw new CaptureError("server_permission");
+  });
+}
 let providers = [];
 let signingIn = null;
 
@@ -38,7 +47,8 @@ function renderConnection() {
   $("sync-pill").className = `sync-pill ${!ok || failed ? "warn" : queue.length ? "busy" : "ok"}`;
   $("sync-text").textContent = !ok ? "未连接" : failed ? `${failed} 条待重试` : queue.length ? `同步中 · ${queue.length}` : "已连接";
   $("conn-row").hidden = !ok;
-  $("server").textContent = ok ? state.server : "cairn-go.alpenl.com";
+  $("server").textContent = state?.server || new URL(DEFAULT_SERVER).host;
+  if (!changingToken) $("server-url").value = state?.configured ? state.serverUrl : DEFAULT_SERVER;
   $("conn-desc").textContent = [state?.binding && `令牌指纹 ${state.binding.slice(0, 8)}`, state?.connectedAt && `${day(state.connectedAt)}连接`, "只保存在这个浏览器"].filter(Boolean).join(" · ");
   $("change-token").textContent = changingToken ? "取消" : "更换令牌";
   $("settings-form").hidden = ok && !changingToken;
@@ -48,7 +58,7 @@ function renderConnection() {
 }
 
 function renderTagCache() {
-  const go = state?.configured && state.server === "cairn-go.alpenl.com";
+  const go = state?.configured && state.collector;
   const own = tagCache?.binding === state?.binding ? tagCache : null;
   const count = tagCount(own);
   const stale = Boolean(own?.update) && !tagsSyncing;
@@ -93,7 +103,9 @@ $("settings-form").addEventListener("submit", async (event) => {
   $("connect").disabled = true;
   $("connect").textContent = "正在测试…";
   try {
-    const settings = { token: $("token").value, keepFullUrl: $("keep-full-url").checked, movePending: $("move-pending").checked };
+    const server = normalizeServer($("server-url").value);
+    await grantServer(server);
+    const settings = { server, token: $("token").value, keepFullUrl: $("keep-full-url").checked, movePending: $("move-pending").checked };
     await send("settings", { settings });
     $("token").value = "";
     $("move-pending").checked = false;
@@ -151,8 +163,11 @@ async function signIn(id) {
     signingIn = id;
     renderProviders();
     status($("status"), "", "");
+    const server = normalizeServer($("server-url").value);
+    if (server !== authServer) throw new CaptureError("batch_connection");
+    await grantServer(server);
     const token = await auth.signIn(id, `Cairn 插件 · ${navigator.userAgent.includes("Firefox") ? "Firefox" : "Chrome"}`);
-    await send("settings", { settings: { token, keepFullUrl: $("keep-full-url").checked, movePending } });
+    await send("settings", { settings: { server, token, keepFullUrl: $("keep-full-url").checked, movePending } });
     $("token").value = "";
     $("move-pending").checked = false;
     changingToken = false;
@@ -161,14 +176,29 @@ async function signIn(id) {
   } catch (error) { showError($("status"), error); }
   finally { signingIn = null; renderProviders(); }
 }
-async function loadProviders() {
-  providers = await auth.providers().catch(() => []);
+async function loadProviders(server = state?.configured ? state.serverUrl : DEFAULT_SERVER) {
+  const generation = ++providerLoad;
+  const next = createAuth({ identity: ext.identity, base: `${server}/api/v1/auth` });
+  const found = await next.providers().catch(() => []);
+  if (generation !== providerLoad) return;
+  auth = next; authServer = server; providers = found;
   renderProviders();
   // Until the library allows this browser's redirect, show what to register.
   const redirect = auth.redirectURL();
   $("auth-redirect").textContent = redirect;
   $("auth-redirect-row").hidden = Boolean(providers.length) || !redirect;
 }
+
+$("server-url").addEventListener("input", () => {
+  ++providerLoad; providers = []; renderProviders();
+});
+$("server-auth").addEventListener("click", async () => {
+  try {
+    const server = normalizeServer($("server-url").value);
+    await grantServer(server);
+    await loadProviders(server);
+  } catch (error) { showError($("status"), error); }
+});
 
 $("retry-all").addEventListener("click", async () => {
   $("retry-all").disabled = true;
@@ -261,7 +291,7 @@ try {
   $("connect").disabled = false;
   void loadProviders();
   // A cheap version-only check, so this page can say when the library changed.
-  if (state.configured && state.server === "cairn-go.alpenl.com" && tagCache?.binding === state.binding && tagCache.dimensions) void syncTags("check", { quiet: true });
+  if (state.configured && state.collector && tagCache?.binding === state.binding && tagCache.dimensions) void syncTags("check", { quiet: true });
   // Older links (options.html#queue, #media, #about) land on the matching group.
   const anchor = location.hash.slice(1);
   if (anchor) document.getElementById({ queue: "queue-group", media: "capture", about: "more" }[anchor] || anchor)?.scrollIntoView();

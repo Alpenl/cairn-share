@@ -8,6 +8,8 @@ import { build, projectRoot } from "../scripts/build.mjs";
 // Optional native Firefox smoke test. Requires Firefox and geckodriver on PATH.
 // Uses the WebDriver protocol directly to avoid another runtime dependency.
 const server = createServer();
+const githubToken = "cairn_c_" + "e".repeat(64);
+let grantRedeemed = false;
 let offline = false;
 const records = new Map();
 let requestCount = 0;
@@ -16,6 +18,16 @@ server.on("request", async (request, response) => {
   requestCount++;
   requests.push({ method: request.method, path: request.url, authorized: request.headers.authorization === "Bearer firefox-test-token" });
   response.setHeader("Content-Type", "application/json");
+  const ok = data => response.end(JSON.stringify({code:"OK",data}));
+  if (request.url.startsWith("/api/v1/auth/methods")) return ok({password:true,providers:["github"]});
+  if (request.url === "/api/v1/auth/extension/token") {
+    let raw=""; for await(const part of request)raw+=part;
+    const body=JSON.parse(raw);
+    assert.equal(body.code,"firefox-grant");
+    assert.ok(body.code_verifier.length>=43);
+    grantRedeemed=true; return ok({token:githubToken});
+  }
+  if (request.headers.authorization === `Bearer ${githubToken}`) return ok({items:[]});
   if (offline) { response.writeHead(503); response.end(); return; }
   if (request.headers.authorization !== "Bearer firefox-test-token") { response.writeHead(401); response.end(); return; }
   if (request.method === "GET") { response.end(JSON.stringify({ items: [], next_before_id: null })); return; }
@@ -108,7 +120,17 @@ try {
   await click("retry-all");
   await until(async () => (await text("pending-count")) === "0", "Firefox retry failed");
   assert.equal(records.size, 2);
-  console.log(`Firefox ${session.capabilities.browserVersion}: connection, exact URL, durable queue and retry passed.`);
+  await click("change-token");
+  await execute(`browser.identity.launchWebAuthFlow = async ({url}) => {
+    const query = new URL(url).searchParams;
+    if (query.get('code_challenge_method') !== 'S256') throw new Error('missing PKCE');
+    return browser.identity.getRedirectURL() + '?code=firefox-grant&state=' + query.get('state');
+  };`);
+  const provider = await command("element", {using:"css selector",value:".auth-provider"});
+  await command(`element/${provider["element-6066-11e4-a52e-4f735466cecf"]}/click`,{});
+  await until(async()=> (await text("status")).includes("已通过 GitHub"), "Firefox brokered login failed");
+  assert.equal(grantRedeemed,true);
+  console.log(`Firefox ${session.capabilities.browserVersion}: connection, exact URL, durable queue, retry and mocked-provider GitHub/PKCE flow passed.`);
 } catch (error) {
   if (sessionId) {
     console.error("Firefox smoke diagnostic:", JSON.stringify({ requestCount, requests, status: await text("status").catch(() => "unavailable"),
