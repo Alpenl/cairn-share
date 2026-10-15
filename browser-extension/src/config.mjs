@@ -1,5 +1,6 @@
 export const API_BASE = "https://share.alpenl.com";
 export const COLLECTOR_API_BASE = "https://cairn-go.alpenl.com/api/v1/collector";
+export const AUTH_API_BASE = COLLECTOR_API_BASE.replace(/\/collector$/, "/auth");
 export const STATE_KEY = "cairn_capture_v1";
 export const RETRY_ALARM = "cairn-upload";
 export const MAX_QUEUE = 100;
@@ -59,7 +60,12 @@ export const ERROR_TEXT = {
   invalid_collection:"合集选择无效，请重新打开插件。",
   invalid_tags:"标签选择无效，请刷新标签后重新选择。",
   collections_unsupported:"收藏已保存；服务尚未支持合集，请更新后重试。",
-  not_configured: "请先在设置中填写访问令牌。",
+  not_configured: "请先在设置中登录或填写访问令牌。",
+  sign_in_cancelled: "已取消登录，插件未连接。",
+  sign_in_denied: "已取消授权，插件未连接。",
+  sign_in_forbidden: "这个账号不是收藏库的所有者，无法连接。",
+  sign_in_expired: "这次登录已失效，请重新登录。",
+  sign_in_failed: "暂时无法完成登录，请稍后重试。",
   invalid_url: "请填写完整的 HTTP(S) 链接，不能包含用户名或密码。",
   invalid_note: "备注最多 2000 个字符。",
   invalid_token: "访问令牌不可用，请在设置中重新连接。",

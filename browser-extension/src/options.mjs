@@ -1,6 +1,7 @@
-import { STATE_KEY } from "./config.mjs";
+import { CaptureError, STATE_KEY } from "./config.mjs";
 import { $, ext, renderQueue, send, showError, status } from "./ui.mjs";
 import { DEFAULT_PREFS, PREFS_KEY, TAG_CACHE_KEY, tagCount } from "./tags.mjs";
+import { AUTH_PROVIDERS, createAuth } from "./auth.mjs";
 
 const ALL_SITES = { origins: ["http://*/*", "https://*/*"] };
 let state;
@@ -9,6 +10,9 @@ let changingToken = false;
 let tagCache = null;
 let tagsSyncing = false;
 let prefs = { ...DEFAULT_PREFS };
+const auth = createAuth({ identity: ext.identity });
+let providers = [];
+let signingIn = null;
 
 $("version").textContent = ext.runtime.getManifest().version;
 $("show-token").addEventListener("click", () => {
@@ -109,6 +113,63 @@ $("settings-form").addEventListener("submit", async (event) => {
   finally { $("connect").disabled = false; $("connect").textContent = "测试并保存"; }
 });
 
+// ───────────── Sign-in ─────────────
+// The flow runs here, not in the MV3 worker, which may be suspended while the
+// user is on the provider's page. The token then takes the same tested path
+// as a pasted one.
+function providerButton(id) {
+  const { name, mark } = AUTH_PROVIDERS[id];
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "auth-provider";
+  button.disabled = !initialized || Boolean(signingIn);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "currentColor");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", mark);
+  svg.append(path);
+  const label = document.createElement("span");
+  label.textContent = signingIn === id ? `正在等待 ${name} 授权…` : `使用 ${name} 登录`;
+  button.append(svg, label);
+  button.addEventListener("click", () => void signIn(id));
+  return button;
+}
+function renderProviders() {
+  $("auth-block").hidden = !providers.length;
+  $("auth-providers").replaceChildren(...providers.map(providerButton));
+}
+async function signIn(id) {
+  if (signingIn || !initialized) return;
+  const queue = state?.queue || [];
+  const movePending = $("move-pending").checked;
+  try {
+    // Check before the flow so a refused switch does not mint an unused token.
+    if (queue.some((job) => job.target || job.expected || job.savedLink)) throw new CaptureError("batch_account");
+    if (queue.length && !movePending) throw new CaptureError("queue_connection");
+    signingIn = id;
+    renderProviders();
+    status($("status"), "", "");
+    const token = await auth.signIn(id, `Cairn 插件 · ${navigator.userAgent.includes("Firefox") ? "Firefox" : "Chrome"}`);
+    await send("settings", { settings: { token, keepFullUrl: $("keep-full-url").checked, movePending } });
+    $("token").value = "";
+    $("move-pending").checked = false;
+    changingToken = false;
+    status($("status"), `已通过 ${AUTH_PROVIDERS[id].name} 连接收藏库。`, "success");
+    await refresh();
+  } catch (error) { showError($("status"), error); }
+  finally { signingIn = null; renderProviders(); }
+}
+async function loadProviders() {
+  providers = await auth.providers().catch(() => []);
+  renderProviders();
+  // Until the library allows this browser's redirect, show what to register.
+  const redirect = auth.redirectURL();
+  $("auth-redirect").textContent = redirect;
+  $("auth-redirect-row").hidden = Boolean(providers.length) || !redirect;
+}
+
 $("retry-all").addEventListener("click", async () => {
   $("retry-all").disabled = true;
   try { await send("retry"); await refresh(); } catch (error) { showError($("status"), error); }
@@ -198,6 +259,7 @@ try {
   $("keep-full-url").checked = state.keepFullUrl !== false;
   initialized = true;
   $("connect").disabled = false;
+  void loadProviders();
   // A cheap version-only check, so this page can say when the library changed.
   if (state.configured && state.server === "cairn-go.alpenl.com" && tagCache?.binding === state.binding && tagCache.dimensions) void syncTags("check", { quiet: true });
   // Older links (options.html#queue, #media, #about) land on the matching group.

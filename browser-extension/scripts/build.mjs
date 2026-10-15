@@ -16,7 +16,7 @@ export function manifest(browser, version, apiBase = API_BASE) {
     description: "从当前网页保存正文、图片、链接与备注，保存后立即阅读；后端独立生成摘要与标签。",
     icons: { 16: "icons/16.png", 48: "icons/48.png", 128: "icons/128.png" },
     action: { default_title: "收藏到 Cairn", default_popup: "popup.html", default_icon: { 16: "icons/16.png", 48: "icons/48.png" } },
-    permissions: ["activeTab", "storage", "unlimitedStorage", "scripting", "contextMenus", "alarms"],
+    permissions: ["activeTab", "storage", "unlimitedStorage", "scripting", "contextMenus", "alarms", "identity"],
     host_permissions: [...new Set([`${endpoint.protocol}//${endpoint.hostname}/*`, ...(apiBase === API_BASE ? [`${new URL(COLLECTOR_API_BASE).origin}/*`] : [])])],
     optional_host_permissions: ["http://*/*", "https://*/*"],
     options_ui: { page: "options.html", open_in_tab: true },
