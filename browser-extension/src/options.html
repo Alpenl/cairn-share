@@ -18,16 +18,16 @@
     <div class="opt-foot"><span id="svc" class="svc"><i></i><span id="svc-text">未连接</span></span><small>Cairn 浏览器扩展 <span id="version"></span></small></div>
   </nav>
   <main class="opt-main">
-    <header class="opt-head"><p class="crumb">插件设置 / <span id="crumb-current">连接</span></p><h1 id="section-title">连接</h1><p id="section-desc">插件、App 和网页工作区共用一份收藏库。填好访问令牌，收藏才能同步。</p></header>
+    <header class="opt-head"><p class="crumb">插件设置 / <span id="crumb-current">连接</span></p><h1 id="section-title">连接</h1><p id="section-desc">连接 Cairn 网页收藏库；旧令牌保留原连接。</p></header>
     <div class="opt-body">
       <p id="status" class="status" role="status" aria-live="polite" hidden></p>
-      <section id="pane-connection" data-section="connection" class="opt-pane" data-title="连接" data-desc="插件、App 和网页工作区共用一份收藏库。填好访问令牌，收藏才能同步。">
-        <div class="opt-section"><h2>收藏库</h2><p class="muted">与 Android App 使用同一份收藏库。</p>
+      <section id="pane-connection" data-section="connection" class="opt-pane" data-title="连接" data-desc="连接 Cairn 网页收藏库；旧令牌保留原连接。">
+        <div class="opt-section"><h2>收藏库</h2><p class="muted">新采集令牌连接 cairn.alpenl.com，旧令牌仍连接原收藏库。</p>
           <div class="card"><div class="card-row"><div class="txt"><div class="ttl">服务器</div><div class="dsc">收藏会提交到这里，再由服务处理 X 增强内容。</div></div><span class="val"><span id="server"></span><span class="tag">固定</span></span></div>
           <div class="card-row"><div class="txt"><div class="ttl">连接状态</div></div><span id="connection-state" class="val">未连接</span></div></div></div>
-        <form id="settings-form" class="opt-section"><h2>访问令牌</h2><p class="muted">在 Cairn App 的「设置 → 访问令牌」中复制。令牌只保存在当前浏览器，不参与浏览器账号同步。</p>
+        <form id="settings-form" class="opt-section"><h2>访问令牌</h2><p class="muted">在 cairn.alpenl.com「设置 → 状态与账户 → 浏览器插件」中创建。令牌只保存在当前浏览器，不参与浏览器账号同步。</p>
           <div class="card"><div class="card-block"><label for="token">更换令牌 <small>留空则重新测试当前令牌</small></label>
-            <div class="token-field"><input id="token" type="password" autocomplete="off" maxlength="512" placeholder="填写访问令牌"><button id="show-token" type="button" class="secondary" aria-label="显示访问令牌">显示</button><button id="connect" type="submit" class="primary" disabled>测试并保存</button></div>
+            <div class="token-field"><input id="token" type="password" autocomplete="off" maxlength="512" placeholder="从 cairn.alpenl.com 设置中创建采集令牌"><button id="show-token" type="button" class="secondary" aria-label="显示访问令牌">显示</button><button id="connect" type="submit" class="primary" disabled>测试并保存</button></div>
             <label id="move-pending-label" class="check" hidden><input id="move-pending" type="checkbox"><span id="move-pending-text"></span></label></div></div>
         </form>
       </section>
@@ -36,7 +36,7 @@
           <div class="card"><div id="queue" class="queue-wrap"></div></div></div>
       </section>
       <section id="pane-capture" data-section="capture" class="opt-pane" data-title="采集" data-desc="决定保存时提交哪些内容。" hidden>
-        <div class="opt-section"><h2>链接</h2><p class="muted">与 Android 保持一致。</p>
+        <div class="opt-section"><h2>链接</h2><p class="muted">新旧收藏库各自保存，不会自动迁移旧数据。</p>
           <div class="card"><label class="check"><input id="keep-full-url" type="checkbox" checked form="settings-form"><span>保留完整链接 <small>包含问号后的参数和 # 片段。修改后点「连接」页的测试并保存生效。</small></span></label></div></div>
         <div class="opt-section"><h2>快捷方式</h2>
           <div class="card"><div class="card-row"><div class="txt"><div class="ttl">打开收藏弹窗</div><div class="dsc">也可以点工具栏图标，或右键页面 / 链接。</div></div><span class="val"><kbd>Alt</kbd><kbd>Shift</kbd><kbd>C</kbd></span></div>

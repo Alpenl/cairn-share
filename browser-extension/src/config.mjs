@@ -1,4 +1,5 @@
 export const API_BASE = "https://share.alpenl.com";
+export const COLLECTOR_API_BASE = "https://cairn-go.alpenl.com/api/v1/collector";
 export const STATE_KEY = "cairn_capture_v1";
 export const RETRY_ALARM = "cairn-upload";
 export const MAX_QUEUE = 100;
@@ -40,7 +41,7 @@ export async function tokenIdentity(token) {
 
 export const ERROR_TEXT = {
   capture_not_pending: "原收藏已有正文或已变更，本次补采未覆盖。可移除此任务。",
-  batch_account: "请先完成或移除批量补采的待同步任务，再更换令牌。",
+  batch_account: "请先完成或移除已保存或带资料版本的待同步任务，再更换令牌。",
   batch_upgrade: "收藏服务尚未支持批量补采，请更新服务后重试。",
   batch_permission: "批量采集需要网站访问权限，请允许后继续。",
   batch_connection: "收藏库连接已变更，请重新开始一轮采集。",
@@ -78,7 +79,7 @@ export const ERROR_TEXT = {
   upgrade_required: "收藏服务尚未支持正文采集。内容已保存在本机，服务更新后可重试。",
   media_permission: '正文已保存；媒体站点尚未授权，请点击允许读取媒体后重试。',
   media_unavailable: '正文已保存；未取得媒体文件，请在原页面播放或展开媒体后重新采集。',
-  media_too_large: '旧版本的媒体大小检查中断了归档，请点击重试。',
+  media_too_large: '正文已保存；媒体超过当前新服务单文件 1 GiB 边界，尚未归档。',
   image_too_large: '图片超过当前图片上传接口的 16 MB 边界，尚未归档。',
   media_protected: '正文已保存；媒体受加密保护，未能归档。',
   media_live_or_unsupported: '正文已保存；媒体为直播或未能取得完整播放列表，尚未归档。',

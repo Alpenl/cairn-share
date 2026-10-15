@@ -131,7 +131,7 @@ async function loadKnown() {
 }
 
 function persistDraft() {
-  const draft = { url: $("url").value, note: $("note").value, title, client_id: operationId, collection_ids:[...selectedCollections],binding:state?.binding };
+  const draft = { url: $("url").value, note: $("note").value, title, client_id: operationId, ...(state?.server === "cairn-go.alpenl.com" && known?.saved && known.url === $("url").value ? {expected:{id:known.id,content_revision:known.content_revision,app_body_revision:known.app_body_revision,personal_revision:known.personal_revision}} : {}), collection_ids:[...selectedCollections],binding:state?.binding };
   draftWrites = draftWrites.catch(() => {}).then(() => ext.storage.local.set({ [DRAFT_KEY]: draft }))
     .catch(() => { throw new CaptureError("storage"); });
   return draftWrites;
@@ -200,7 +200,7 @@ $("capture-form").addEventListener("submit", async (event) => {
     // this page's media hosts and prepared before the button becomes active.
     if ($("capture-page").checked && $("url").value===activeTab?.url && requestedOrigins.length) await ext.permissions.request({origins:requestedOrigins});
     await persistDraft();
-    const capture = { url: $("url").value, note: $("note").value, title, client_id: operationId, collection_ids:[...selectedCollections],binding:state?.binding };
+    const capture = { url: $("url").value, note: $("note").value, title, client_id: operationId, ...(state?.server === "cairn-go.alpenl.com" && known?.saved && known.url === $("url").value ? {expected:{id:known.id,content_revision:known.content_revision,app_body_revision:known.app_body_revision,personal_revision:known.personal_revision}} : {}), collection_ids:[...selectedCollections],binding:state?.binding };
     await send("save", { capture, tabId: activeTab?.id, capturePage: $("capture-page").checked && capture.url === activeTab?.url });
     await draftWrites;
     await ext.storage.local.remove(DRAFT_KEY);
