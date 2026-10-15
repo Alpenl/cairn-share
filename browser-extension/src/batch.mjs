@@ -1,4 +1,4 @@
-import { CaptureError, STATE_KEY, MAX_QUEUE, tokenIdentity } from './config.mjs';
+import { CaptureError, STATE_KEY, MAX_QUEUE, connectionIdentity } from './config.mjs';
 import { captureTab } from './capture.mjs';
 
 export const BATCH_KEY = 'cairn_batch_v1';
@@ -31,7 +31,7 @@ export function probePage() {
   return {url:location.href,valid,signature:`${content.length}:${hash}`,ready:document.readyState !== 'loading'};
 }
 
-export function createBatch({ext,controller,client,capture=captureTab,now=Date.now,schedule=fn=>setTimeout(fn,1500),probe=async id => {
+export function createBatch({ext,controller,client,clientFor=()=>client,capture=captureTab,now=Date.now,schedule=fn=>setTimeout(fn,1500),probe=async id => {
   const [{result}] = await ext.scripting.executeScript({target:{tabId:id},func:probePage});
   return result;
 }}) {
@@ -47,8 +47,8 @@ export function createBatch({ext,controller,client,capture=captureTab,now=Date.n
   async function credentials(binding) {
     const settings=(await ext.storage.local.get(STATE_KEY))[STATE_KEY]?.settings;
     if(!settings?.token)throw new CaptureError('not_configured');
-    if(await tokenIdentity(settings.token)!==binding)throw new CaptureError('batch_connection');
-    return settings.token;
+    if(await connectionIdentity(settings)!==binding)throw new CaptureError('batch_connection');
+    return settings;
   }
   async function closeOwned(id) {
     if(!id)return;
@@ -86,7 +86,8 @@ export function createBatch({ext,controller,client,capture=captureTab,now=Date.n
   async function step() {
     const s=await read();if(s.status!=='running')return;
     if(!(await ext.storage.session.get('cairn_batch_session')).cairn_batch_session){await pause('batch_restart');return;}
-    const token=await credentials(s.binding);
+    const settings=await credentials(s.binding);
+    const token=settings.token, client=clientFor(settings);
     if(!(await ext.permissions.contains({origins:BATCH_ORIGINS})))throw new CaptureError('batch_permission');
     if(!s.listed){
       const page=await client.pending(token,`?after=${s.after}${s.upper===null?'':`&upper=${s.upper}`}`);

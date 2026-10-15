@@ -53,7 +53,8 @@ export function createAuth({ identity, fetchImpl = fetch, base = AUTH_API_BASE, 
     try { returned = await identity.launchWebAuthFlow({ url: `${base}/${provider}/start?${query}`, interactive: true }); }
     catch { throw new CaptureError("sign_in_cancelled"); }
     const result = new URL(returned);
-    if (!returned.startsWith(redirectUri) || result.searchParams.get("state") !== state) throw new CaptureError("sign_in_expired");
+    const expected = new URL(redirectUri);
+    if (result.origin !== expected.origin || result.pathname !== expected.pathname || result.hash || result.searchParams.get("state") !== state) throw new CaptureError("sign_in_expired");
     const error = result.searchParams.get("error");
     if (error) throw new CaptureError(`sign_in_${SIGN_IN_FAILURES.has(error) ? error : "failed"}`);
     const credential = await call("/extension/token", {
