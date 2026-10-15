@@ -10,7 +10,7 @@ test("browser manifests use minimal permissions and native MV3 backgrounds", () 
   const chrome = manifest("chrome", "0.1.0");
   const firefox = manifest("firefox", "0.1.0");
   assert.deepEqual(chrome.host_permissions, ["https://share.alpenl.com/*", "https://cairn-go.alpenl.com/*"]);
-  assert.deepEqual(chrome.permissions, ["activeTab", "storage", "unlimitedStorage", "scripting", "contextMenus", "alarms"]);
+  assert.deepEqual(chrome.permissions, ["activeTab", "storage", "unlimitedStorage", "scripting", "contextMenus", "alarms", "identity"]);
   assert.equal(chrome.background.service_worker, "background.mjs");
   assert.deepEqual(firefox.background.scripts, ["background.mjs"]);
   assert.equal(chrome.content_scripts, undefined);

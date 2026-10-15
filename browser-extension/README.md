@@ -28,6 +28,14 @@ Firefox：`dist/cairn-firefox-0.8.0.zip` 可用于临时调试安装；长期安
 
 权限和数据处理见 [PRIVACY.md](PRIVACY.md)。
 
+## 未发布：GitHub 登录
+
+- 设置页「连接」在令牌输入框上方显示收藏库提供的第三方登录（目前是 GitHub）。点「使用 GitHub 登录」后在浏览器授权窗口完成登录，插件自动取得采集令牌，不必再到网页手动创建和粘贴；粘贴令牌照旧可用。
+- 流程：插件生成 state 与 PKCE 校验串 → 收藏库 `/api/v1/auth/github/start?client=extension` → GitHub → 收藏库回调 → 带一次性授权码跳回 `identity.getRedirectURL()` → `POST /api/v1/auth/extension/token` 兑换 `cairn_c_` 令牌 → 走与粘贴令牌相同的测试并保存。授权码 2 分钟内只能用一次，必须配合本机的校验串。
+- 只有登录账号在服务端 `CAIRN_AUTH_OWNERS` 中才会成功；取消授权、非所有者、过期会分别提示。待同步队列的换号规则与粘贴令牌一致，并在打开授权窗口之前检查，避免生成用不上的令牌。
+- 服务端需把插件回调地址加入 `CAIRN_EXTENSION_REDIRECTS`；未加入时连接处不显示登录按钮，「更多 → 登录回调地址」会显示需要登记的地址。Chrome 的地址取决于扩展 ID，解压安装时请固定安装目录（或在 manifest 中设置 key）。
+- 新增 `identity` 权限（Chrome 不额外提示）。登录提供方由收藏库决定，插件在 `src/auth.mjs` 的 `AUTH_PROVIDERS` 中登记名称和图标；以后加 Google 只需在服务端开启并在这里加一项。
+
 ## 0.8.0 标签与设置改版
 
 - 弹窗在「合集」和「收藏原因」之间新增「标签」：第一次打开从收藏库拉取标签目录，连同词表版本存进本机 `storage.local`；之后直接读本机缓存，再只比对一次版本（`If-None-Match`，未变化时服务器回 304）。
