@@ -29,7 +29,13 @@ function draw() {
     const info=document.createElement('small');info.textContent=task.status==='skipped'?'原收藏已删除、已有正文或已变更，自动跳过。':task.error?errorText(task.error):task.title?task.url:'';
     row.append(link,label,info);rows.push(row);
   }
-  if(!rows.length){const empty=document.createElement('p');empty.className='muted batch-empty';empty.textContent=state.status==='done'?'没有需要补采的收藏。':'尚未开始';rows.push(empty);}
+  if(!rows.length){
+    const [title,hint]=state.status==='done'?['没有需要补采的收藏','收藏库里的链接都已有正文。']:['尚未开始','点击「一键采集所有待办」扫描所有缺少正文的收藏。'];
+    const empty=document.createElement('div');empty.className='batch-empty';
+    const ttl=document.createElement('div');ttl.className='ttl';ttl.textContent=title;
+    const dsc=document.createElement('div');dsc.className='dsc';dsc.textContent=hint;
+    empty.append(ttl,dsc);rows.push(empty);
+  }
   $('tasks').replaceChildren(...rows);$('more').hidden=visible>=tasks.length;
 }
 async function refresh(){
