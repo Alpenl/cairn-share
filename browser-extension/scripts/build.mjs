@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {build as bundle} from "esbuild";
 import JSZip from "jszip";
-import { API_BASE } from "../src/config.mjs";
+import { API_BASE, COLLECTOR_API_BASE } from "../src/config.mjs";
 
 export const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -13,11 +13,11 @@ export function manifest(browser, version, apiBase = API_BASE) {
     manifest_version: 3,
     name: "Cairn 收藏",
     version,
-    description: "从当前网页保存正文、图片、链接与备注，与 Cairn Android 和 X 增强共用收藏库。",
+    description: "从当前网页保存正文、图片、链接与备注，保存后立即阅读；后端独立生成摘要与标签。",
     icons: { 16: "icons/16.png", 48: "icons/48.png", 128: "icons/128.png" },
     action: { default_title: "收藏到 Cairn", default_popup: "popup.html", default_icon: { 16: "icons/16.png", 48: "icons/48.png" } },
     permissions: ["activeTab", "storage", "unlimitedStorage", "scripting", "contextMenus", "alarms"],
-    host_permissions: [`${endpoint.protocol}//${endpoint.hostname}/*`],
+    host_permissions: [...new Set([`${endpoint.protocol}//${endpoint.hostname}/*`, ...(apiBase === API_BASE ? [`${new URL(COLLECTOR_API_BASE).origin}/*`] : [])])],
     optional_host_permissions: ["http://*/*", "https://*/*"],
     options_ui: { page: "options.html", open_in_tab: true },
     commands: { _execute_action: { suggested_key: { default: "Alt+Shift+C" } } },
@@ -79,7 +79,7 @@ export async function build({ outputRoot = join(projectRoot, "dist"), apiBase = 
     if (apiBase !== API_BASE) {
       const configPath = join(folder, "config.mjs");
       const source = await readFile(configPath, "utf8");
-      await writeFile(configPath, source.replace(JSON.stringify(API_BASE), JSON.stringify(apiBase)));
+      await writeFile(configPath, source.replace(JSON.stringify(API_BASE), JSON.stringify(apiBase)).replace(JSON.stringify(COLLECTOR_API_BASE), JSON.stringify(`${apiBase}/api/v1/collector`)));
     }
     await writeFile(join(folder, "manifest.json"), `${JSON.stringify(manifest(browser, pkg.version, apiBase), null, 2)}\n`);
     await cp(join(projectRoot, "..", "LICENSE"), join(folder, "LICENSE"));

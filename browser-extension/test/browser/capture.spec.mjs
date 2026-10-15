@@ -317,3 +317,39 @@ test('upgrades a 0.4.0 base64 queue durably and retries only the missing image',
  expect(posts.filter(p=>p.client_id===id)).toHaveLength(1);expect(imageRequests.filter(k=>k===id+':0')).toHaveLength(1);expect(imageUploads.get(id+':1').bytes).toEqual(picture);
  await options.close();
 });
+
+test('new capture token selects Go protocol, stores clean text and reports the correct library',async()=>{
+  const token='cairn_c_'+'b'.repeat(64),goPosts=[];
+  const goServer=createServer(async(req,res)=>{
+    if(req.headers.authorization!==`Bearer ${token}`){res.writeHead(401);res.end();return;}
+    const ok=data=>{res.setHeader('Content-Type','application/json');res.setHeader('X-Cairn-Collections','1');res.end(JSON.stringify({code:'OK',data}));};
+    if(req.method==='GET')return ok({items:[],saved:false});
+    let raw='';for await(const part of req)raw+=part;
+    const body=JSON.parse(raw);goPosts.push({path:req.url,body});
+    return ok(req.url.endsWith('/media')?{registered:true}:{id:900,url:body.url,note:body.note,completed:true,reuse_existing:true});
+  });
+  await new Promise(r=>goServer.listen(0,'127.0.0.1',r));
+  const savedConfig=await readFile(join(root,'build/chrome/config.mjs'),'utf8');
+  const captureToken='cairn_c_'+'b'.repeat(64);
+  const goPage=await context.newPage();await goPage.goto(`${extensionURL}/options.html`);
+  try{
+    // This fixture changes only the generated loopback build. It never contacts
+    // production; the extension's actual Go client and durable controller run.
+    await goPage.evaluate(async({token,port})=>{
+      const {createClient}=await import('./api.mjs');
+      const {createController}=await import('./controller.mjs');
+      let state;
+      const controller=createController({store:{read:async()=>state,write:async s=>{state=structuredClone(s)}},client:createClient({collectorBase:`http://127.0.0.1:${port}/api/v1/collector`})});
+      await controller.saveSettings({token,keepFullUrl:true});
+      await controller.enqueue({client_id:crypto.randomUUID(),url:'https://example.test/new#body',capture:{protocol:2,text:'Clean **original**',title:'Capture title',images:[],media:[]}});
+      await controller.flush();
+      const snap=await controller.snapshot();
+      if(snap.server!=='cairn-go.alpenl.com'||snap.queue.length||snap.lastResult.status!=='uploaded')throw new Error('Go upload not completed');
+      if(JSON.stringify(snap).includes(token))throw new Error('snapshot leaked token');
+    },{token:captureToken,port:goServer.address().port});
+    expect(goPosts).toHaveLength(1);
+    expect(goPosts[0].path).toBe('/api/v1/collector/captures/v2');
+    expect(goPosts[0].body.capture.text).toBe('Clean **original**');
+    expect(savedConfig).not.toContain('https://cairn-go.alpenl.com');
+  }finally{await goPage.close();goServer.closeAllConnections();await new Promise(r=>goServer.close(r));}
+});

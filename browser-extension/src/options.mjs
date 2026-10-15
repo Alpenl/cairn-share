@@ -1,9 +1,9 @@
-import { API_BASE, STATE_KEY } from "./config.mjs";
+import { STATE_KEY } from "./config.mjs";
 import { $, ext, renderQueue, send, showError, status } from "./ui.mjs";
 
 let state;
 let initialized = false;
-$("server").textContent = new URL(API_BASE).host;
+$("server").textContent = "cairn-go.alpenl.com";
 $("version").textContent = ext.runtime.getManifest().version;
 $("show-token").addEventListener("click", () => {
   const show = $("token").type === "password";
@@ -21,9 +21,10 @@ async function refresh() {
   $("move-pending-text").textContent = `更换令牌时，用新令牌上传这 ${state.queue.length} 条待同步收藏`;
   $("nav-pending").hidden = !state.queue.length;
   $("nav-pending").textContent = String(state.queue.length);
+  $("server").textContent = state.configured ? state.server : "cairn-go.alpenl.com";
   const ok = state.configured;
   $("svc").classList.toggle("ok", ok);
-  $("svc-text").textContent = ok ? `已连接 ${new URL(API_BASE).host}` : "未连接";
+  $("svc-text").textContent = ok ? `已连接 ${state.server}` : "未连接";
   $("connection-state").textContent = ok ? `已连接${state.binding ? ` · 令牌指纹 ${state.binding.slice(0, 8)}` : ""}` : "未连接";
   renderQueue($("queue"), state.queue, refresh, (error) => showError($("status"), error), "所有收藏已同步。");
 }
