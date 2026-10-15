@@ -20,6 +20,8 @@
 .batch-task [data-status="failed"] { color: var(--danger); } .batch-task [data-status="failed"]::before { background: var(--terracotta); }
 .batch-task [data-status="captured"] { color: var(--olive-ink); } .batch-task [data-status="captured"]::before { background: var(--olive); }
 .batch-task [data-status="capturing"]::before, .batch-task [data-status="opening"]::before { background: var(--clay); }
-.batch-empty { padding: 14px 0; }
+.batch-empty { padding: 12px 0 10px; }
+.batch-empty .ttl { font-size: 14px; font-weight: 500; color: var(--ink); }
+.batch-empty .dsc { margin-top: 2px; font-size: 12px; line-height: 1.5; color: var(--tertiary); }
 .batch .set-group > .muted { margin-top: -4px; }
 .batch #more { align-self: flex-start; }
