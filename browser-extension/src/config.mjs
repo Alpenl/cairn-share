@@ -5,6 +5,7 @@ export const RETRY_ALARM = "cairn-upload";
 export const MAX_QUEUE = 100;
 export const MAX_URL = 8192;
 export const MAX_NOTE = 2000;
+export const MAX_TAGS = 20;
 
 export class CaptureError extends Error {
   constructor(kind) {
@@ -56,6 +57,7 @@ export const ERROR_TEXT = {
   collection_deleted:"收藏已保存；选中的合集已归档或删除，请在网页/APP核对。",
   collection_limit:"收藏已保存；合集容量已满，请在网页/APP调整。",
   invalid_collection:"合集选择无效，请重新打开插件。",
+  invalid_tags:"标签选择无效，请刷新标签后重新选择。",
   collections_unsupported:"收藏已保存；服务尚未支持合集，请更新后重试。",
   not_configured: "请先在设置中填写访问令牌。",
   invalid_url: "请填写完整的 HTTP(S) 链接，不能包含用户名或密码。",

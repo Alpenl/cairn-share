@@ -4,7 +4,7 @@ import { API_BASE, COLLECTOR_API_BASE, CaptureError } from "./config.mjs";
 import { localMedia, mediaDigest, forgetMedia } from './media.mjs';
 
 export function createClient({ fetchImpl = fetch, apiBase = API_BASE, collectorBase = COLLECTOR_API_BASE, timeoutMs = 10000 } = {}) {
-  async function request(token, path, body, {method,raw=false,collections=false,missing=false,stage} = {}) {
+  async function request(token, path, body, {method,raw=false,collections=false,missing=false,stage,etag} = {}) {
     if (!token) throw new CaptureError("not_configured");
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), raw ? 25000 : timeoutMs);
@@ -13,7 +13,7 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, collectorB
       const endpoint = go ? `${collectorBase}${path.replace(/^\/api/, "")}` : `${apiBase}${path}`;
       const response = await fetchImpl(endpoint, {
         method: method || (body ? "POST" : "GET"),
-        headers: { ...(collections ? {"X-Cairn-Collections":"1"} : {}), Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": raw ? 'application/octet-stream' : "application/json" } : {}) },
+        headers: { ...(collections ? {"X-Cairn-Collections":"1"} : {}), ...(etag ? {"If-None-Match":etag} : {}), Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": raw ? 'application/octet-stream' : "application/json" } : {}) },
         ...(body ? { body: raw ? body : JSON.stringify(body) } : {}),
         credentials: "omit",
         cache: "no-store",
@@ -22,17 +22,19 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, collectorB
       });
       if (path.startsWith("/api/captures/v2/pending") && response.status===404) throw new CaptureError("batch_upgrade");
       if (missing && response.status===404) return null;
+      if (etag && response.status===304) return {notModified:true};
       if ((path === "/api/captures" || path === "/api/captures/v2") && response.status === 404) throw new CaptureError("upgrade_required");
       if (response.status === 401 || response.status === 403) throw new CaptureError("invalid_token");
       if (response.status >= 500 || response.status === 429) throw new CaptureError("server");
       if (!response.ok) {
         const data = await response.json().catch(() => null);
-        const kind = ["capture_not_pending","revision_conflict","collection_deleted","collection_limit","invalid_collection","collections_unsupported","invalid_image","capture_incomplete","invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete",'media_stale','media_conflict','invalid_media','media_incomplete','media_too_large'].includes((data?.error || data?.code)) ? (data.error || data.code) : "response";
+        const kind = ["invalid_tags","capture_not_pending","revision_conflict","collection_deleted","collection_limit","invalid_collection","collections_unsupported","invalid_image","capture_incomplete","invalid_url", "invalid_note", "invalid_client_id", "invalid_capture", "capture_conflict", "capture_deleted", "capture_images_incomplete",'media_stale','media_conflict','invalid_media','media_incomplete','media_too_large'].includes((data?.error || data?.code)) ? (data.error || data.code) : "response";
         throw new CaptureError(kind);
       }
       if(collections && response.headers.get("X-Cairn-Collections")!=="1") throw new CaptureError("collections_unsupported");
       const data = await response.json().catch(() => { throw new CaptureError("response"); });
       if (go && data.code !== "OK") throw new CaptureError("response");
+      if (etag !== undefined) return {data:go ? data.data : data, etag:response.headers.get("ETag") || ""};
       return go ? data.data : data;
     } catch (error) {
       const failure=error instanceof CaptureError?error:new CaptureError(abort.signal.aborted ? "timeout" : "network");
@@ -53,6 +55,17 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, collectorB
     // Already-saved lookup. Older Workers answer 404; the popup then simply
     // shows no badge.
     async lookup(token,url){const data=await request(token,`/api/links/lookup?url=${encodeURIComponent(url)}`,null,{missing:true});if(data===null)return null;if(typeof data?.saved!=="boolean")throw new CaptureError("response");return data;},
+    // Tag catalog for the popup's tag cloud. Only the Go collector has one;
+    // legacy tokens and older Go servers answer null and the section stays hidden.
+    async tags(token,etag=""){
+      if(!token?.startsWith("cairn_c_"))return null;
+      const result=await request(token,"/api/tags",null,{missing:true,etag});
+      if(result===null||result.notModified)return result;
+      const {data}=result;
+      const valid=Number.isSafeInteger(data?.catalog_version)&&Array.isArray(data.dimensions)&&data.dimensions.every(d=>typeof d?.id==="string"&&typeof d.label==="string"&&Array.isArray(d.tags)&&d.tags.every(t=>typeof t?.tag_ref==="string"&&typeof t.label==="string"&&Number.isFinite(t.count)));
+      if(!valid)throw new CaptureError("response");
+      return {catalog:data,etag:result.etag};
+    },
     async addCollection(token,id,body){return request(token,`/api/collections/${id}/operations`,body,{collections:true});},
     async test(token) {
       const data = await request(token, "/api/links?limit=1");
@@ -66,9 +79,9 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, collectorB
       if(v2){
         if(job.attempts || data)data=await request(token,base,null,{missing:true,stage:'text'});
         if(!data || data.completed===false){
-          data=await request(token,'/api/captures/v2',{url:job.url,note:job.note,client_id:job.client_id,capture:job.capture,...(job.target?{target:job.target}:{}),...(job.expected?{expected:job.expected}:{}),...(!token.startsWith("cairn_c_") && job.legacyHash?{legacy_hash:job.legacyHash}:{})},{stage:'text'});
+          data=await request(token,'/api/captures/v2',{url:job.url,note:job.note,client_id:job.client_id,capture:job.capture,...(job.tag_refs?.length?{tag_refs:job.tag_refs}:{}),...(job.target?{target:job.target}:{}),...(job.expected?{expected:job.expected}:{}),...(!token.startsWith("cairn_c_") && job.legacyHash?{legacy_hash:job.legacyHash}:{})},{stage:'text'});
         }
-      }else if(!data)data=await request(token,'/api/links',{url:job.url,note:job.note,...(token.startsWith("cairn_c_")?{title:job.title,...(job.expected?{expected:job.expected}:{})}:{}),client_id:job.client_id},{stage:'text'});
+      }else if(!data)data=await request(token,'/api/links',{url:job.url,note:job.note,...(token.startsWith("cairn_c_")?{title:job.title,...(job.expected?{expected:job.expected}:{}),...(job.tag_refs?.length?{tag_refs:job.tag_refs}:{})}:{}),client_id:job.client_id},{stage:'text'});
       if (!Number.isSafeInteger(data?.id) || data.id<1 || data.url!==job.url || data.note!==job.note || (job.target && data.id!==job.target.id)) throw new CaptureError('response');
       if(data.reuse_existing)return data;
       if(v2){

@@ -5,6 +5,7 @@ import { createClient } from "./api.mjs";
 import { createController } from "./controller.mjs";
 import { pruneMedia,forgetMedia } from './media.mjs';
 import { createBatch, BATCH_ALARM } from './batch.mjs';
+import { createTagSync } from './tags.mjs';
 
 const ext = globalThis.browser ?? chrome;
 const client = createClient();
@@ -31,6 +32,7 @@ const controller = createController({
   }
 });
 const batch = createBatch({ext,controller,client});
+const tagSync = createTagSync({ storage: ext.storage.local, controller });
 
 async function ensureAlarm() {
   if (!(await ext.alarms.get(RETRY_ALARM))) await ext.alarms.create(RETRY_ALARM, { periodInMinutes: 1 });
@@ -58,6 +60,9 @@ async function dispatch(message) {
     case "batch-pause": return batch.pause();
     case "collections": return controller.collections();
     case "lookup": return controller.lookup(message.url);
+    case "tags-sync": return tagSync.sync(message.mode === "check" ? "check" : "refresh");
+    case "tags-clear": return tagSync.clear();
+    case "preferences": return controller.savePreferences(message.preferences);
     case "save": {
       const capture = message.capture;
       const known = await controller.snapshot();
