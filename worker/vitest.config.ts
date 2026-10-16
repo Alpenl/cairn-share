@@ -22,7 +22,9 @@ export default defineConfig(async () => {
       })
     ],
     test: {
-      globals: false
+      globals: false,
+      // Bound concurrent D1/R2 integration fixtures on developer and CI hosts.
+      maxWorkers: 4
     }
   };
 });
