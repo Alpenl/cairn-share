@@ -130,12 +130,21 @@ class CurationWorkerRecoveryTest {
         withContext(Dispatchers.Main) {
             model.applyV2Action(id, "topics", "ai_coding", "accept")
             model.applyV2Action(id, "topics", "ai_coding", "reject")
+            model.applyV2Action(id, "carriers", "single", "accept")
             model.applyV2Action(id, "carriers", "external_article", "accept")
+            model.applyV2Action(id, "carriers", "single", "accept")
             model.applyV2Action(id, "affordances", "", "set_empty")
             model.applyV2Action(id, "topics", "", "reset")
         }
-        waitFor { store.snapshot().size == 5 && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() } }
+        waitFor { store.snapshot().size == 7 && withContext(Dispatchers.Main) { model.uiState.v2Busy.isEmpty() } }
         val queued = store.snapshot()
+        assertEquals(7, queued.map { it.operationKey }.distinct().size)
+        assertEquals(listOf("single", "external_article", "single"),
+            queued.filter { it.field == "carriers" }.map { it.term })
+        withContext(Dispatchers.Main) {
+            assertEquals("the offline single-value draft replaces rather than accumulates",
+                listOf("single"), model.uiState.v2Drafts.getValue(id).carriers)
+        }
         assertEquals(0L, queued.first().expectedRevision)
         queued.zipWithNext().forEach { (parent, child) ->
             assertEquals(parent.operationKey, child.predecessorKey)
@@ -157,7 +166,7 @@ class CurationWorkerRecoveryTest {
     @Test fun recoverThenHandleTwoRealConflictsAndMidChainFailure() = runBlocking<Unit> {
         assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
         val original = store.snapshot().filter { it.accountKey == account }
-        assertEquals(5, original.size)
+        assertEquals(7, original.size)
         val id = original.first().linkId
         val second = original[1].operationKey
         val third = original[2].operationKey
@@ -165,7 +174,7 @@ class CurationWorkerRecoveryTest {
         val model = start() // Normal startup retries its persisted queue.
         waitFor { store.snapshot().any { it.operationKey == second && it.conflictRevision == 2L } }
         val remaining = store.snapshot().filter { it.accountKey == account }
-        assertEquals(4, remaining.size)
+        assertEquals(6, remaining.size)
         assertEquals(1L, remaining.first().expectedRevision)
         assertEquals(1L, remaining.first().predecessorRevision)
         waitFor { withContext(Dispatchers.Main) { model.uiState.v2Conflicts[id] == 2L && model.uiState.v2Drafts.containsKey(id) } }
@@ -178,7 +187,7 @@ class CurationWorkerRecoveryTest {
         waitFor { withContext(Dispatchers.Main) { model.uiState.v2Conflicts[id] == 3L } }
         control("fail_key", third)
         withContext(Dispatchers.Main) { model.reapplyV2Draft(id) }
-        waitFor { store.snapshot().filter { it.accountKey == account }.size == 3 }
+        waitFor { store.snapshot().filter { it.accountKey == account }.size == 5 }
         waitFor { withContext(Dispatchers.Main) { model.uiState.message?.text?.contains("网络不可用") == true } }
         val stopped = store.snapshot().filter { it.accountKey == account }
         assertEquals(third, stopped.first().operationKey)
@@ -191,13 +200,22 @@ class CurationWorkerRecoveryTest {
         withContext(Dispatchers.Main) { model.flushV2Queue() }
         waitFor { store.snapshot().none { it.accountKey == account } }
         val final = remote(id)
-        assertEquals(7L, final.getLong("revision")) // Five intents plus two independent writes.
+        assertEquals(9L, final.getLong("revision")) // Seven intents plus two independent writes.
         val selection = final.getJSONObject("selection")
         assertEquals(0, selection.getJSONArray("topics").length())
-        assertEquals("external_article", selection.getJSONArray("carriers").getString(0))
+        assertEquals(1, selection.getJSONArray("carriers").length())
+        assertEquals("single", selection.getJSONArray("carriers").getString(0))
         assertEquals(0, selection.getJSONArray("affordances").length())
         assertEquals("foreign-account-action", store.snapshot().single().operationKey)
         waitFor { withContext(Dispatchers.Main) { !model.uiState.v2Drafts.containsKey(id) && !model.uiState.v2Conflicts.containsKey(id) } }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Selections[id]?.revision == 9L } }
+        withContext(Dispatchers.Main) {
+            val confirmed = model.uiState.v2Selections.getValue(id)
+            assertEquals("the confirmed App state agrees with the real Worker, without an offline draft",
+                listOf("single"), confirmed.carriers)
+            assertTrue(confirmed.topics.isEmpty())
+            assertTrue(confirmed.affordances.isEmpty())
+        }
         val calls = http("/__test/control").getJSONArray("requests")
         val sent = (0 until calls.length()).map { calls.getJSONObject(it) }
         assertTrue(sent.none { it.getString("operation_key") == "foreign-account-action" })
