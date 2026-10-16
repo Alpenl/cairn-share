@@ -123,12 +123,61 @@ async function pruneOldRuns(env: HistoryRetentionEnv, cutoff: string, now: strin
   return result[1].results.length;
 }
 
+// Entity receipts use string operation keys, unlike the numeric run/event
+// cursors. Keep the persisted walk independent so a full protected page cannot
+// starve eligible history after it. Unknown legacy receipts remain intact.
+async function pruneEntityOperations(env: HistoryRetentionEnv, cutoff: string, now: string): Promise<void> {
+  const key = "live_entity_operations";
+  const raw = await env.DB.prepare("SELECT cursor FROM privacy_maintenance_state WHERE key=?")
+    .bind(key).first<string>("cursor");
+  let cursor: { operation_key: string; created_at: string } | null = null;
+  try {
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const value = parsed as Record<string, unknown>;
+      if (typeof value.operation_key === "string" && value.operation_key.length > 0 && typeof value.created_at === "string") {
+        cursor = { operation_key: value.operation_key, created_at: value.created_at };
+      }
+    }
+  } catch { /* damaged maintenance cursor restarts the bounded walk */ }
+  const rows = await env.DB.prepare(`SELECT operation_key,created_at FROM entity_operations WHERE created_at<?
+      ${cursor ? "AND (created_at,operation_key)>(?,?)" : ""}
+      ORDER BY created_at,operation_key LIMIT ${PAGE_SIZE}`)
+    .bind(cutoff, ...(cursor ? [cursor.created_at, cursor.operation_key] : []))
+    .all<{ operation_key: string; created_at: string }>();
+  if (rows.results.length === 0) {
+    if (cursor) await env.DB.prepare("UPDATE privacy_maintenance_state SET cursor='' WHERE key=?").bind(key).run();
+    return;
+  }
+  const last = rows.results[rows.results.length - 1];
+  const next = rows.results.length < PAGE_SIZE ? "" : JSON.stringify(last);
+  const keys = JSON.stringify(rows.results.map(row => row.operation_key));
+  // Recheck authority inside the same transaction as compaction, not just in
+  // the candidate read: an entity result may become current before this batch.
+  const eligible = `operation_key IN (SELECT value FROM json_each(?)) AND created_at<?
+    AND applied=1 AND outcome IN ('stored','ignored_stale')
+    AND length(request_hash)=64 AND request_hash NOT GLOB '*[^0-9a-f]*'
+    AND NOT EXISTS (SELECT 1 FROM entity_states WHERE operation_key=entity_operations.operation_key)`;
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO entity_operation_tombstones(operation_key,link_id,request_hash,
+      content_revision,outcome,created_at,expired_at)
+      SELECT operation_key,link_id,request_hash,content_revision,outcome,created_at,?
+      FROM entity_operations WHERE ${eligible}`).bind(now, keys, cutoff),
+    env.DB.prepare(`DELETE FROM entity_operations WHERE ${eligible}
+      AND EXISTS (SELECT 1 FROM entity_operation_tombstones WHERE operation_key=entity_operations.operation_key)`)
+      .bind(keys, cutoff),
+    env.DB.prepare(`INSERT INTO privacy_maintenance_state(key,cursor) VALUES (?,?)
+      ON CONFLICT(key) DO UPDATE SET cursor=excluded.cursor`).bind(key, next)
+  ]);
+}
+
 export async function pruneLiveHistory(env: HistoryRetentionEnv, now = Date.now()): Promise<{ events: number; snapshots: number; runs: number }> {
   const cutoff = new Date(now - retentionDays(env.HISTORY_RETENTION_DAYS) * DAY_MS).toISOString();
   const events = await prunePage(env, "live_events", "curation_events", cutoff, "");
   const reuseBackfilled = await backfillRunReuse(env);
   if (reuseBackfilled) await archiveOldRunPayloads(env, cutoff, new Date(now).toISOString());
   const runs = reuseBackfilled ? await pruneOldRuns(env, cutoff, new Date(now).toISOString()) : 0;
+  await pruneEntityOperations(env, cutoff, new Date(now).toISOString());
   const snapshots = await prunePage(env, "live_snapshots", "evidence_snapshots", cutoff, `
     AND content_revision<>(SELECT content_revision FROM links WHERE id=evidence_snapshots.link_id)
     AND NOT EXISTS (SELECT 1 FROM classification_runs WHERE evidence_snapshot_id=evidence_snapshots.id)

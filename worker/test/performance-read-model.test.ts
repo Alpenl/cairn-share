@@ -139,11 +139,13 @@ it("transactionally materializes current entity terms and handles human reset, s
 
 it("backfills old sources and human entity assertions and updates documents under outer UPSERT policies", async () => {
   await reset();
-  await applyD1Migrations(env.DB,env.TEST_MIGRATIONS.slice(0,-1));
+  const boundary = env.TEST_MIGRATIONS.findIndex(migration => migration.name.startsWith("0051_"));
+  expect(boundary).toBeGreaterThan(0);
+  await applyD1Migrations(env.DB,env.TEST_MIGRATIONS.slice(0,boundary));
   await seed(1,"old 中文 source");
   await env.DB.prepare("INSERT INTO curation_overrides(link_id,field,term,action,source,revision,operation_key,created_at) VALUES(1,'entities','HumanEntity','accept','human',1,'legacy','t')").run();
   const before = await env.DB.prepare("SELECT original_text,personal_revision FROM links WHERE id=1").first();
-  await applyD1Migrations(env.DB,env.TEST_MIGRATIONS.slice(-1));
+  await applyD1Migrations(env.DB,env.TEST_MIGRATIONS.slice(boundary));
   expect(await env.DB.prepare("SELECT original_text,personal_revision FROM links WHERE id=1").first()).toEqual(before);
   expect((await env.DB.prepare("SELECT term FROM effective_entity_memberships WHERE link_id=1").all()).results).toEqual([{term:"HumanEntity"}]);
   await env.DB.prepare(`INSERT INTO links(id,url,note,created_at,original_text) VALUES(1,'https://example.com/1','','t','new 写真 source')
