@@ -104,9 +104,13 @@ class TopicNavigationInstrumentedTest {
                 assertTrue(pins.getStringSet("pins:${accountKeyFor(base, "another-account")}", emptySet()).orEmpty().isEmpty())
                 compose.onNodeWithTag("manage_topic_pins").performScrollTo().performClick()
                 compose.onNodeWithTag("topic_search").performScrollTo().performTextClearance()
+                waitTag("filter_topics_image_creation")
                 compose.onNodeWithTag("filter_topics_image_creation").performScrollTo().performClick()
+                waitTag("filter_topics_design")
                 compose.onNodeWithTag("filter_topics_design").performScrollTo().performClick()
+                waitTag("filter_topics_portrait")
                 compose.onNodeWithTag("filter_topics_portrait").performScrollTo().performClick()
+                waitTag("filter_topic_refinements_portrait")
                 compose.onNodeWithTag("filter_topic_refinements_portrait").performScrollTo().performClick()
                 compose.waitUntil(15_000) { requests.any { it.startsWith("/api/links?") && it.contains("topics=image_creation%2Cdesign") && it.contains("topic_refinements=portrait") } }
                 assertFalse(requests.last { it.startsWith("/api/links?") }.contains("topics_mode=all"))

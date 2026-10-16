@@ -186,6 +186,7 @@ class AndroidUiRedesignInstrumentedTest {
     }
 
     private fun systemBack() {
+        compose.waitForIdle()
         backDiagnostic("before-system-back")
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         // A dismissed dialog can still own the native window while Compose is already idle.
