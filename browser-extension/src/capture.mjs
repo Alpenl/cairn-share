@@ -1,8 +1,14 @@
 import {keepImageFallback} from './images.mjs';
+import {PREFS_KEY} from './tags.mjs';
 // Parsing libraries run only after the user invokes capture/preview.
-export function extractPage(expectedURL, preview=false) {
+export function extractPage(expectedURL, preview=false, options={}) {
  if(typeof globalThis.__cairnExtractPage!=="function")throw new Error("capture_unavailable");
- return globalThis.__cairnExtractPage(expectedURL,preview);
+ return globalThis.__cairnExtractPage(expectedURL,preview,options);
+}
+// The settings switch 「采集评论区」; comments are kept unless it is off.
+export async function captureOptions(ext){
+ try{return {comments:(await ext.storage.local.get(PREFS_KEY))[PREFS_KEY]?.captureComments!==false};}
+ catch{return {comments:true};}
 }
 async function prepareExtractor(ext,tabId){
  await ext.scripting.executeScript({target:{tabId},files:["capture-extractor.js"]});
@@ -10,7 +16,7 @@ async function prepareExtractor(ext,tabId){
 
 export async function captureTab(ext, tabId, expectedURL, clientID) {
   await prepareExtractor(ext,tabId);
-  const [{result}]=await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[expectedURL]});
+  const [{result}]=await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[expectedURL,false,await captureOptions(ext)]});
   if(!result?.text)throw new Error('capture_unavailable');
   const images=[];let missing=0;
   for(let i=0;i<result.images.length;i++){
@@ -54,12 +60,12 @@ export async function mediaPermissions(ext, tabId, url) {
 // one-line capture summary (characters · images · videos).
 export async function pagePreview(ext, tabId, url) {
   await prepareExtractor(ext,tabId);
-  const [{result}] = await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[url,true]});
+  const [{result}] = await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[url,true,await captureOptions(ext)]});
   const origins = new Set();
   for (const item of [...(result?.images || []),...(result?.media || [])]) {
     try {const u=new URL(item.url);if(/^https?:$/.test(u.protocol))origins.add(`${u.protocol}//${u.hostname}/*`);}catch{}
   }
   if (/(^|\.)(x|twitter)\.com$/.test(new URL(url).hostname)) {origins.add('https://cdn.syndication.twimg.com/*');origins.add('https://video.twimg.com/*');}
   const media=result?.media||[];
-  return {origins:[...origins],stats:{chars:(result?.text||'').length,images:(result?.images||[]).length,videos:media.filter(m=>m.kind==='video').length,audios:media.filter(m=>m.kind==='audio').length,truncated:Boolean(result?.truncated)}};
+  return {origins:[...origins],stats:{chars:(result?.text||'').length,images:(result?.images||[]).length,videos:media.filter(m=>m.kind==='video').length,audios:media.filter(m=>m.kind==='audio').length,comments:result?.comments||0,truncated:Boolean(result?.truncated)}};
 }

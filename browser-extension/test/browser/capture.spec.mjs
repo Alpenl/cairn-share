@@ -294,6 +294,45 @@ test('X capture keeps the self-thread, full links and loaded replies but not ads
  await page.close();
 });
 
+test('turning comments off keeps the X self-thread but drops other replies',async()=>{
+ const page=await context.newPage();
+ const post=(handle,id,text)=>`<article data-testid="tweet"><div data-testid="User-Name"><a href="/${handle}">@${handle}</a><a href="/${handle}/status/${id}"><time datetime="2026-10-01T00:00:00Z">10月1日</time></a></div><div data-testid="tweetText">${text}</div></article>`;
+ const cell=html=>`<div data-testid="cellInnerDiv">${html}</div>`;
+ await page.route('https://x.com/Example/status/200',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<html><body><div><div>${cell(post('Example',200,'主帖'))}${cell(post('Example',201,'作者补充'))}${cell(post('Reader',202,'读者回复'))}</div></div></body></html>`}));
+ await page.goto('https://x.com/Example/status/200');
+ await page.addScriptTag({content:await readFile(join(root,'build/chrome/capture-extractor.js'),'utf8')});
+ const off=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true,{comments:false}));
+ expect(off.text).toContain('作者补充');expect(off.text).not.toMatch(/读者回复|评论区/);expect(off.comments).toBe(0);
+ const on=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true));
+ expect(on.text).toContain('评论区（1 条已加载的回复）');expect(on.text).toContain('读者回复');expect(on.comments).toBe(1);
+ await page.close();
+});
+
+test('WeChat article keeps loaded 留言 with author replies, and the setting turns them off',async()=>{
+ const page=await context.newPage();
+ const item=(id,name,content,{author=false,replies=''}={})=>`<li id="cid${id}" class="js_comment_item discuss_item"><div class="discuss_user_info${author?' discuss_author_info':''}" aria-hidden="true"><div class="discuss_user_nickname">${name}</div>${author?'<span class="discuss_relation_tips">作者</span>':''}</div><div class="discuss_send_time">10月2日</div><div class="discuss_message_content wx_folder_normal">${content}</div>${replies?`<div class="discuss_reply_area js_reply_area"><div class="discuss_reply js_reply_list">${replies}</div></div>`:''}</li>`;
+ const reply=(name,content,author)=>`<div><div class="discuss_user_info${author?' discuss_author_info':''}"><div class="discuss_user_nickname">${name}</div></div><div class="discuss_message_content wx_folder_normal">${content}</div></div>`;
+ await page.route('https://mp.weixin.qq.com/s/comments',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<html><head><title>公众号文章</title></head><body>
+ <div id="js_content"><p>公众号正文第一段，介绍新版本。</p><p>第二段正文，下载地址见留言。</p></div>
+ <div id="js_bt_cmt_container" class="js_cmt_container"><ul class="discuss_list">
+ ${item(1,'读者甲','下载地址在哪里？',{replies:reply('公众号作者','回复 <strong class="discuss_message_reply_nickname">读者甲</strong>：在 example.org/download',true)})}
+ ${item(2,'公众号作者','勘误：发布日期是 10 月 20 日。<br>第二行补充',{author:true})}
+ <li class="js_comment_item discuss_item cmt_ad_anchor_hidden"><div class="discuss_message_content">广告留言</div></li>
+ </ul></div></body></html>`}));
+ await page.goto('https://mp.weixin.qq.com/s/comments');
+ await page.addScriptTag({content:await readFile(join(root,'build/chrome/capture-extractor.js'),'utf8')});
+ const result=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true));
+ const text=result.text,comments=text.indexOf('评论区');
+ expect(text).toContain('公众号正文第一段');expect(comments).toBeGreaterThan(text.indexOf('第二段正文'));
+ expect(text).toContain('评论区（2 条已加载的留言）');expect(result.comments).toBe(2);
+ expect(text.slice(comments)).toMatch(/\*\*读者甲\*\* · 10月2日[\s\S]*下载地址在哪里？[\s\S]*\*\*公众号作者（作者）\*\*[\s\S]*在 example\.org\/download/);
+ expect(text.slice(comments)).toMatch(/勘误：发布日期是 10 月 20 日。\n>\s*\n?> 第二行补充/);
+ expect(text).not.toContain('广告留言');
+ const off=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true,{comments:false}));
+ expect(off.text).not.toMatch(/评论区|读者甲/);expect(off.comments).toBe(0);
+ await page.close();
+});
+
 test("choose a collection during capture and resume its committed lost response without recapturing",async()=>{
  collectionEnabled=true;loseCollection=true;const before=posts.length;
  const popup=await context.newPage();await popup.goto(`${extensionURL}/popup.html`);await popup.locator('#url').fill('https://example.com/collection-capture');

@@ -78,6 +78,7 @@ const ICONS = {
   text: [["path", { d: "M4 6h16M4 12h16M4 18h10" }]],
   image: [["rect", { x: 3, y: 4, width: 18, height: 16, rx: 2 }], ["circle", { cx: 9, cy: 10, r: 2 }], ["path", { d: "m21 16-5-5-9 9" }]],
   video: [["rect", { x: 3, y: 5, width: 13, height: 14, rx: 2 }], ["path", { d: "m16 10 5-3v10l-5-3" }]],
+  comment: [["path", { d: "M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z" }]],
   coll: [["path", { d: "M4 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z" }]]
 };
 const SVG = "http://www.w3.org/2000/svg";
@@ -100,6 +101,7 @@ function renderStats(samePage) {
   const parts = [stat("text", preview.chars ? `${count(preview.chars)} 字${preview.truncated ? "+" : ""}` : "无正文")];
   if (preview.images) parts.push(stat("image", `${preview.images} 张图`));
   if (preview.videos + preview.audios) parts.push(stat("video", `${preview.videos + preview.audios} 个${preview.videos ? "视频" : "音频"}`));
+  if (preview.comments) parts.push(stat("comment", `${preview.comments} 条评论`));
   root.replaceChildren(...parts);
 }
 
