@@ -36,10 +36,11 @@ class TagManagerUiInstrumentedTest {
   // Both the screen and WorkManager may retry. Keep the response unavailable
   // until the test has observed the durable pending operation.
   val reconnect=AtomicBoolean(false)
+  val responseDropped=AtomicBoolean(false)
   server.dispatcher=object:Dispatcher(){override fun dispatch(r:RecordedRequest):MockResponse=synchronized(payload){
    val path=r.path.orEmpty();if(path=="/api/tag-catalog/operations"){
     val body=JSONObject(r.body.readUtf8());keys.add(body.getString("operation_key"));if(first){first=false;val definition=body.getJSONObject("definition");definition.put("id","tag_0123456789abcdef0123456789abcdef").put("active",true);catalog.getJSONArray("topics").put(definition);payload.put("revision",1)}
-    if(!reconnect.get())return@synchronized MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+    if(!reconnect.get()){responseDropped.set(true);return@synchronized MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)}
     return@synchronized response(payload)
    }
    if(path=="/api/tag-catalog")return@synchronized response(payload)
@@ -56,6 +57,12 @@ class TagManagerUiInstrumentedTest {
     compose.waitUntil(30000){compose.onAllNodesWithText("重试同步",useUnmergedTree=true).fetchSemanticsNodes().isNotEmpty()}
     val pendingAccount=accountKeyFor(server.url("/").toString(),token)
     assertNotNull(runBlocking{CollectionStore(app).tagManagement(pendingAccount).pending})
+    compose.waitUntil(30000){runCatching{compose.onNodeWithText("重试同步",useUnmergedTree=true).assertIsEnabled();true}.getOrDefault(false)}
+    // A durable pending row is visible before the first POST. Do not restore
+    // connectivity until the fixture has actually selected a lost response.
+    // If background work has not sent it yet, retry while still disconnected.
+    if(!responseDropped.get())compose.onNodeWithText("重试同步",useUnmergedTree=true).performClick()
+    compose.waitUntil(30000){responseDropped.get()}
     compose.waitUntil(30000){runCatching{compose.onNodeWithText("重试同步",useUnmergedTree=true).assertIsEnabled();true}.getOrDefault(false)}
     reconnect.set(true)
     compose.onNodeWithText("重试同步",useUnmergedTree=true).performClick()
