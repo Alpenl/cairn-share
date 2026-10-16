@@ -33,6 +33,8 @@ internal sealed interface CurationSubmitResult {
     /** The server rejected the action; [revision] is the current revision. */
     data class Conflict(val revision: Long) : CurationSubmitResult
     data class Failed(val kind: FailureKind) : CurationSubmitResult
+    /** No compatible write endpoint; the durable action must remain untouched. */
+    data object Unsupported : CurationSubmitResult
 }
 
 /**
@@ -65,6 +67,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         term: String,
         action: String,
     ): MultidimensionalSelection {
+        if (field == "entities") return applyEntityLocal(selection, term, action)
         if (action == "reset" && automatic == null) {
             return selection.copy(unknownResetFields = selection.unknownResetFields + field, pendingFields = selection.pendingFields + field)
         }
@@ -87,6 +90,26 @@ internal class V2CurationRepository(private val transport: V2Transport) {
             pendingFields = result.pendingFields + field,
             // A confirmed or dismissed AI suggestion (E4) leaves the pending list immediately.
             aiPending = if (action in setOf("accept", "confirm", "reject")) result.aiPending.filterNot { it.field == field && it.term == term } else result.aiPending)
+    }
+
+    private fun applyEntityLocal(
+        selection: MultidimensionalSelection, term: String, action: String,
+    ): MultidimensionalSelection {
+        val current = selection.entityNames
+        val automatic = selection.state?.entityAutomatic
+        val pending = selection.pendingFields + "entities"
+        if ((current == null && action != "set_empty") || (action == "reset" && automatic == null)) {
+            return selection.copy(pendingFields = pending, unknownResetFields = selection.unknownResetFields + "entities")
+        }
+        val names = resolveMulti(current.orEmpty(), automatic.orEmpty(), term, action)
+        // This is a local preview. Never synthesize a human-confirmed origin,
+        // a canonical identity, or an AI lifecycle transition from a UI action.
+        val replacesUnknown = action == "set_empty" || (action == "reset" && term.isEmpty())
+        return selection.copy(
+            entities = names,
+            pendingFields = pending,
+            unknownResetFields = if (replacesUnknown) selection.unknownResetFields - "entities" else selection.unknownResetFields,
+        )
     }
 
     /**
@@ -118,7 +141,7 @@ internal class V2CurationRepository(private val transport: V2Transport) {
         return when (val result = transport.applyOverride(id, override, apiToken)) {
             is V2Result.Loaded -> confirmed(result.value, id, override)
             is V2Result.Conflict -> CurationSubmitResult.Conflict(result.revision)
-            is V2Result.Unsupported -> CurationSubmitResult.Failed(FailureKind.Server)
+            is V2Result.Unsupported -> CurationSubmitResult.Unsupported
             is V2Result.Failed -> when (result.kind) {
                 FailureKind.Network, FailureKind.Timeout -> CurationSubmitResult.Queued(operationKey)
                 else -> CurationSubmitResult.Failed(result.kind)

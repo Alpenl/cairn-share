@@ -28,6 +28,7 @@ import com.alpenl.cairn.share.network.EntityEvidenceReadState
 import com.alpenl.cairn.share.network.EntityEvidenceReference
 import com.alpenl.cairn.share.network.EntityEvidenceResult
 import com.alpenl.cairn.share.network.EntityObservation
+import com.alpenl.cairn.share.network.validEntityName
 import com.alpenl.cairn.share.network.evidenceReference
 import com.alpenl.cairn.share.network.withMediaVersionsFrom
 import com.alpenl.cairn.share.network.retainLoadedContent
@@ -58,6 +59,8 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.TemporalAdjusters
+
+internal data class CurationDisplayContext(val accountKey: String, val accountGeneration: Long)
 
 internal data class CairnLinksUiState(
     val apiBaseUrl: String,
@@ -437,6 +440,9 @@ internal class CairnLinksViewModel(
 
     private fun isCurrentAccount(generation: Long): Boolean = generation == uiState.accountGeneration
 
+    private fun matchesCurationDisplay(expected: CurationDisplayContext?): Boolean = expected == null ||
+        (expected.accountKey == curationAccountKey() && isCurrentAccount(expected.accountGeneration))
+
     private fun invalidateEntityEvidence() {
         entityEvidenceRequest += 1
         entityEvidenceJob?.cancel()
@@ -550,10 +556,15 @@ internal class CairnLinksViewModel(
     }
 
     /** Persist the original intent before the first HTTP attempt. */
-    fun applyV2Action(id: Int, field: String, term: String, action: String) {
+    fun applyV2Action(id: Int, field: String, term: String, action: String, expected: CurationDisplayContext? = null) {
+        if (!matchesCurationDisplay(expected)) return
         if (id in deletedLinks || id in pendingDeletions) return
         if (uiState.preferences.apiToken.isBlank()) return
         val selection = uiState.v2Selections[id] ?: return
+        if (field == "entities" && (selection.state?.entities == null ||
+            action !in setOf("accept", "reject", "reset", "set_empty") ||
+            (action in setOf("accept", "reject") && !validEntityName(term)) ||
+            (action == "set_empty" && term.isNotEmpty()))) return
         val account = curationAccountKey()
         val generation = uiState.accountGeneration
         val draft = v2Repository.applyLocal(uiState.v2Drafts[id] ?: selection, selection.automatic, field, term, action)
@@ -614,6 +625,8 @@ internal class CairnLinksViewModel(
                                 }
                                 is CurationSubmitResult.Failed -> uiState = uiState.copy(
                                     message = nextMessage("保存失败：${failureLabel(result.kind)}；动作已保留。"))
+                                CurationSubmitResult.Unsupported -> uiState = uiState.copy(
+                                    message = nextMessage("当前服务不支持这项整理，动作已保留。"))
                             }
                         }
                     }
@@ -629,7 +642,8 @@ internal class CairnLinksViewModel(
     }
 
     /** Explicit user resolution reloads the server before replaying the intents. */
-    fun reapplyV2Draft(id: Int) {
+    fun reapplyV2Draft(id: Int, expected: CurationDisplayContext? = null) {
+        if (!matchesCurationDisplay(expected)) return
         if (id in deletedLinks || id in pendingDeletions) return
         if (uiState.v2Conflicts[id] == null) return
         val account = curationAccountKey()
@@ -656,7 +670,8 @@ internal class CairnLinksViewModel(
         }
     }
 
-    fun discardV2Draft(id: Int) {
+    fun discardV2Draft(id: Int, expected: CurationDisplayContext? = null) {
+        if (!matchesCurationDisplay(expected)) return
         val account = curationAccountKey()
         val generation = uiState.accountGeneration
         viewModelScope.launch {
@@ -672,7 +687,8 @@ internal class CairnLinksViewModel(
     }
 
     /** Invoked only by the explicit ownership confirmation in the detail UI. */
-    fun recoverLegacyV2Actions(id: Int, confirmedAccount: String = curationAccountKey()) {
+    fun recoverLegacyV2Actions(id: Int, confirmedAccount: String = curationAccountKey(), expected: CurationDisplayContext? = null) {
+        if (!matchesCurationDisplay(expected)) return
         if (id in deletedLinks || id in pendingDeletions) return
         val token = uiState.preferences.apiToken
         if (token.isBlank()) return

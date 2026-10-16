@@ -345,6 +345,9 @@ internal fun CairnLinksApp(
                 arguments = listOf(navArgument("id") { type = NavType.IntType }),
             ) { entry ->
                 val id = entry.arguments?.getInt("id") ?: return@composable
+                val displayContext = remember(state.apiBaseUrl, state.preferences.apiToken, state.accountGeneration) {
+                    CurationDisplayContext(accountKeyFor(state.apiBaseUrl, state.preferences.apiToken), state.accountGeneration)
+                }
                 DetailScreen(
                     id = id,
                     state = state,
@@ -365,13 +368,13 @@ internal fun CairnLinksApp(
                     onCloseEntityEvidence = viewModel::closeEntityEvidence,
                     onRetryEntityEvidence = viewModel::retryEntityEvidence,
                     onRefreshEntityEvidence = viewModel::refreshEntityEvidence,
-                    onV2Action = { field, term, action -> viewModel.applyV2Action(id, field, term, action) },
-                    onV2Reapply = { viewModel.reapplyV2Draft(id) },
-                    onV2Discard = { viewModel.discardV2Draft(id) },
+                    onV2Action = { field, term, action -> viewModel.applyV2Action(id, field, term, action, displayContext) },
+                    onV2Reapply = { viewModel.reapplyV2Draft(id, displayContext) },
+                    onV2Discard = { viewModel.discardV2Draft(id, displayContext) },
                     onFlushV2 = viewModel::flushV2Queue,
                     onFlushPersonal = viewModel::flushPersonalTags,
                     onOfflinePin = { pinned -> viewModel.setOfflinePinned(id, pinned) },
-                    onRecoverLegacyV2 = { viewModel.recoverLegacyV2Actions(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken)) },
+                    onRecoverLegacyV2 = { viewModel.recoverLegacyV2Actions(id, displayContext.accountKey, displayContext) },
                     onDelete = { viewModel.deleteLink(id) { navController.popBackStack() } },
                 )
             }
@@ -964,6 +967,7 @@ private fun DetailScreen(
                             editorState.SaveableStateProvider("$id:${state.accountGeneration}") {
                             MultidimensionalCurationSection(
                                 linkId = id, taxonomy = state.v2Taxonomy ?: state.taxonomy,
+                                accountIdentity = accountKeyFor(state.apiBaseUrl, state.preferences.apiToken),
                                 selection = state.v2Selections[id], draft = state.v2Drafts[id],
                                 conflictRevision = state.v2Conflicts[id], busy = id in state.v2Busy,
                                 queuedCount = state.v2Queued[id] ?: 0, available = state.v2Available,

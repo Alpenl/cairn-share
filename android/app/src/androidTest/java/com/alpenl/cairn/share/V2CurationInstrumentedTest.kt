@@ -281,6 +281,151 @@ class V2CurationInstrumentedTest {
 
     @Test fun sourceExcerptDistinguishesUnsupportedMissingChangedAndInvalidResponses() = inspectSourceExcerpt(errors = true)
 
+    private fun entityPayload(revision: Int, names: List<String>, manual: Set<String> = emptySet(),
+                              status: String = "not_run", automatic: List<String> = emptyList(), explicitEmpty: Boolean = false): JSONObject {
+        val payload = JSONObject(InstrumentationRegistry.getInstrumentation().context.assets
+            .open("entity-observations-v1.json").bufferedReader().use { it.readText() }).put("id", 4).put("revision", revision)
+        val state = payload.getJSONObject("state").put("personal_revision", revision)
+        val entities = state.getJSONObject("entities").put("status", status).put("recorded_state", status)
+            .put("automatic", JSONArray(automatic))
+            .put("values", JSONArray(names.map { name -> JSONObject().put("term", name)
+                .put("origin", if (name in manual) "human" else "automatic").put("confirmed", name in manual)
+                .put("revision", if (name in manual) revision else JSONObject.NULL) }))
+        entities.put("empty", if (explicitEmpty) JSONObject().put("term", "").put("origin", "human")
+            .put("confirmed", true).put("revision", revision).put("human_action", "set_empty") else JSONObject.NULL)
+        if (status == "not_run") entities.put("observations", JSONArray()).put("content_revision", JSONObject.NULL)
+            .put("evidence_snapshot_id", JSONObject.NULL).put("revision", 0)
+        return payload
+    }
+
+    @Test fun entityNameActionsKeepNotRunSeparateFromManualAndExplicitEmpty() {
+        val payload = AtomicReference(entityPayload(0, emptyList()))
+        val posts = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                "/api/links/4", "/api/bookmarks/4" -> response(link(4))
+                "/api/bookmarks/4/v2-selection" -> response(payload.get())
+                "/api/v2-taxonomy" -> response(taxonomy())
+                "/api/bookmarks/4/v2-override" -> {
+                    val body = JSONObject(request.body.readUtf8()); posts.add(body)
+                    assertEquals("entities", body.getString("field"))
+                    val next = posts.size
+                    assertEquals(next - 1, body.getInt("expected_revision"))
+                    assertEquals(listOf("accept", "reject", "set_empty")[next - 1], body.getString("action"))
+                    assertEquals(if (next < 3) "Manual" else "", body.optString("term"))
+                    payload.set(entityPayload(next, if (next == 1) listOf("Manual") else emptyList(),
+                        manual = if (next == 1) setOf("Manual") else emptySet(), explicitEmpty = next == 3))
+                    response(JSONObject(body.toString()).put("term", body.optString("term"))
+                        .put("id", 4).put("revision", next).put("replayed", false))
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use {
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entity_name"))
+            compose.onNodeWithTag("v2_entity_name").performTextInput("Manual")
+            compose.onNodeWithTag("v2_entity_add").performScrollTo().performClick()
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithText("Manual · 人工确认").assertExists(); true
+            }.getOrDefault(false) }
+            compose.onNodeWithTag("v2_entities_status").assertTextEquals("实体：尚未运行")
+            compose.onNodeWithTag("v2_entity_remove_0").performScrollTo().performClick()
+            compose.onNodeWithTag("v2_entities_confirm").assertExists()
+            compose.onNodeWithTag("v2_entities_confirm_apply").performClick()
+            compose.waitUntil(20_000) { posts.size == 2 && runBlocking { CurationActionStore(context).snapshot().isEmpty() } }
+            compose.onNodeWithTag("v2_entities_clear").performScrollTo().performClick()
+            compose.onNodeWithTag("v2_entities_confirm_apply").performClick()
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithTag("v2_entities_empty").assertTextEquals("明确留空 · 人工确认"); true
+            }.getOrDefault(false) }
+            compose.onNodeWithTag("v2_entities_status").assertTextEquals("实体：尚未运行")
+            assertEquals(3, posts.map { it.getString("operation_key") }.distinct().size)
+        }
+    }
+
+    @Test fun entityInputSurvivesRotationButCannotCrossAccount() {
+        val lastToken = AtomicReference<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                assertNotEquals("merely editing a draft must not send it", "POST", request.method)
+                return when (request.requestUrl!!.encodedPath) {
+                    "/api/links" -> { lastToken.set(request.getHeader("Authorization")); response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL)) }
+                    "/api/links/4", "/api/bookmarks/4" -> response(link(4))
+                    "/api/bookmarks/4/v2-selection" -> response(entityPayload(0, emptyList()))
+                    "/api/v2-taxonomy" -> response(taxonomy())
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use { scenario ->
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entity_name"))
+            compose.onNodeWithTag("v2_entity_name").performTextInput("rotation draft")
+            scenario.recreate()
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entity_name")); true
+            }.getOrDefault(false) }
+            assertEquals("rotation draft", compose.onNodeWithTag("v2_entity_name").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+            runBlocking { SharePreferencesStore(context).setApiToken("entity-other-account") }
+            compose.waitUntil(20_000) { lastToken.get() == "Bearer entity-other-account" }
+            // A new account deliberately collapses the old account's editor.
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithTag("v2_entity_name").assertDoesNotExist()
+                compose.onNodeWithTag("reader_curation_toggle").assertExists(); true
+            }.getOrDefault(false) }
+            compose.onNodeWithTag("reader_curation_toggle").performScrollTo().performClick()
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entity_name"))
+                compose.onNodeWithTag("v2_entity_name").fetchSemanticsNode().config[SemanticsProperties.EditableText].text.isEmpty()
+            }.getOrDefault(false) }
+            assertTrue(runBlocking { CurationActionStore(context).snapshot().isEmpty() })
+        }
+    }
+
+    @Test fun unsupportedEntityWriteRemainsPendingAndReusesSameOperationAfterUpgrade() {
+        val supported = java.util.concurrent.atomic.AtomicBoolean(false)
+        val keys = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val payload = AtomicReference(entityPayload(0, listOf("Acme"), status = "completed_nonempty", automatic = listOf("Acme")))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+                "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                "/api/links/4", "/api/bookmarks/4" -> response(link(4))
+                "/api/bookmarks/4/v2-selection" -> response(payload.get())
+                "/api/v2-taxonomy" -> response(taxonomy())
+                "/api/bookmarks/4/v2-override" -> {
+                    val body = JSONObject(request.body.readUtf8()); keys.add(body.getString("operation_key"))
+                    assertEquals("entities", body.getString("field")); assertEquals("Manual", body.getString("term"))
+                    if (!supported.get()) MockResponse().setResponseCode(501)
+                    else {
+                        payload.set(entityPayload(1, listOf("Acme", "Manual"), setOf("Manual"), "completed_nonempty", listOf("Acme")))
+                        response(JSONObject(body.toString()).put("id", 4).put("revision", 1).put("replayed", false))
+                    }
+                }
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use {
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entity_name"))
+            compose.onNodeWithTag("v2_entity_name").performTextInput("Manual")
+            compose.onNodeWithTag("v2_entity_add").performScrollTo().performClick()
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithText("当前服务不支持这项整理，动作已保留。").assertExists(); true
+            }.getOrDefault(false) }
+            val pending = runBlocking { CurationActionStore(context).snapshot().single() }
+            assertEquals("entities", pending.field); assertEquals("accept", pending.action)
+            supported.set(true)
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_flush"))
+            compose.onNodeWithTag("v2_flush").performClick()
+            compose.waitUntil(20_000) { runBlocking { CurationActionStore(context).snapshot().isEmpty() } }
+            assertEquals(listOf(pending.operationKey), keys.distinct())
+            assertTrue(keys.size >= 2)
+            compose.onNodeWithTag("v2_entities_status").assertTextEquals("实体：已生成建议")
+        }
+    }
+
     private fun inspectSourceExcerpt(errors: Boolean = false) {
         val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
         val reads = java.util.concurrent.atomic.AtomicInteger()

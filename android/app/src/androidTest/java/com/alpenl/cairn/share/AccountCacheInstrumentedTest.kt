@@ -103,6 +103,55 @@ class AccountCacheInstrumentedTest {
 
     @Test fun closedSourceReadCannotReplaceNewerReadOrBeClosedByOldPopup() = runBlocking<Unit> { lateEntitySource("close") }
 
+    @Test fun staleEntityEditorCallbackCannotWriteAcrossAccountsOrAnAToBToASession() = runBlocking<Unit> {
+        val writes = AtomicInteger()
+        val payload = JSONObject(InstrumentationRegistry.getInstrumentation().context.assets
+            .open("entity-observations-v1.json").bufferedReader().use { it.readText() })
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.method == "POST") {
+                    writes.incrementAndGet()
+                    assertEquals("Bearer " + tokenA, request.getHeader("Authorization"))
+                    assertEquals("Current A", JSONObject(request.body.readUtf8()).getString("term"))
+                    return MockResponse().setResponseCode(501)
+                }
+                return when (request.requestUrl!!.encodedPath) {
+                    "/api/links" -> page(if (request.getHeader("Authorization") == "Bearer " + tokenB) "B" else "A")
+                    "/api/bookmarks/1/v2-selection" -> json(payload)
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val model = start()
+        awaitState(model) { it.links.size == 4 && !it.loading }
+        withContext(Dispatchers.Main) { model.loadV2Selection(1) }
+        awaitState(model) { it.v2Selections[1]?.state?.entities != null }
+        val old = withContext(Dispatchers.Main) {
+            CurationDisplayContext(accountKeyFor(base, tokenA), model.uiState.accountGeneration)
+        }
+        for (next in listOf(tokenB, tokenA)) {
+            withContext(Dispatchers.Main) { model.setApiToken(next) }
+            awaitStoredToken(next)
+            awaitState(model) { it.preferences.apiToken == next && it.links.size == 4 && !it.loading }
+            withContext(Dispatchers.Main) { model.loadV2Selection(1) }
+            awaitState(model) { it.v2Selections[1]?.state?.entities != null }
+            withContext(Dispatchers.Main) {
+                assertNotEquals(old.accountGeneration, model.uiState.accountGeneration)
+                model.applyV2Action(1, "entities", "Old A", "accept", old)
+                assertTrue("old UI callback must not even change the current draft", model.uiState.v2Drafts.isEmpty())
+            }
+            assertTrue(actions.snapshot().isEmpty())
+            assertEquals(0, writes.get())
+        }
+        withContext(Dispatchers.Main) {
+            val current = CurationDisplayContext(accountKeyFor(base, tokenA), model.uiState.accountGeneration)
+            model.applyV2Action(1, "entities", "Current A", "accept", current)
+            assertEquals(listOf("Acme", "Current A"), model.uiState.v2Drafts[1]!!.entityNames)
+        }
+        awaitState(model) { writes.get() == 1 && 1 !in it.v2Busy }
+        assertEquals("Current A", actions.snapshot().single().term)
+    }
+
     @Test fun sourceReadCannotSurviveAccountAToBToA() = runBlocking<Unit> { lateEntitySource("account") }
 
     @Test fun deletingBookmarkDiscardsPendingSourceRead() = runBlocking<Unit> { lateEntitySource("delete") }
