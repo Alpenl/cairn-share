@@ -86,6 +86,50 @@ class SelectionStateTest {
         assertNull(decode(fixture()).state!!.entityObservations)
     }
 
+    @Test fun `source link evidence accepts the server length boundary but rejects unsafe or oversized URLs`() {
+        val prefix = "https://example.com/"
+        for ((url, valid) in listOf(
+            prefix + "x".repeat(160) to true,
+            prefix + "x".repeat(2048 - prefix.length) to true,
+            prefix + "x".repeat(2049 - prefix.length) to false,
+            "javascript:alert(1)" to false,
+            "https://user:password@example.com/a" to false,
+        )) {
+            val json = entityFixture()
+            val entity = json.getJSONObject("state").getJSONObject("entities")
+            val row = entity.getJSONArray("observations").getJSONObject(0)
+            row.getJSONObject("candidate").put("surface", url).put("source_url", url)
+                .put("kind", "link").put("block_id", "").put("start", 0).put("end", 0)
+            row.getJSONArray("canonical_evidence").getJSONObject(0).put("identifier", url)
+                .put("block_id", "").put("source", "stored_link")
+            val observations = decode(json).state!!.entityObservations
+            if (valid) {
+                assertNotNull(url, observations)
+                assertEquals(url, observations!!.first().sourceUrl)
+                assertEquals(listOf(url), observations.first().identifiers)
+            } else {
+                assertNull("invalid evidence URL must remain unavailable", observations)
+            }
+        }
+    }
+
+    @Test fun `entity surface length uses the server Unicode code point bound`() {
+        for (count in listOf(2048, 2049)) {
+            val json = entityFixture()
+            val surface = "𠮷".repeat(count)
+            json.getJSONObject("state").getJSONObject("entities").getJSONArray("observations")
+                .getJSONObject(2).getJSONObject("candidate").put("surface", surface).put("end", count)
+            val observations = decode(json).state!!.entityObservations
+            if (count == 2048) {
+                assertNotNull(observations)
+                assertEquals(surface, observations!!.last().surface)
+                assertFalse("a valid span must not invent an effective assignment", observations.last().effective)
+            } else {
+                assertNull(observations)
+            }
+        }
+    }
+
     @Test fun `unsupported malformed or inconsistent entity metadata cannot invent a provenance result`() {
         val mutations: List<(JSONObject) -> Unit> = listOf(
             { it.put("observations_version", 2) },

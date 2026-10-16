@@ -1,6 +1,8 @@
 package com.alpenl.cairn.share
 
 import android.content.Intent
+import android.app.Activity
+import android.app.Instrumentation
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
@@ -183,10 +185,22 @@ class V2CurationInstrumentedTest {
         }
     }
 
-    private fun inspectEntityEvidence(stale: Boolean) {
+    private fun inspectEntityEvidence(stale: Boolean, linkedSource: Boolean = false) {
         val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val expectedUrl = if (linkedSource) "https://example.com/article?reference=" + "x".repeat(160)
+            else "https://example.com/a"
         val fixture = JSONObject(InstrumentationRegistry.getInstrumentation().context.assets
             .open("entity-observations-v1.json").bufferedReader().use { it.readText() }).put("id", 4)
+        if (linkedSource) {
+            val entities = fixture.getJSONObject("state").getJSONObject("entities")
+            val first = entities.getJSONArray("observations").getJSONObject(0)
+            first.getJSONObject("candidate").put("surface", expectedUrl).put("kind", "link")
+                .put("block_id", "").put("start", 0).put("end", 0).put("source_url", expectedUrl)
+            first.getJSONArray("canonical_evidence").getJSONObject(0).put("identifier", expectedUrl)
+                .put("block_id", "").put("source", "stored_link")
+            entities.getJSONArray("values").put(JSONObject().put("term", expectedUrl)
+                .put("origin", "automatic").put("confirmed", false).put("revision", JSONObject.NULL))
+        }
         if (stale) {
             fixture.getJSONObject("state").put("content_revision", 2).getJSONObject("entities")
                 .put("status", "stale").put("values", JSONArray())
@@ -204,37 +218,64 @@ class V2CurationInstrumentedTest {
                 }
             }
         }
-        ActivityScenario.launch<LauncherActivity>(start()).use { scenario ->
-            openDetailAndLoadTaxonomy()
-            fun inspect() {
-                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entities_observations"))
-                // The entire v2 section is one tall LazyColumn item. Finding
-                // its descendant composes it but does not bring it on screen.
-                compose.onNodeWithTag("v2_entities_observations").performScrollTo().assertIsDisplayed().performClick()
-                compose.waitUntil(20_000) { runCatching {
-                    compose.onNodeWithTag("v2_entities_records").assertExists(); true
-                }.getOrDefault(false) }
-                compose.onNodeWithText("Acme（项目，acme-a）").performScrollTo().assertIsDisplayed()
-                compose.onNodeWithText("https://example.com/a").assertExists()
-                compose.onNodeWithText("Acme（项目，acme-b）").performScrollTo().assertIsDisplayed()
-                compose.onNodeWithText("身份未确定").performScrollTo().assertIsDisplayed()
-                compose.onAllNodesWithText(if (stale) "非当前有效结果" else "当前有效自动建议").assertCountEquals(3)
-                compose.onAllNodesWithText(if (stale) "当前有效自动建议" else "非当前有效结果").assertCountEquals(0)
-                compose.onNodeWithText("关闭").performClick()
+        val opened = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val monitor = object : Instrumentation.ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                if (intent.action != Intent.ACTION_VIEW) return null
+                assertNull("external evidence navigation must not carry private extras", intent.extras)
+                opened.add(intent.dataString.orEmpty())
+                return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
             }
-            inspect()
-            scenario.recreate()
-            compose.waitUntil(20_000) { runCatching {
-                compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entities_observations")); true
-            }.getOrDefault(false) }
-            inspect()
-            assertTrue(paths.none { it.startsWith("POST ") || it.contains("/classifications/") })
+        }
+        instrumentation.addMonitor(monitor)
+        try {
+            ActivityScenario.launch<LauncherActivity>(start()).use { scenario ->
+                openDetailAndLoadTaxonomy()
+                fun inspect() {
+                    val previouslyOpened = opened.size
+                    compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entities_observations"))
+                    // The entire v2 section is one tall LazyColumn item. Finding
+                    // its descendant composes it but does not bring it on screen.
+                    compose.onNodeWithTag("v2_entities_observations").performScrollTo().assertIsDisplayed().performClick()
+                    compose.waitUntil(20_000) { runCatching {
+                        compose.onNodeWithTag("v2_entities_records").assertExists(); true
+                    }.getOrDefault(false) }
+                    compose.onNodeWithText("Acme（项目，acme-a）").performScrollTo().assertIsDisplayed()
+                    compose.onNodeWithText(expectedUrl).assertExists()
+                    assertEquals("inspecting saved evidence must not launch a browser", previouslyOpened, opened.size)
+                    compose.onAllNodesWithTag("v2_entity_link_0_0").assertCountEquals(1)
+                    compose.onNodeWithTag("v2_entity_link_0_1").assertDoesNotExist()
+                    compose.onNodeWithTag("v2_entity_link_0_0").performScrollTo().assertHasClickAction()
+                        .assertContentDescriptionEquals("在浏览器中打开依据：$expectedUrl").performClick()
+                    compose.runOnIdle {
+                        assertEquals(previouslyOpened + 1, opened.size)
+                        assertEquals(expectedUrl, opened.last())
+                    }
+                    compose.onNodeWithText("Acme（项目，acme-b）").performScrollTo().assertIsDisplayed()
+                    compose.onNodeWithText("身份未确定").performScrollTo().assertIsDisplayed()
+                    compose.onAllNodesWithText(if (stale) "非当前有效结果" else "当前有效自动建议").assertCountEquals(3)
+                    compose.onAllNodesWithText(if (stale) "当前有效自动建议" else "非当前有效结果").assertCountEquals(0)
+                    compose.onNodeWithText("关闭").performClick()
+                }
+                inspect()
+                scenario.recreate()
+                compose.waitUntil(20_000) { runCatching {
+                    compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entities_observations")); true
+                }.getOrDefault(false) }
+                inspect()
+                assertTrue(paths.none { it.startsWith("POST ") || it.contains("/classifications/") })
+            }
+        } finally {
+            instrumentation.removeMonitor(monitor)
         }
     }
 
     @Test fun showsSameNamedEntityIdentitiesAndUnknownWithoutNewInference() = inspectEntityEvidence(false)
 
     @Test fun staleEntityEvidenceRemainsReadableAfterActivityRecreation() = inspectEntityEvidence(true)
+
+    @Test fun opensStoredSourceOnlyAfterTapAndDeduplicatesMatchingIdentityEvidence() = inspectEntityEvidence(false, linkedSource = true)
 
     @Test fun aConflictKeepsTheDraftAndOffersReapply() {
         val attempts = java.util.concurrent.atomic.AtomicInteger()
