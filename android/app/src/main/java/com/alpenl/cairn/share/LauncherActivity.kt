@@ -5,7 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import androidx.core.net.toUri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -98,7 +98,7 @@ class LauncherActivity : ComponentActivity() {
 
     private fun openExternal(url: String) {
         try {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
         } catch (_: ActivityNotFoundException) {
             Toast.makeText(this, R.string.library_open_failed, Toast.LENGTH_SHORT).show()
         } catch (_: SecurityException) {
@@ -183,7 +183,7 @@ class LauncherActivity : ComponentActivity() {
             startActivity(
                 Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:$packageName"),
+                    "package:$packageName".toUri(),
                 ),
             )
         } catch (_: ActivityNotFoundException) {

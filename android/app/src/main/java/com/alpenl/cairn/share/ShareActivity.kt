@@ -1,7 +1,7 @@
 package com.alpenl.cairn.share
 
 import android.content.Intent
-import android.graphics.drawable.ColorDrawable
+import androidx.core.graphics.drawable.toDrawable
 import android.os.Bundle
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
@@ -278,7 +278,7 @@ class ShareActivity : ComponentActivity() {
     private fun makeWindowTranslucent() {
         // The sheet owns dismissal and protects a save still being persisted.
         setFinishOnTouchOutside(false)
-        window.setBackgroundDrawable(ColorDrawable(Color.Transparent.toArgb()))
+        window.setBackgroundDrawable(Color.Transparent.toArgb().toDrawable())
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         window.attributes = window.attributes.apply { dimAmount = 0.38f }
     }

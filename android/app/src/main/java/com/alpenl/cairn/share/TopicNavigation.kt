@@ -1,6 +1,7 @@
 package com.alpenl.cairn.share
 
 import android.content.Context
+import androidx.core.content.edit
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -232,7 +233,7 @@ internal fun TopicNavigation(filters: BookmarkFilters, terms: List<TaxonomyTerm>
                         QuietFilterTag(label = term.label, selected = term.id in pinned, onClick = {
                             focus.clearFocus(); keyboard?.hide()
                             pinned = if (term.id in pinned) pinned - term.id else pinned + term.id
-                            preferences.edit().putStringSet("pins:$account", pinned).apply()
+                            preferences.edit { putStringSet("pins:$account", pinned) }
                         }, enabled = term.active && !term.deprecated || term.id in pinned,
                             modifier = Modifier.testTag("pin_topic_${term.id}").semantics {
                                 contentDescription = (if (term.id in pinned) "取消固定" else "固定") + term.label
