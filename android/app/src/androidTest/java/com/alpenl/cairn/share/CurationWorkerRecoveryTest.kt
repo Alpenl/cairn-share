@@ -208,6 +208,14 @@ class CurationWorkerRecoveryTest {
         assertEquals(0, selection.getJSONArray("affordances").length())
         assertEquals("foreign-account-action", store.snapshot().single().operationKey)
         waitFor { withContext(Dispatchers.Main) { !model.uiState.v2Drafts.containsKey(id) && !model.uiState.v2Conflicts.containsKey(id) } }
+        waitFor { withContext(Dispatchers.Main) { model.uiState.v2Selections[id]?.revision == 9L } }
+        withContext(Dispatchers.Main) {
+            val confirmed = model.uiState.v2Selections.getValue(id)
+            assertEquals("the confirmed App state agrees with the real Worker, without an offline draft",
+                listOf("single"), confirmed.carriers)
+            assertTrue(confirmed.topics.isEmpty())
+            assertTrue(confirmed.affordances.isEmpty())
+        }
         val calls = http("/__test/control").getJSONArray("requests")
         val sent = (0 until calls.length()).map { calls.getJSONObject(it) }
         assertTrue(sent.none { it.getString("operation_key") == "foreign-account-action" })
