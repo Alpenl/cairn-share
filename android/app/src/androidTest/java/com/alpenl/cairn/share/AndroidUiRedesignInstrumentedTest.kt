@@ -6,6 +6,10 @@ import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.KeyCharacterMap
 import android.view.InputDevice
+import android.util.Log
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.unit.dp
@@ -138,8 +142,39 @@ class AndroidUiRedesignInstrumentedTest {
         .putExtra(ShareActivity.EXTRA_API_BASE_URL, base)
         .putExtra(ShareActivity.EXTRA_RELEASES_API_URL, server.url("/latest").toString()))
 
-    private fun waitTag(tag: String) = compose.waitUntil(20_000) {
-        runCatching { compose.onNodeWithTag(tag).assertExists(); true }.getOrDefault(false)
+    private fun waitTag(tag: String) {
+        try {
+            compose.waitUntil(20_000) {
+                runCatching { compose.onNodeWithTag(tag).assertExists(); true }.getOrDefault(false)
+            }
+        } catch (failure: Throwable) {
+            backDiagnostic("wait-timeout:" + tag)
+            throw failure
+        }
+    }
+
+    // Synthetic UI test diagnostics only: tags and window/lifecycle flags,
+    // never visible text, draft values, account keys, tokens or source bodies.
+    private fun backDiagnostic(point: String) {
+        runCatching {
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            val activities = mutableListOf<String>()
+            instrumentation.runOnMainSync {
+                ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED).forEach {
+                    activities.add(it.javaClass.simpleName + ":focus=" + it.hasWindowFocus() +
+                        ":finishing=" + it.isFinishing + ":destroyed=" + it.isDestroyed)
+                }
+            }
+            val tags = compose.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.TestTag),
+                useUnmergedTree = true).fetchSemanticsNodes().map { it.config[SemanticsProperties.TestTag] }
+                .distinct().sorted()
+            val windows = instrumentation.uiAutomation.windows.map {
+                "id=" + it.id + ":type=" + it.type + ":focused=" + it.isFocused + ":active=" + it.isActive
+            }
+            Log.i("CairnUiBackDiagnostic", JSONObject().put("point", point)
+                .put("activities", JSONArray(activities)).put("tags", JSONArray(tags))
+                .put("windows", JSONArray(windows)).toString())
+        }.onFailure { Log.w("CairnUiBackDiagnostic", "diagnostic unavailable: " + it.javaClass.simpleName) }
     }
 
     private fun waitBody() = compose.waitUntil(20_000) {
@@ -151,6 +186,7 @@ class AndroidUiRedesignInstrumentedTest {
     }
 
     private fun systemBack() {
+        backDiagnostic("before-system-back")
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         // A dismissed dialog can still own the native window while Compose is already idle.
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
@@ -167,6 +203,7 @@ class AndroidUiRedesignInstrumentedTest {
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
         SystemClock.sleep(800)
         compose.waitForIdle()
+        backDiagnostic("after-system-back")
     }
 
     private fun screenshot(name: String, target: SemanticsNodeInteraction) {
