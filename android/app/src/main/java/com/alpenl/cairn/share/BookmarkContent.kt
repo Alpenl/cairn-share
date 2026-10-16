@@ -43,6 +43,8 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -214,7 +216,7 @@ internal object BookmarkImageCache {
         override fun sizeOf(key: Key, value: Bitmap): Int = value.allocationByteCount
     }
     private val deleted = mutableSetOf<Pair<String, Int>>()
-    var revision by mutableStateOf(0L)
+    var revision by mutableLongStateOf(0L)
         private set
 
     private fun linkId(key: String): Int? = key.split('/').let {
@@ -247,7 +249,7 @@ internal fun BookmarkImage(baseUrl: String, apiToken: String, imageKey: String, 
     val cacheKey = "$account|$imageKey|$version"
     val cacheRevision = BookmarkImageCache.revision
     if (BookmarkImageCache.isDeleted(account, imageKey)) return
-    var retry by remember(imageKey) { mutableStateOf(0) }
+    var retry by remember(imageKey) { mutableIntStateOf(0) }
     var loading by remember(cacheKey) { mutableStateOf(true) }
     var bitmap by remember(cacheKey, cacheRevision) { mutableStateOf(BookmarkImageCache.get(account, imageKey, version)) }
     LaunchedEffect(cacheKey, cacheRevision, retry) {
@@ -316,7 +318,7 @@ internal fun BookmarkFilterPanel(filters: BookmarkFilters, taxonomy: BookmarkTax
     var advanced by rememberSaveable(account) { mutableStateOf(false) }
     var customCatalog by remember(account) { mutableStateOf(emptyList<PersonalTagDefinition>()) }
     var catalogError by remember(account) { mutableStateOf(false) }
-    var catalogRetry by remember(account) { mutableStateOf(0) }
+    var catalogRetry by remember(account) { mutableIntStateOf(0) }
     LaunchedEffect(expanded, account, taxonomy?.resourceKinds?.isNotEmpty(), catalogRetry) {
         if (expanded && baseUrl.isNotBlank() && apiToken.isNotBlank() && taxonomy?.resourceKinds?.isNotEmpty() == true) {
             val result = cancellableRead { V2CurationClient(baseUrl).tagRequest("/api/custom-tags", "GET", apiToken, cancellation = it) }

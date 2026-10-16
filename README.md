@@ -256,8 +256,16 @@ npm run deploy:dry-run
 
 Android：
 
+构建使用 JDK 17（CI）、Gradle 9.8.1、AGP 9.1.1 的内置 Kotlin 2.2.10，
+编译平台为 Android 37.0、Build Tools 36.0.0。运行兼容范围仍是 minSdk 26、
+targetSdk 35；升级编译工具不会改变应用版本或自动发布安装包。
+AGP 9 的 [Kotlin 迁移说明](https://developer.android.com/build/migrate-to-built-in-kotlin)
+和 [兼容矩阵](https://developer.android.com/build/releases/agp-9-1-0-release-notes)
+是这组版本的依据。Wrapper 及依赖的 SHA-256 校验保持启用。
+
 ```bash
 cd android
+sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
 ./gradlew --no-daemon --dependency-verification strict \
   testDebugUnitTest lintDebug assembleDebug compileDebugAndroidTestKotlin
 ```
@@ -277,6 +285,10 @@ cd android
 
 本机运行加速模拟器需要当前用户具备 `/dev/kvm` 权限；也可使用软件模拟器。GitHub Actions 的 `device.yml`
 会在 runner 上启用 KVM 并分别跑 API 26 和 API 35。
+模拟器需有真实可用的网络；涉及离线图片的默认设置要求非计费 Wi-Fi，
+涉及 WorkManager 的测试要求网络通过系统验证。不要关闭约束或放宽断言来适配本机代理。
+普通设备报告中十八项 Worker 专用阶段的跳过不算通过，工作流随后运行
+`tests/android-worker/run.sh`，在真实本地 Worker/D1 上逐阶段、跨应用进程验证。
 
 ## Cloudflare 部署
 

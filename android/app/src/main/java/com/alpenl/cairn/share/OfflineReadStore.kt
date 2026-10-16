@@ -107,7 +107,7 @@ internal class OfflineReadStore(context: Context) {
     private fun write(db: android.database.sqlite.SQLiteDatabase, entry: OfflineReadEntry) {
         val labels = JSONArray().also { array -> entry.tagLabels.forEach { array.put(JSONObject().put("ref", it.ref).put("label", it.label)) } }
         db.execSQL("INSERT OR REPLACE INTO links(account,id,payload,saved_at,read_at,pinned,labels,has_body) VALUES(?,?,?,?,?,?,?,?)",
-            arrayOf(entry.account, entry.link.id, OfflineReadJson.encodeLink(entry.link).toString(), entry.savedAt, entry.readAt,
+            arrayOf<Any>(entry.account, entry.link.id, OfflineReadJson.encodeLink(entry.link).toString(), entry.savedAt, entry.readAt,
                 if (entry.pinned) 1 else 0, labels.toString(), if (entry.link.enrichment?.contentLoaded == true) 1 else 0))
     }
     private fun SavedLink.cacheable(): SavedLink = if (enrichment?.cacheIdentity != null) this else copy(
@@ -176,7 +176,7 @@ internal class OfflineReadStore(context: Context) {
     suspend fun touch(account: String, id: Int, expected: SavedLink? = null, now: Long = System.currentTimeMillis()): Boolean = access { db ->
         val old = row(db, account, id) ?: return@access false
         if (expected != null && old.link != expected) return@access false
-        db.execSQL("UPDATE links SET read_at=? WHERE account=? AND id=?", arrayOf(now, account, id)); true
+        db.execSQL("UPDATE links SET read_at=? WHERE account=? AND id=?", arrayOf<Any>(now, account, id)); true
     }
     suspend fun save(account: String, link: SavedLink, pinned: Boolean? = null, now: Long = System.currentTimeMillis(), labels: List<ReaderTag>? = null): OfflineReadEntry? = access { db ->
         if (!account.startsWith("v2:") || link.enrichment?.contentLoaded != true || link.enrichment.cacheIdentity == null || deleted(db, account, link.id)) return@access null
@@ -198,7 +198,7 @@ internal class OfflineReadStore(context: Context) {
         val sync = syncState(db, account)
         writeSyncState(db, account, sync.copy(generation = sync.generation + 1))
         db.delete("sync_media", "account=? AND link_id=?", arrayOf(account, id.toString()))
-        db.execSQL("INSERT OR IGNORE INTO deleted(account,id) VALUES(?,?)", arrayOf(account, id))
+        db.execSQL("INSERT OR IGNORE INTO deleted(account,id) VALUES(?,?)", arrayOf<Any>(account, id))
         db.delete("links", "account=? AND id=?", arrayOf(account, id.toString()))
     }
     suspend fun clear(account: String) = access { db ->
@@ -250,7 +250,7 @@ internal class OfflineReadStore(context: Context) {
             if (it.moveToFirst()) decodeTaxonomy(JSONObject(it.getString(0)), topicGranularity = true) else null
         }
         for (link in page.items) {
-            if (expected.reconciling) db.execSQL("INSERT OR IGNORE INTO sync_seen(account,id) VALUES(?,?)", arrayOf(account, link.id))
+            if (expected.reconciling) db.execSQL("INSERT OR IGNORE INTO sync_seen(account,id) VALUES(?,?)", arrayOf<Any>(account, link.id))
             if (deleted(db, account, link.id)) continue
             val old = row(db, account, link.id)
             write(db, OfflineReadEntry(account, link, now, old?.readAt ?: now, old?.pinned ?: false,
@@ -263,10 +263,10 @@ internal class OfflineReadStore(context: Context) {
             if (deleted(db, account, media.linkId)) continue
             val done = db.rawQuery("SELECT done FROM sync_media WHERE account=? AND key=? AND version=?", arrayOf(account, media.key, media.version)).use { c -> if(c.moveToFirst()) c.getInt(0) else 0 }
             db.execSQL("INSERT OR REPLACE INTO sync_media(account,link_id,key,version,bytes,available,done) VALUES(?,?,?,?,?,?,?)",
-                arrayOf(account, media.linkId, media.key, media.version, media.bytes, if (media.available) 1 else 0, done))
+                arrayOf<Any>(account, media.linkId, media.key, media.version, media.bytes, if (media.available) 1 else 0, done))
         }
         for (id in page.deleted) {
-            db.execSQL("INSERT OR IGNORE INTO deleted(account,id) VALUES(?,?)", arrayOf(account, id))
+            db.execSQL("INSERT OR IGNORE INTO deleted(account,id) VALUES(?,?)", arrayOf<Any>(account, id))
             db.delete("links", "account=? AND id=?", arrayOf(account, id.toString()))
             db.delete("sync_seen", "account=? AND id=?", arrayOf(account, id.toString()))
             db.delete("sync_media", "account=? AND link_id=?", arrayOf(account, id.toString()))

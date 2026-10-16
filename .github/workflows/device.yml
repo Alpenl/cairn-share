@@ -49,6 +49,13 @@ jobs:
       - name: Install local Worker dependencies
         run: npm ci --prefix worker
 
+      - name: Install compilation SDK
+        run: |
+          set -euo pipefail
+          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "${sdkmanager}" --licenses >/dev/null || true
+          "${sdkmanager}" "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
+
       - name: Enable KVM
         run: |
           set -euo pipefail
