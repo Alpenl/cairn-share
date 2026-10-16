@@ -69,7 +69,11 @@ internal fun decodeEntityObservations(
     return (0 until rows.length()).map { index ->
         val row = rows.optJSONObject(index) ?: return null
         val candidate = row.optJSONObject("candidate") ?: return null
-        val surface = candidate.boundedString("surface", 120) ?: return null
+        // The Worker bounds candidate surfaces in Unicode code points, not
+        // the shorter display-name limit. Stored source URLs use this field too.
+        val surface = (candidate.opt("surface") as? String)?.takeIf {
+            it.isNotBlank() && it.codePointCount(0, it.length) <= 2048
+        } ?: return null
         val block = candidate.opt("block_id") as? String ?: return null
         val start = candidate.nonnegativeRevision("start") ?: return null
         val end = candidate.nonnegativeRevision("end") ?: return null

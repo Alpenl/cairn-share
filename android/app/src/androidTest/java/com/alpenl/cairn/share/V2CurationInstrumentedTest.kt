@@ -187,15 +187,18 @@ class V2CurationInstrumentedTest {
 
     private fun inspectEntityEvidence(stale: Boolean, linkedSource: Boolean = false) {
         val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val expectedUrl = if (linkedSource) "https://example.com/article?reference=" + "x".repeat(160)
+            else "https://example.com/a"
         val fixture = JSONObject(InstrumentationRegistry.getInstrumentation().context.assets
             .open("entity-observations-v1.json").bufferedReader().use { it.readText() }).put("id", 4)
         if (linkedSource) {
             val entities = fixture.getJSONObject("state").getJSONObject("entities")
             val first = entities.getJSONArray("observations").getJSONObject(0)
-            first.getJSONObject("candidate").put("surface", "https://example.com/a").put("kind", "link")
-                .put("block_id", "").put("start", 0).put("end", 0).put("source_url", "https://example.com/a")
-            first.getJSONArray("canonical_evidence").getJSONObject(0).put("block_id", "").put("source", "stored_link")
-            entities.getJSONArray("values").put(JSONObject().put("term", "https://example.com/a")
+            first.getJSONObject("candidate").put("surface", expectedUrl).put("kind", "link")
+                .put("block_id", "").put("start", 0).put("end", 0).put("source_url", expectedUrl)
+            first.getJSONArray("canonical_evidence").getJSONObject(0).put("identifier", expectedUrl)
+                .put("block_id", "").put("source", "stored_link")
+            entities.getJSONArray("values").put(JSONObject().put("term", expectedUrl)
                 .put("origin", "automatic").put("confirmed", false).put("revision", JSONObject.NULL))
         }
         if (stale) {
@@ -239,15 +242,15 @@ class V2CurationInstrumentedTest {
                         compose.onNodeWithTag("v2_entities_records").assertExists(); true
                     }.getOrDefault(false) }
                     compose.onNodeWithText("Acme（项目，acme-a）").performScrollTo().assertIsDisplayed()
-                    compose.onNodeWithText("https://example.com/a").assertExists()
+                    compose.onNodeWithText(expectedUrl).assertExists()
                     assertEquals("inspecting saved evidence must not launch a browser", previouslyOpened, opened.size)
                     compose.onAllNodesWithTag("v2_entity_link_0_0").assertCountEquals(1)
                     compose.onNodeWithTag("v2_entity_link_0_1").assertDoesNotExist()
                     compose.onNodeWithTag("v2_entity_link_0_0").performScrollTo().assertHasClickAction()
-                        .assertContentDescriptionEquals("在浏览器中打开依据：https://example.com/a").performClick()
+                        .assertContentDescriptionEquals("在浏览器中打开依据：$expectedUrl").performClick()
                     compose.runOnIdle {
                         assertEquals(previouslyOpened + 1, opened.size)
-                        assertEquals("https://example.com/a", opened.last())
+                        assertEquals(expectedUrl, opened.last())
                     }
                     compose.onNodeWithText("Acme（项目，acme-b）").performScrollTo().assertIsDisplayed()
                     compose.onNodeWithText("身份未确定").performScrollTo().assertIsDisplayed()
