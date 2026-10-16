@@ -1,13 +1,18 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { expect, it } from "vitest";
+import { beforeEach, expect, it } from "vitest";
 import { SOURCE_CLAIM_CANDIDATE_SQL, sourceClaimCandidateBindings, sourceClaimSQL } from "../src/source-claim";
 
-it("claims in priority order through the D1 index with bounded reads", async () => {
+// Database provisioning has the runner's separate hook deadline. Claim tests
+// keep the default five-second deadline and all index/row-budget assertions.
+beforeEach(async () => {
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
   await env.DB.prepare(`WITH RECURSIVE seq(n) AS (
     SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<2000
   ) INSERT INTO links(url,created_at,original_text) SELECT 'https://x.com/u/status/'||n,'t','captured source' FROM seq`).run();
+});
+
+it("claims in priority order through the D1 index with bounded reads", async () => {
   const now = new Date().toISOString();
   const day = now.slice(0, 10);
   const start = `${day}T00:00:00.000Z`;
@@ -30,11 +35,6 @@ it("claims in priority order through the D1 index with bounded reads", async () 
 });
 
 it("measures stage-filtered claims in a skewed 2,000-link queue", async () => {
-  await reset();
-  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-  await env.DB.prepare(`WITH RECURSIVE seq(n) AS (
-    SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<2000
-  ) INSERT INTO links(url,created_at,original_text) SELECT 'https://x.com/u/status/'||n,'t','captured source' FROM seq`).run();
   const now = new Date();
   await env.DB.prepare("UPDATE links SET original_text=NULL WHERE id<2000").run();
   await env.DB.prepare("UPDATE links SET original_text='stored source' WHERE id=2000").run();
