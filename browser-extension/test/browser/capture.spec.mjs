@@ -91,7 +91,7 @@ test.beforeAll(async () => {
   const extensionPath = join(root, "build", "chrome");
   // Grant only our synthetic CDN in this fixture. The real optional permission
   // request still executes, and the image response deliberately has no CORS.
-  const manifest=JSON.parse(await readFile(join(extensionPath,'manifest.json'),'utf8'));manifest.host_permissions.push('http://localhost/*');await writeFile(join(extensionPath,'manifest.json'),JSON.stringify(manifest));
+  const manifest=JSON.parse(await readFile(join(extensionPath,'manifest.json'),'utf8'));manifest.host_permissions.push('http://localhost/*','https://mp.weixin.qq.com/*');await writeFile(join(extensionPath,'manifest.json'),JSON.stringify(manifest));
   context = await chromium.launchPersistentContext(join(root, "profile"), {
     channel: "chromium", headless: true,
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"]
@@ -266,6 +266,103 @@ test('library extractor isolates the selected X post and keeps paragraphs, links
  await page.close();
 });
 
+
+test('X capture keeps the self-thread, full links and loaded replies but not ads or recommendations',async()=>{
+ const page=await context.newPage();
+ const post=(handle,id,text,extra='')=>`<article data-testid="tweet"><div data-testid="User-Name"><a href="/${handle}">${handle} 名字</a><a href="/${handle}">@${handle}</a><a href="/${handle}/status/${id}"><time datetime="2026-10-01T00:00:00Z">10月1日</time></a></div><div data-testid="tweetText">${text}</div>${extra}<button>回复</button></article>`;
+ const cell=html=>`<div data-testid="cellInnerDiv">${html}</div>`;
+ await page.route('https://x.com/Example/status/123',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<html><body><main><div aria-label="时间线：对话"><div>
+ ${cell(post('Other',100,'被回复的别人帖子'))}
+ ${cell(post('Example',123,'主帖正文，详情见评论。'))}
+ ${cell(post('Example',124,'补充：完整报告 <a href="https://t.co/abc"><span aria-hidden="true">https://</span>example.org/report-<span aria-hidden="true">2026/full</span><span aria-hidden="true">…</span></a>'))}
+ ${cell('<div></div>')}
+ ${cell(post('Reader',125,'关键信息：发布时间改到下周。'))}
+ ${cell(post('Example',126,'确认，下周发布。'))}
+ ${cell('<article data-testid="tweet"><div data-testid="User-Name"><a href="/Brand">@Brand</a></div><div data-testid="tweetText">推广内容</div></article>')}
+ ${cell('<div><h2>发现更多</h2></div>')}
+ ${cell(post('Someone',999,'推荐帖子，不属于收藏'))}
+ </div></div></main></body></html>`}));
+ await page.goto('https://x.com/Example/status/123');
+ await page.addScriptTag({content:await readFile(join(root,'build/chrome/capture-extractor.js'),'utf8')});
+ const result=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true));
+ const text=result.text,comments=text.indexOf('评论区');
+ expect(text).toContain('主帖正文');expect(text).toContain('https://example.org/report-2026/full');
+ expect(text.indexOf('补充：完整报告')).toBeGreaterThan(-1);expect(text.indexOf('补充：完整报告')).toBeLessThan(comments);
+ expect(text).toContain('评论区（2 条已加载的回复）');expect(text.slice(comments)).toContain('关键信息：发布时间改到下周。');
+ expect(text.slice(comments)).toMatch(/@Example（作者）[\s\S]*确认，下周发布。/);
+ expect(text).not.toMatch(/被回复的别人帖子|推广内容|推荐帖子|https:\/\/t\.co/);
+ await page.close();
+});
+
+test('turning comments off keeps the X self-thread but drops other replies',async()=>{
+ const page=await context.newPage();
+ const post=(handle,id,text)=>`<article data-testid="tweet"><div data-testid="User-Name"><a href="/${handle}">@${handle}</a><a href="/${handle}/status/${id}"><time datetime="2026-10-01T00:00:00Z">10月1日</time></a></div><div data-testid="tweetText">${text}</div></article>`;
+ const cell=html=>`<div data-testid="cellInnerDiv">${html}</div>`;
+ await page.route('https://x.com/Example/status/200',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<html><body><div><div>${cell(post('Example',200,'主帖'))}${cell(post('Example',201,'作者补充'))}${cell(post('Reader',202,'读者回复'))}</div></div></body></html>`}));
+ await page.goto('https://x.com/Example/status/200');
+ await page.addScriptTag({content:await readFile(join(root,'build/chrome/capture-extractor.js'),'utf8')});
+ const off=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true,{comments:false}));
+ expect(off.text).toContain('作者补充');expect(off.text).not.toMatch(/读者回复|评论区/);expect(off.comments).toBe(0);
+ const on=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true));
+ expect(on.text).toContain('评论区（1 条已加载的回复）');expect(on.text).toContain('读者回复');expect(on.comments).toBe(1);
+ await page.close();
+});
+
+test('WeChat article keeps loaded 留言 with author replies, and the setting turns them off',async()=>{
+ const page=await context.newPage();
+ const item=(id,name,content,{author=false,replies=''}={})=>`<li id="cid${id}" class="js_comment_item discuss_item"><div class="discuss_user_info${author?' discuss_author_info':''}" aria-hidden="true"><div class="discuss_user_nickname">${name}</div>${author?'<span class="discuss_relation_tips">作者</span>':''}</div><div class="discuss_send_time">10月2日</div><div class="discuss_message_content wx_folder_normal">${content}</div>${replies?`<div class="discuss_reply_area js_reply_area"><div class="discuss_reply js_reply_list">${replies}</div></div>`:''}</li>`;
+ const reply=(name,content,author)=>`<div><div class="discuss_user_info${author?' discuss_author_info':''}"><div class="discuss_user_nickname">${name}</div></div><div class="discuss_message_content wx_folder_normal">${content}</div></div>`;
+ await page.route('https://mp.weixin.qq.com/s/comments',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<html><head><title>公众号文章</title></head><body>
+ <div id="js_content"><p>公众号正文第一段，介绍新版本。</p><p>第二段正文，下载地址见留言。</p></div>
+ <div id="js_bt_cmt_container" class="js_cmt_container"><ul class="discuss_list">
+ ${item(1,'读者甲','下载地址在哪里？',{replies:reply('公众号作者','回复 <strong class="discuss_message_reply_nickname">读者甲</strong>：在 example.org/download',true)})}
+ ${item(2,'公众号作者','勘误：发布日期是 10 月 20 日。<br>第二行补充',{author:true})}
+ <li class="js_comment_item discuss_item cmt_ad_anchor_hidden"><div class="discuss_message_content">广告留言</div></li>
+ </ul></div></body></html>`}));
+ await page.goto('https://mp.weixin.qq.com/s/comments');
+ await page.addScriptTag({content:await readFile(join(root,'build/chrome/capture-extractor.js'),'utf8')});
+ const result=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true));
+ const text=result.text,comments=text.indexOf('评论区');
+ expect(text).toContain('公众号正文第一段');expect(comments).toBeGreaterThan(text.indexOf('第二段正文'));
+ expect(text).toContain('评论区（2 条已加载的留言）');expect(result.comments).toBe(2);
+ expect(text.slice(comments)).toMatch(/\*\*读者甲\*\* · 10月2日[\s\S]*下载地址在哪里？[\s\S]*\*\*公众号作者（作者）\*\*[\s\S]*在 example\.org\/download/);
+ expect(text.slice(comments)).toMatch(/勘误：发布日期是 10 月 20 日。\n>\s*\n?> 第二行补充/);
+ expect(text).not.toContain('广告留言');
+ const off=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true,{comments:false}));
+ expect(off.text).not.toMatch(/评论区|读者甲/);expect(off.comments).toBe(0);
+ await page.close();
+});
+
+test('popup offers the comment switch only when comments are loaded and remembers the choice',async()=>{
+ await context.route('https://mp.weixin.qq.com/s/popup-comments',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<html><head><title>带留言的文章</title></head><body>
+ <div id="js_content"><p>弹窗测试正文，足够长的一段内容用于识别。</p></div>
+ <ul class="discuss_list"><li id="cid1" class="js_comment_item discuss_item"><div class="discuss_user_nickname">读者乙</div><div class="discuss_message_content">留言里的关键补充</div></li></ul></body></html>`}));
+ const article=await context.newPage();await article.goto('https://mp.weixin.qq.com/s/popup-comments');
+ const tab=await worker.evaluate(async url=>(await chrome.tabs.query({})).find(t=>t.url===url),article.url());
+ const open=async()=>{const popup=await context.newPage();await popup.addInitScript(tab=>{chrome.tabs.query=async()=>[tab];},tab);await popup.goto(`${extensionURL}/popup.html`);await expect(popup.locator('#cap-stats')).toContainText('字');return popup;};
+ let popup=await open();await expect(popup.locator('#save')).toBeEnabled();
+ await expect(popup.locator('#comment-option')).toBeVisible();await expect(popup.locator('#comment-count')).toContainText('页面已加载 1 条评论');
+ await expect(popup.locator('#capture-comments')).toBeChecked();
+ await popup.screenshot({path:'test-results/capture-comments.png'});
+ await popup.locator('#comment-option .switch').click();await expect(popup.locator('#capture-comments')).not.toBeChecked();
+ await popup.locator('#save').click();await expect(popup.locator('#save')).toHaveText('已保存');
+ let saved=posts.findLast(p=>p.url===article.url());expect(saved.capture.text).toContain('弹窗测试正文');expect(saved.capture.text).not.toContain('留言里的关键补充');
+ expect(await worker.evaluate(async()=>(await chrome.storage.local.get('cairn_prefs_v1')).cairn_prefs_v1.captureComments)).toBe(false);
+ await popup.close();
+ // The remembered choice is restored; turning it back on captures the 留言.
+ popup=await open();await expect(popup.locator('#capture-comments')).not.toBeChecked();await expect(popup.locator('#save')).toBeDisabled();
+ // Changing the choice after a save offers a new capture.
+ await popup.locator('#comment-option .switch').click();await expect(popup.locator('#save')).toBeEnabled();await popup.locator('#save').click();await expect(popup.locator('#save')).toHaveText('已保存');
+ saved=posts.findLast(p=>p.url===article.url());expect(saved.capture.text).toContain('留言里的关键补充');
+ await popup.close();
+ // Pages without loaded comments do not show the switch.
+ const plain=await context.newPage();await plain.goto(`${origin}/rendered-article`);
+ const plainTab=await worker.evaluate(async url=>(await chrome.tabs.query({})).find(t=>t.url===url),plain.url());
+ const p2=await context.newPage();await p2.addInitScript(tab=>{chrome.tabs.query=async()=>[tab];},plainTab);await p2.goto(`${extensionURL}/popup.html`);
+ await expect(p2.locator('#cap-stats')).not.toContainText('正在识别');await expect(p2.locator('#comment-option')).toBeHidden();
+ await worker.evaluate(async()=>{const s=(await chrome.storage.local.get('cairn_prefs_v1')).cairn_prefs_v1;s.captureComments=true;await chrome.storage.local.set({cairn_prefs_v1:s});});
+ await p2.close();await plain.close();await article.close();
+});
 
 test("choose a collection during capture and resume its committed lost response without recapturing",async()=>{
  collectionEnabled=true;loseCollection=true;const before=posts.length;

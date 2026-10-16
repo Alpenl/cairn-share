@@ -3,7 +3,7 @@
 // version. A newer library version is announced, never applied silently.
 export const TAG_CACHE_KEY = "cairn_tags_v1";
 export const PREFS_KEY = "cairn_prefs_v1";
-export const DEFAULT_PREFS = { captureDefault: true, tagAutoCheck: true };
+export const DEFAULT_PREFS = { captureDefault: true, captureComments: true, tagAutoCheck: true };
 
 const refs = (dimensions = []) => new Set(dimensions.flatMap((d) => d.tags.map((t) => t.tag_ref)));
 export const tagCount = (cache) => (cache?.dimensions || []).reduce((n, d) => n + d.tags.length, 0);
