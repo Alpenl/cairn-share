@@ -236,7 +236,6 @@ async function savePrefs(patch) {
 }
 $("tag-auto").addEventListener("change", () => void savePrefs({ tagAutoCheck: $("tag-auto").checked }).catch((error) => showError($("status"), error)));
 $("capture-default").addEventListener("change", () => void savePrefs({ captureDefault: $("capture-default").checked }).catch((error) => showError($("status"), error)));
-$("capture-comments").addEventListener("change", () => void savePrefs({ captureComments: $("capture-comments").checked }).catch((error) => showError($("status"), error)));
 $("keep-full-url").addEventListener("change", async () => {
   try { await send("preferences", { preferences: { keepFullUrl: $("keep-full-url").checked } }); }
   catch (error) { $("keep-full-url").checked = !$("keep-full-url").checked; showError($("status"), error); }
@@ -285,7 +284,6 @@ try {
   prefs = { ...DEFAULT_PREFS, ...stored[PREFS_KEY] };
   tagCache = stored[TAG_CACHE_KEY] ?? null;
   $("capture-default").checked = prefs.captureDefault !== false;
-  $("capture-comments").checked = prefs.captureComments !== false;
   renderImagePermission(granted);
   await refresh();
   $("keep-full-url").checked = state.keepFullUrl !== false;

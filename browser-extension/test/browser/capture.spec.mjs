@@ -91,7 +91,7 @@ test.beforeAll(async () => {
   const extensionPath = join(root, "build", "chrome");
   // Grant only our synthetic CDN in this fixture. The real optional permission
   // request still executes, and the image response deliberately has no CORS.
-  const manifest=JSON.parse(await readFile(join(extensionPath,'manifest.json'),'utf8'));manifest.host_permissions.push('http://localhost/*');await writeFile(join(extensionPath,'manifest.json'),JSON.stringify(manifest));
+  const manifest=JSON.parse(await readFile(join(extensionPath,'manifest.json'),'utf8'));manifest.host_permissions.push('http://localhost/*','https://mp.weixin.qq.com/*');await writeFile(join(extensionPath,'manifest.json'),JSON.stringify(manifest));
   context = await chromium.launchPersistentContext(join(root, "profile"), {
     channel: "chromium", headless: true,
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"]
@@ -331,6 +331,37 @@ test('WeChat article keeps loaded 留言 with author replies, and the setting tu
  const off=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true,{comments:false}));
  expect(off.text).not.toMatch(/评论区|读者甲/);expect(off.comments).toBe(0);
  await page.close();
+});
+
+test('popup offers the comment switch only when comments are loaded and remembers the choice',async()=>{
+ await context.route('https://mp.weixin.qq.com/s/popup-comments',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<html><head><title>带留言的文章</title></head><body>
+ <div id="js_content"><p>弹窗测试正文，足够长的一段内容用于识别。</p></div>
+ <ul class="discuss_list"><li id="cid1" class="js_comment_item discuss_item"><div class="discuss_user_nickname">读者乙</div><div class="discuss_message_content">留言里的关键补充</div></li></ul></body></html>`}));
+ const article=await context.newPage();await article.goto('https://mp.weixin.qq.com/s/popup-comments');
+ const tab=await worker.evaluate(async url=>(await chrome.tabs.query({})).find(t=>t.url===url),article.url());
+ const open=async()=>{const popup=await context.newPage();await popup.addInitScript(tab=>{chrome.tabs.query=async()=>[tab];},tab);await popup.goto(`${extensionURL}/popup.html`);await expect(popup.locator('#cap-stats')).toContainText('字');return popup;};
+ let popup=await open();await expect(popup.locator('#save')).toBeEnabled();
+ await expect(popup.locator('#comment-option')).toBeVisible();await expect(popup.locator('#comment-count')).toContainText('页面已加载 1 条评论');
+ await expect(popup.locator('#capture-comments')).toBeChecked();
+ await popup.screenshot({path:'test-results/capture-comments.png'});
+ await popup.locator('#comment-option .switch').click();await expect(popup.locator('#capture-comments')).not.toBeChecked();
+ await popup.locator('#save').click();await expect(popup.locator('#save')).toHaveText('已保存');
+ let saved=posts.findLast(p=>p.url===article.url());expect(saved.capture.text).toContain('弹窗测试正文');expect(saved.capture.text).not.toContain('留言里的关键补充');
+ expect(await worker.evaluate(async()=>(await chrome.storage.local.get('cairn_prefs_v1')).cairn_prefs_v1.captureComments)).toBe(false);
+ await popup.close();
+ // The remembered choice is restored; turning it back on captures the 留言.
+ popup=await open();await expect(popup.locator('#capture-comments')).not.toBeChecked();await expect(popup.locator('#save')).toBeDisabled();
+ // Changing the choice after a save offers a new capture.
+ await popup.locator('#comment-option .switch').click();await expect(popup.locator('#save')).toBeEnabled();await popup.locator('#save').click();await expect(popup.locator('#save')).toHaveText('已保存');
+ saved=posts.findLast(p=>p.url===article.url());expect(saved.capture.text).toContain('留言里的关键补充');
+ await popup.close();
+ // Pages without loaded comments do not show the switch.
+ const plain=await context.newPage();await plain.goto(`${origin}/rendered-article`);
+ const plainTab=await worker.evaluate(async url=>(await chrome.tabs.query({})).find(t=>t.url===url),plain.url());
+ const p2=await context.newPage();await p2.addInitScript(tab=>{chrome.tabs.query=async()=>[tab];},plainTab);await p2.goto(`${extensionURL}/popup.html`);
+ await expect(p2.locator('#cap-stats')).not.toContainText('正在识别');await expect(p2.locator('#comment-option')).toBeHidden();
+ await worker.evaluate(async()=>{const s=(await chrome.storage.local.get('cairn_prefs_v1')).cairn_prefs_v1;s.captureComments=true;await chrome.storage.local.set({cairn_prefs_v1:s});});
+ await p2.close();await plain.close();await article.close();
 });
 
 test("choose a collection during capture and resume its committed lost response without recapturing",async()=>{

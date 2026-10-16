@@ -43,7 +43,7 @@ test("page preview tolerates empty extraction results", async () => {
   assert.ok(preview.origins.includes("https://video.twimg.com/*"));
 });
 
-test("the 采集评论区 setting reaches the page extractor for previews and captures", async () => {
+test("the 采集评论区 choice reaches the page extractor for previews and captures", async () => {
   const calls = [];
   const ext = prefs => ({
     storage: { local: { get: async () => (prefs ? { cairn_prefs_v1: prefs } : {}) } },
@@ -53,5 +53,7 @@ test("the 采集评论区 setting reaches the page extractor for previews and ca
   await pagePreview(ext({ captureComments: false }), 1, "https://example.com/a");
   await captureTab(ext({ captureComments: false }), 1, "https://example.com/a", "id");
   await captureTab(ext({ captureComments: true }), 1, "https://example.com/a", "id");
-  assert.deepEqual(calls, [{ comments: true }, { comments: false }, { comments: false }, { comments: true }]);
+  await captureTab(ext({ captureComments: true }), 1, "https://example.com/a", "id", { comments: false });
+  await pagePreview(ext({ captureComments: false }), 1, "https://example.com/a", { comments: true });
+  assert.deepEqual(calls, [{ comments: true }, { comments: false }, { comments: false }, { comments: true }, { comments: false }, { comments: true }]);
 });

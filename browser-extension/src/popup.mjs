@@ -17,7 +17,7 @@ let selectedCollections=new Set();let definitions=[];
 // fetch), refreshing, synced (refreshed in this popup), offline or idle.
 let tagCache=null,tagPhase="idle",tagsVisible=false,tagDim="all",tagsExpanded=false;
 let selectedTags=new Set(),freshTags=new Set(),prefs={...DEFAULT_PREFS};
-let preview=null;let known=null;
+let preview=null;let known=null;let commentsFound=0;
 let draftWrites = Promise.resolve();
 const DRAFT_KEY = "cairn_capture_draft";
 const PERMISSION_ERRORS = new Set(["media_permission", "capture_images_incomplete"]);
@@ -58,6 +58,10 @@ function inputsChanged() {
   $("favicon").hidden = !showCard || !$("favicon").getAttribute("src");
   $("capture-option").hidden = !samePage;
   $("capture-page").disabled = saving;
+  // Only pages with loaded comments offer the switch; the choice is remembered.
+  $("comment-option").hidden = !samePage || !$("capture-page").checked || !commentsFound;
+  $("capture-comments").disabled = saving;
+  $("comment-count").replaceChildren(stat("comment", `页面已加载 ${commentsFound} 条评论`));
   renderStats(samePage);
   const isKnown = Boolean(known?.saved) && known.url === $("url").value;
   $("saved-badge").hidden = !isKnown;
@@ -101,7 +105,6 @@ function renderStats(samePage) {
   const parts = [stat("text", preview.chars ? `${count(preview.chars)} 字${preview.truncated ? "+" : ""}` : "无正文")];
   if (preview.images) parts.push(stat("image", `${preview.images} 张图`));
   if (preview.videos + preview.audios) parts.push(stat("video", `${preview.videos + preview.audios} 个${preview.videos ? "视频" : "音频"}`));
-  if (preview.comments) parts.push(stat("comment", `${preview.comments} 条评论`));
   root.replaceChildren(...parts);
 }
 
@@ -210,7 +213,7 @@ $("capture-form").addEventListener("submit", async (event) => {
     if ($("capture-page").checked && $("url").value===activeTab?.url && requestedOrigins.length) await ext.permissions.request({origins:requestedOrigins});
     await persistDraft();
     const capture = { url: $("url").value, note: $("note").value, title, client_id: operationId, ...(state?.server === "cairn-go.alpenl.com" && known?.saved && known.url === $("url").value ? {expected:{id:known.id,content_revision:known.content_revision,app_body_revision:known.app_body_revision,personal_revision:known.personal_revision}} : {}), collection_ids:[...selectedCollections],tag_refs:chosenTags(),binding:state?.binding };
-    await send("save", { capture, tabId: activeTab?.id, capturePage: $("capture-page").checked && capture.url === activeTab?.url });
+    await send("save", { capture, tabId: activeTab?.id, capturePage: $("capture-page").checked && capture.url === activeTab?.url, captureComments: $("capture-comments").checked });
     await draftWrites;
     await ext.storage.local.remove(DRAFT_KEY);
     status($("status"), "已保存在本机，正在上传…", "pending");
@@ -241,6 +244,22 @@ $("image-permission").addEventListener("click", async () => {
 });
 $("recapture").addEventListener('click',()=>{saved=false;operationId=crypto.randomUUID();inputsChanged();$("capture-form").requestSubmit();});
 $("capture-page").addEventListener("change", () => { saved=false; operationId=crypto.randomUUID(); inputsChanged(); });
+// Runs the page preview for the current comment choice. The first pass
+// always includes comments, so the switch knows whether there are any.
+async function loadPreview() {
+  try {
+    const result = await pagePreview(ext, activeTab.id, activeTab.url, { comments: $("capture-comments").checked });
+    requestedOrigins = result.origins; preview = result.stats;
+  } catch { preview = { failed: true }; /* Save still offers a useful extraction error. */ }
+}
+$("capture-comments").addEventListener("change", async () => {
+  saved=false; operationId=crypto.randomUUID();
+  // Merge so a settings change made while the popup was open survives.
+  prefs = { ...DEFAULT_PREFS, ...(await ext.storage.local.get(PREFS_KEY))[PREFS_KEY], captureComments: $("capture-comments").checked };
+  await ext.storage.local.set({ [PREFS_KEY]: prefs });
+  preview = null; inputsChanged();
+  await loadPreview(); inputsChanged();
+});
 document.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !$("save").disabled) $("capture-form").requestSubmit(); });
 $("favicon").addEventListener("error", () => { $("favicon").removeAttribute("src"); $("favicon").hidden = true; });
 
@@ -248,10 +267,16 @@ try {
   const [tabs, stored] = await Promise.all([ext.tabs.query({ active: true, currentWindow: true }), ext.storage.local.get([DRAFT_KEY, PREFS_KEY, TAG_CACHE_KEY])]);
   prefs = { ...DEFAULT_PREFS, ...stored[PREFS_KEY] };
   $("capture-page").checked = prefs.captureDefault !== false;
+  $("capture-comments").checked = prefs.captureComments !== false;
   const tab = tabs[0];
   activeTab = tab;
   if (tab?.id && /^https?:/.test(tab.url || '')) {
-    try { const result=await pagePreview(ext,tab.id,tab.url); requestedOrigins=result.origins; preview=result.stats; } catch { preview={failed:true}; /* Save still offers a useful extraction error. */ }
+    const wanted = $("capture-comments").checked;
+    $("capture-comments").checked = true;
+    await loadPreview();
+    commentsFound = preview?.comments || 0;
+    $("capture-comments").checked = wanted;
+    if (!wanted && commentsFound) await loadPreview();
   }
   if (/^https?:/.test(tab?.favIconUrl || '')) $("favicon").src = tab.favIconUrl;
   const draft = stored[DRAFT_KEY];

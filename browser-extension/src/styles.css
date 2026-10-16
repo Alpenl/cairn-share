@@ -118,6 +118,7 @@ body.popup { width: 380px; max-height: 600px; display: flex; flex-direction: col
 .cap-stats span { display: inline-flex; align-items: center; gap: 4px; }
 .cap-stats svg { width: 13px; height: 13px; color: var(--faint); }
 .cap-row .switch { margin-left: auto; }
+.cap-row + .cap-row { margin-top: 0; }
 .url-field { margin-top: 10px; padding-bottom: 12px; }
 .url-input { font-size: 12.5px; word-break: break-all; min-height: 54px; background: var(--canvas); }
 .page-card.editing { padding-bottom: 0; }

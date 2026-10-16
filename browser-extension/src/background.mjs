@@ -68,7 +68,7 @@ async function dispatch(message) {
       const capture = message.capture;
       const known = await controller.snapshot();
       if (message.tabId && message.capturePage && !known.queue.some(j => j.client_id === capture.client_id) && known.lastResult?.client_id !== capture.client_id) {
-        try { capture.capture = await captureTab(ext, message.tabId, capture.url, capture.client_id); }
+        try { capture.capture = await captureTab(ext, message.tabId, capture.url, capture.client_id, typeof message.captureComments === "boolean" ? { comments: message.captureComments } : undefined); }
         catch { throw new CaptureError("capture_unavailable"); }
       }
       await controller.enqueue(capture);

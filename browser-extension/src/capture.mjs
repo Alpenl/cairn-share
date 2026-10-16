@@ -5,7 +5,8 @@ export function extractPage(expectedURL, preview=false, options={}) {
  if(typeof globalThis.__cairnExtractPage!=="function")throw new Error("capture_unavailable");
  return globalThis.__cairnExtractPage(expectedURL,preview,options);
 }
-// The settings switch 「采集评论区」; comments are kept unless it is off.
+// The popup's 「采集评论区」 choice, remembered for the context menu and
+// batch capture; comments are kept unless it was turned off.
 export async function captureOptions(ext){
  try{return {comments:(await ext.storage.local.get(PREFS_KEY))[PREFS_KEY]?.captureComments!==false};}
  catch{return {comments:true};}
@@ -14,9 +15,10 @@ async function prepareExtractor(ext,tabId){
  await ext.scripting.executeScript({target:{tabId},files:["capture-extractor.js"]});
 }
 
-export async function captureTab(ext, tabId, expectedURL, clientID) {
+// options overrides the remembered choice, e.g. the popup's comment switch.
+export async function captureTab(ext, tabId, expectedURL, clientID, options) {
   await prepareExtractor(ext,tabId);
-  const [{result}]=await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[expectedURL,false,await captureOptions(ext)]});
+  const [{result}]=await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[expectedURL,false,options||await captureOptions(ext)]});
   if(!result?.text)throw new Error('capture_unavailable');
   const images=[];let missing=0;
   for(let i=0;i<result.images.length;i++){
@@ -58,9 +60,9 @@ export async function mediaPermissions(ext, tabId, url) {
 
 // One preview pass serves both the permission request and the popup's
 // one-line capture summary (characters · images · videos).
-export async function pagePreview(ext, tabId, url) {
+export async function pagePreview(ext, tabId, url, options) {
   await prepareExtractor(ext,tabId);
-  const [{result}] = await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[url,true,await captureOptions(ext)]});
+  const [{result}] = await ext.scripting.executeScript({target:{tabId},func:extractPage,args:[url,true,options||await captureOptions(ext)]});
   const origins = new Set();
   for (const item of [...(result?.images || []),...(result?.media || [])]) {
     try {const u=new URL(item.url);if(/^https?:$/.test(u.protocol))origins.add(`${u.protocol}//${u.hostname}/*`);}catch{}
