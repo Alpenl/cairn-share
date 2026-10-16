@@ -22,6 +22,7 @@ import { tagSystemRoute, attachTagSummaries, projectTagSummaryRows, contentFunct
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
+import { entityEvidenceRoute } from "./entity-evidence";
 import { applyV1Write, topicGranularityAware } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
 import { selectionPayload, taxonomyV2Route } from "./taxonomy-routes";
@@ -615,6 +616,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   }
   // App-facing curation is an exact allowlist, never an alias for arbitrary
   // internal v2 paths. Reads and human field actions do not invoke a model.
+  const appEvidence = path.match(/^\/api\/bookmarks\/(\d+)\/entity-evidence$/);
+  if (appEvidence) {
+    const denied = requireApiToken(request, env);
+    if (denied !== null) return denied;
+    return entityEvidenceRoute(request, env, Number(appEvidence[1]));
+  }
   const appV2 = path.match(/^\/api\/bookmarks\/(\d+)\/(v2-selection|v2-override)$/);
   const appTags = path.match(/^\/api\/bookmarks\/(\d+)\/(tags|tag-history)$/);
   if (appTags || /^\/api\/custom-tags(?:\/[A-Za-z0-9-]+)?$/.test(path) || ["/api/tag-counts", "/api/tag-export"].includes(path)) {

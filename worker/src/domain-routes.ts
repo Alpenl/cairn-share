@@ -4,6 +4,7 @@ import { historicalCatalog, managedCatalog } from "./tag-catalog";
 import { readJSONObject } from "./json-body";
 import { entityCacheRoute } from "./entity-cache";
 import {validEntityObservations,type EntityBlock} from "./entity-judgments";
+import { entityEvidenceRoute } from "./entity-evidence";
 import { classificationBudgetRoute } from "./classification-budget";
 import { classificationAttemptsRoute } from "./classification-attempts";
 import { readSelectionSnapshot, readSelectionSnapshots } from "./selection-state";
@@ -48,6 +49,8 @@ type QueryObserver = {
 };
 
 export async function domainRoute(request: Request, env: Env, path: string, observer?: QueryObserver): Promise<Response> {
+  const entityEvidence = path.match(/^\/api\/v2\/links\/(\d+)\/entity-evidence$/);
+  if (entityEvidence) return entityEvidenceRoute(request, env, Number(entityEvidence[1]));
   if (path === "/api/v2/links/effective-batch") {
     return request.method === "POST" ? effectiveBatch(request, env, observer) : fail("method_not_allowed", 405);
   }

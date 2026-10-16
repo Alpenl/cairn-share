@@ -42,6 +42,8 @@ import com.alpenl.cairn.share.network.MultidimensionalSelection
 import com.alpenl.cairn.share.network.SavedLink
 import com.alpenl.cairn.share.network.SelectionFieldState
 import com.alpenl.cairn.share.network.EntityObservation
+import com.alpenl.cairn.share.network.EntityEvidenceReadState
+import com.alpenl.cairn.share.network.evidenceReference
 
 /**
  * The multidimensional curation section (B07).
@@ -68,6 +70,11 @@ internal fun MultidimensionalCurationSection(
     onFlush: () -> Unit,
     onExport: () -> Unit,
     onOpenExternal: (String) -> Unit,
+    entityEvidence: EntityEvidenceReadState?,
+    onLoadEntityEvidence: (EntityObservation) -> Unit,
+    onCloseEntityEvidence: (Long) -> Unit,
+    onRetryEntityEvidence: (Long) -> Unit,
+    onRefreshEntityEvidence: (Long) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().testTag("v2_section"),
@@ -162,10 +169,13 @@ internal fun MultidimensionalCurationSection(
         val entities = effective.state?.entities
         Text("实体：${effective.state?.entityStatusLabel ?: "运行状态未知"}", modifier = Modifier.testTag("v2_entities_status"), style = MaterialTheme.typography.bodySmall)
         entities?.values?.forEach { Text("${it.term} · ${it.label}", style = MaterialTheme.typography.bodySmall) }
-        EntityJudgmentDetails(effective.state?.entityObservations, onOpenExternal)
+        EntityJudgmentDetails(effective.state?.entityObservations, onOpenExternal, onLoadEntityEvidence)
         }
         if (effective.state?.evidencePartial == true) Text("来源证据不完整，建议仅基于已取得的内容。", modifier = Modifier.testTag("v2_evidence_partial"), style = MaterialTheme.typography.bodySmall)
         if (effective.state?.answersPartial == true) Text("部分分类问题尚无结果。", style = MaterialTheme.typography.bodySmall)
+        entityEvidence?.let { read ->
+            EntitySourceDialog(read, effective, onCloseEntityEvidence, onRetryEntityEvidence, onRefreshEntityEvidence)
+        }
         Row {
             TextButton(onClick = onExport, modifier = Modifier.testTag("v2_export")) { Text("复制多维整理") }
         }
@@ -173,7 +183,11 @@ internal fun MultidimensionalCurationSection(
 }
 
 @Composable
-private fun EntityJudgmentDetails(observations: List<EntityObservation>?, onOpenExternal: (String) -> Unit) {
+private fun EntityJudgmentDetails(
+    observations: List<EntityObservation>?,
+    onOpenExternal: (String) -> Unit,
+    onReadSource: (EntityObservation) -> Unit,
+) {
     if (observations.isNullOrEmpty()) {
         Text(if (observations == null) "实体判断依据不可用" else "当前没有可展示的实体判断记录", style = MaterialTheme.typography.bodySmall)
         return
@@ -196,6 +210,9 @@ private fun EntityJudgmentDetails(observations: List<EntityObservation>?, onOpen
                         Text(o.effectiveLabel)
                         Text("来源：${o.sourceLabel}")
                         Text("来源版本 ${o.sourceRevision} · 身份目录 ${o.catalogVersion}")
+                        if (o.evidenceReference() != null) TextButton(
+                            onClick = { onReadSource(o) }, modifier = Modifier.testTag("v2_entity_source_$index"),
+                        ) { Text("查看来源片段") }
                         (listOfNotNull(o.sourceUrl) + o.identifiers).distinct().forEachIndexed { linkIndex, url ->
                             if (validateHttpUrl(url)) {
                                 TextButton(
