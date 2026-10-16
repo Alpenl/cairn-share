@@ -267,6 +267,33 @@ test('library extractor isolates the selected X post and keeps paragraphs, links
 });
 
 
+test('X capture keeps the self-thread, full links and loaded replies but not ads or recommendations',async()=>{
+ const page=await context.newPage();
+ const post=(handle,id,text,extra='')=>`<article data-testid="tweet"><div data-testid="User-Name"><a href="/${handle}">${handle} 名字</a><a href="/${handle}">@${handle}</a><a href="/${handle}/status/${id}"><time datetime="2026-10-01T00:00:00Z">10月1日</time></a></div><div data-testid="tweetText">${text}</div>${extra}<button>回复</button></article>`;
+ const cell=html=>`<div data-testid="cellInnerDiv">${html}</div>`;
+ await page.route('https://x.com/Example/status/123',route=>route.fulfill({contentType:'text/html; charset=utf-8',body:`<html><body><main><div aria-label="时间线：对话"><div>
+ ${cell(post('Other',100,'被回复的别人帖子'))}
+ ${cell(post('Example',123,'主帖正文，详情见评论。'))}
+ ${cell(post('Example',124,'补充：完整报告 <a href="https://t.co/abc"><span aria-hidden="true">https://</span>example.org/report-<span aria-hidden="true">2026/full</span><span aria-hidden="true">…</span></a>'))}
+ ${cell('<div></div>')}
+ ${cell(post('Reader',125,'关键信息：发布时间改到下周。'))}
+ ${cell(post('Example',126,'确认，下周发布。'))}
+ ${cell('<article data-testid="tweet"><div data-testid="User-Name"><a href="/Brand">@Brand</a></div><div data-testid="tweetText">推广内容</div></article>')}
+ ${cell('<div><h2>发现更多</h2></div>')}
+ ${cell(post('Someone',999,'推荐帖子，不属于收藏'))}
+ </div></div></main></body></html>`}));
+ await page.goto('https://x.com/Example/status/123');
+ await page.addScriptTag({content:await readFile(join(root,'build/chrome/capture-extractor.js'),'utf8')});
+ const result=await page.evaluate(()=>globalThis.__cairnExtractPage(location.href,true));
+ const text=result.text,comments=text.indexOf('评论区');
+ expect(text).toContain('主帖正文');expect(text).toContain('https://example.org/report-2026/full');
+ expect(text.indexOf('补充：完整报告')).toBeGreaterThan(-1);expect(text.indexOf('补充：完整报告')).toBeLessThan(comments);
+ expect(text).toContain('评论区（2 条已加载的回复）');expect(text.slice(comments)).toContain('关键信息：发布时间改到下周。');
+ expect(text.slice(comments)).toMatch(/@Example（作者）[\s\S]*确认，下周发布。/);
+ expect(text).not.toMatch(/被回复的别人帖子|推广内容|推荐帖子|https:\/\/t\.co/);
+ await page.close();
+});
+
 test("choose a collection during capture and resume its committed lost response without recapturing",async()=>{
  collectionEnabled=true;loseCollection=true;const before=posts.length;
  const popup=await context.newPage();await popup.goto(`${extensionURL}/popup.html`);await popup.locator('#url').fill('https://example.com/collection-capture');
