@@ -60,7 +60,12 @@ class TagManagerUiInstrumentedTest {
     reconnect.set(true)
     compose.onNodeWithText("重试同步",useUnmergedTree=true).performClick()
     val account=accountKeyFor(server.url("/").toString(),token);compose.waitUntil(30000){runBlocking{CollectionStore(app).tagManagement(account).pending==null}}
-    synchronized(payload){assertEquals(1,catalog.getJSONArray("topics").length());assertTrue(catalog.getJSONArray("topics").getJSONObject(0).getBoolean("ai_enabled"));assertEquals(1,keys.distinct().size);assertTrue(keys.size>=2)}
+    synchronized(payload) {
+     assertEquals("one idempotent tag creation", 1, catalog.getJSONArray("topics").length())
+     assertTrue("the created tag must keep AI assignment enabled", catalog.getJSONArray("topics").getJSONObject(0).getBoolean("ai_enabled"))
+     assertEquals("all retries must reuse the durable operation key", 1, keys.distinct().size)
+     assertTrue("a lost response must cause an actual replay; POST attempts=" + keys.size, keys.size >= 2)
+    }
    }
   }finally{server.shutdown()}
  }
