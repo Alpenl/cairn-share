@@ -101,6 +101,90 @@ class AccountCacheInstrumentedTest {
 
     @Test fun backgroundCommitRejectsLateDetailBeforeUiNotification() = runBlocking<Unit> { lateDetailAfterBackgroundCommit(false) }
 
+    @Test fun closedSourceReadCannotReplaceNewerReadOrBeClosedByOldPopup() = runBlocking<Unit> { lateEntitySource("close") }
+
+    @Test fun sourceReadCannotSurviveAccountAToBToA() = runBlocking<Unit> { lateEntitySource("account") }
+
+    @Test fun deletingBookmarkDiscardsPendingSourceRead() = runBlocking<Unit> { lateEntitySource("delete") }
+
+    private suspend fun lateEntitySource(action: String) {
+        val entered = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        val reads = AtomicInteger()
+        val writes = AtomicInteger()
+        fun asset(name: String) = JSONObject(InstrumentationRegistry.getInstrumentation().context.assets
+            .open(name).bufferedReader().use { it.readText() })
+        val selected = asset("entity-observations-v1.json")
+        val excerpt = asset("entity-source-evidence-v1.json").put("span_start", 0).put("span_end", 4).put("before", "")
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.method == "POST") writes.incrementAndGet()
+                return when (request.requestUrl!!.encodedPath) {
+                    "/api/links" -> page("A")
+                    "/api/links/1" -> if (request.method == "DELETE") MockResponse().setResponseCode(204) else json(link(1, "A", true))
+                    "/api/bookmarks/1/v2-selection" -> json(selected)
+                    "/api/bookmarks/1/entity-evidence" -> {
+                        assertEquals("Bearer " + tokenA, request.getHeader("Authorization"))
+                        val first = reads.incrementAndGet() == 1
+                        if (first) {
+                            entered.countDown()
+                            if (!release.await(30, TimeUnit.SECONDS)) return MockResponse().setResponseCode(503)
+                            returned.countDown()
+                        }
+                        json(JSONObject(excerpt.toString()).put("after", if (first) " OLD" else " NEW"))
+                            .setHeader("X-Cairn-Entity-Evidence", "1")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val model = start()
+        awaitState(model) { it.links.size == 4 && !it.loading }
+        withContext(Dispatchers.Main) { model.loadV2Selection(1) }
+        awaitState(model) { it.v2Selections[1]?.state?.entityObservations?.isNotEmpty() == true }
+        val observation = withContext(Dispatchers.Main) { model.uiState.v2Selections[1]!!.state!!.entityObservations!!.first() }
+        withContext(Dispatchers.Main) { model.loadEntityEvidence(1, observation) }
+        assertTrue("source HTTP request entered", entered.await(10, TimeUnit.SECONDS))
+        val oldRequest = withContext(Dispatchers.Main) { model.uiState.entityEvidence!!.requestId }
+        when (action) {
+            "close" -> withContext(Dispatchers.Main) { model.closeEntityEvidence(oldRequest); assertNull(model.uiState.entityEvidence) }
+            "account" -> {
+                withContext(Dispatchers.Main) { model.setApiToken(tokenB); assertNull(model.uiState.entityEvidence) }
+                awaitStoredToken(tokenB)
+                awaitState(model) { it.preferences.apiToken == tokenB && !it.loading }
+                withContext(Dispatchers.Main) { model.setApiToken(tokenA) }
+                awaitStoredToken(tokenA)
+                awaitState(model) { it.preferences.apiToken == tokenA && it.links.size == 4 && !it.loading }
+                withContext(Dispatchers.Main) { model.loadV2Selection(1, force = true) }
+                awaitState(model) { it.v2Selections[1]?.state?.entityObservations?.isNotEmpty() == true }
+            }
+            "delete" -> {
+                withContext(Dispatchers.Main) { model.deleteLink(1) {}; assertNull(model.uiState.entityEvidence) }
+                awaitState(model) { it.links.none { item -> item.id == 1 } && 1 !in it.busyIds }
+            }
+        }
+        if (action != "delete") {
+            withContext(Dispatchers.Main) { model.loadEntityEvidence(1, observation) }
+            awaitState(model) {
+                (it.entityEvidence?.result as? com.alpenl.cairn.share.network.EntityEvidenceResult.Loaded)?.value?.after == " NEW"
+            }
+            withContext(Dispatchers.Main) {
+                model.closeEntityEvidence(oldRequest)
+                assertNotNull("disposing old popup must not clear a new request", model.uiState.entityEvidence)
+            }
+        }
+        release.countDown()
+        assertTrue("old fixture response released", returned.await(5, TimeUnit.SECONDS))
+        // Drain Main after the canceled HTTP response; both generation and request
+        // identity must continue to protect the new state.
+        withContext(Dispatchers.Main) {
+            if (action == "delete") assertNull(model.uiState.entityEvidence)
+            else assertEquals(" NEW", (model.uiState.entityEvidence!!.result as com.alpenl.cairn.share.network.EntityEvidenceResult.Loaded).value.after)
+        }
+        assertEquals("source viewing must not submit edits or classification", 0, writes.get())
+        assertTrue(actions.snapshot().isEmpty())
+    }
+
     @Test fun backgroundDeleteCannotBeResurrectedByLateDetail() = runBlocking<Unit> { lateDetailAfterBackgroundCommit(true) }
 
     @Test fun staleNotFoundCannotDeleteBackgroundUpdate() = runBlocking<Unit> { lateDetailAfterBackgroundCommit(false, true) }

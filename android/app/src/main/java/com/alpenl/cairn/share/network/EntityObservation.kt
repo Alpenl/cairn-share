@@ -19,6 +19,7 @@ internal data class EntityObservation(
     val catalogVersion: String,
     val sourceRevision: Long,
     val effective: Boolean,
+    val evidenceSnapshotId: Long,
 ) {
     val decisionLabel: String get() = when (decision) {
         "relevant" -> "与内容相关"
@@ -64,7 +65,7 @@ internal fun decodeEntityObservations(
     if (rows.length() > 40) return null
     if (rows.length() == 0) return emptyList()
     val sourceRevision = json.nonnegativeRevision("content_revision") ?: return null
-    if ((json.nonnegativeRevision("evidence_snapshot_id") ?: 0) <= 0) return null
+    val snapshotId = json.nonnegativeRevision("evidence_snapshot_id")?.takeIf { it > 0 } ?: return null
     val seen = mutableSetOf<List<Any>>()
     return (0 until rows.length()).map { index ->
         val row = rows.optJSONObject(index) ?: return null
@@ -109,6 +110,6 @@ internal fun decodeEntityObservations(
         val effective = serverEffective && sourceRevision == currentRevision && entities?.status == "completed_nonempty" &&
             decision == "relevant" && entities.values.any { it.term == surface }
         EntityObservation(surface, block, start, end, url, decision, identityState, id, label, kind,
-            identifiers, version, sourceRevision, effective)
+            identifiers, version, sourceRevision, effective, snapshotId)
     }
 }

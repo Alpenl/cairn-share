@@ -90,6 +90,21 @@ class CurationWorkerRecoveryTest {
         val before = read()
         assertEquals(listOf("acme-a", "acme-b", null), before.state!!.entityObservations!!.map { it.canonicalId })
         assertTrue(before.state.entityObservations.all { it.effective })
+        val evidenceClient = com.alpenl.cairn.share.network.EntityEvidenceClient(base)
+        for (observation in before.state.entityObservations) {
+            val ref = com.alpenl.cairn.share.network.EntityEvidenceReference(
+                observation.evidenceSnapshotId, observation.sourceRevision, observation.blockId,
+                observation.start, observation.end, observation.surface)
+            val loaded = evidenceClient.load(id, ref, token) as com.alpenl.cairn.share.network.EntityEvidenceResult.Loaded
+            assertEquals("Acme", loaded.value.quote)
+            assertTrue(loaded.value.current)
+            assertEquals(if (observation.blockId == "a") "primary" else "quoted", loaded.value.role)
+            assertEquals(com.alpenl.cairn.share.network.EntityEvidenceResult.Unavailable,
+                evidenceClient.load(id, ref.copy(blockId = "missing"), token))
+            assertEquals(com.alpenl.cairn.share.network.EntityEvidenceResult.Failed(com.alpenl.cairn.share.network.FailureKind.Unauthorized),
+                evidenceClient.load(id, ref, "wrong-account"))
+        }
+        assertEquals(before.revision, read().revision)
         for ((action, expected) in listOf("reject" to false, "reset" to true)) {
             val current = read()
             http("/__test/direct/api/bookmarks/$id/v2-override", JSONObject().put("field", "entities")

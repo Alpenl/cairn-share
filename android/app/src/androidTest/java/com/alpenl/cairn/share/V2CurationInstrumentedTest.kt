@@ -277,6 +277,79 @@ class V2CurationInstrumentedTest {
 
     @Test fun opensStoredSourceOnlyAfterTapAndDeduplicatesMatchingIdentityEvidence() = inspectEntityEvidence(false, linkedSource = true)
 
+    @Test fun sourceExcerptIsExplicitlyLoadedAndBoundToItsStoredVersion() = inspectSourceExcerpt()
+
+    @Test fun sourceExcerptDistinguishesUnsupportedMissingChangedAndInvalidResponses() = inspectSourceExcerpt(errors = true)
+
+    private fun inspectSourceExcerpt(errors: Boolean = false) {
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        fun asset(name: String) = JSONObject(InstrumentationRegistry.getInstrumentation().context.assets
+            .open(name).bufferedReader().use { it.readText() })
+        val selected = asset("entity-observations-v1.json").put("id", 4)
+        selected.getJSONObject("state").put("content_revision", 2).getJSONObject("entities")
+            .getJSONArray("observations").getJSONObject(0).getJSONObject("candidate").put("start", 2).put("end", 6)
+        val excerpt = asset("entity-source-evidence-v1.json").put("bookmark_id", 4).put("current", false)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.requestUrl!!.encodedPath
+                requests.add(request.method + " " + path)
+                return when (path) {
+                    "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                    "/api/links/4", "/api/bookmarks/4" -> response(link(4))
+                    "/api/bookmarks/4/v2-selection" -> response(selected)
+                    "/api/v2-taxonomy" -> response(taxonomy())
+                    "/api/bookmarks/4/entity-evidence" -> {
+                        assertEquals("Bearer " + token, request.getHeader("Authorization"))
+                        assertEquals(setOf("snapshot_id", "content_revision", "block_id", "start", "end"), request.requestUrl!!.queryParameterNames)
+                        assertEquals("1", request.requestUrl!!.queryParameter("snapshot_id"))
+                        assertEquals("1", request.requestUrl!!.queryParameter("content_revision"))
+                        assertEquals("a", request.requestUrl!!.queryParameter("block_id"))
+                        assertEquals("2", request.requestUrl!!.queryParameter("start"))
+                        assertEquals("6", request.requestUrl!!.queryParameter("end"))
+                        val attempt = reads.incrementAndGet()
+                        if (!errors) response(excerpt).setHeader("X-Cairn-Entity-Evidence", "1")
+                        else when (attempt) {
+                            1 -> MockResponse().setResponseCode(404)
+                            2 -> MockResponse().setResponseCode(404).setHeader("X-Cairn-Entity-Evidence", "1")
+                            3 -> MockResponse().setResponseCode(409).setHeader("X-Cairn-Entity-Evidence", "1")
+                            4 -> response(JSONObject(excerpt.toString()).put("quote", "foreign")).setHeader("X-Cairn-Entity-Evidence", "1")
+                            5 -> response("x".repeat(32 * 1024 + 1)).setHeader("X-Cairn-Entity-Evidence", "1")
+                            else -> response(excerpt).setHeader("X-Cairn-Entity-Evidence", "1")
+                        }
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use {
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("v2_entities_observations"))
+            compose.onNodeWithTag("v2_entities_observations").performClick()
+            compose.onNodeWithTag("v2_entity_source_0").performScrollTo().assertIsDisplayed()
+            assertEquals("merely opening entity records must not fetch source material", 0, reads.get())
+            val messages = if (errors) listOf("当前服务不支持来源片段定位。", "原始片段不可用，请刷新依据后重试。",
+                "依据版本已变化，请刷新后重新选择。", "读取失败，请重试。", "读取失败，请重试。") else emptyList()
+            for (message in messages) {
+                compose.onNodeWithTag("v2_entity_source_0").performScrollTo().performClick()
+                compose.waitUntil(20_000) { runCatching {
+                    compose.onNodeWithTag("v2_entity_source_error").assertTextEquals(message); true
+                }.getOrDefault(false) }
+                compose.onNodeWithTag("v2_entity_source_text").assertDoesNotExist()
+                compose.onNodeWithTag("v2_entity_source_close").performClick()
+            }
+            compose.onNodeWithTag("v2_entity_source_0").performScrollTo().performClick()
+            compose.waitUntil(20_000) { runCatching {
+                compose.onNodeWithTag("v2_entity_source_text").assertTextEquals("前🙂Acme 后𠮷"); true
+            }.getOrDefault(false) }
+            compose.onNodeWithTag("v2_entity_source_stale").assertExists()
+            compose.onNodeWithTag("v2_entity_source_close").performClick()
+            compose.onNodeWithText("关闭").performClick()
+            assertTrue(requests.none { it.startsWith("POST ") || it.startsWith("DELETE ") || it.contains("/classifications/") })
+            assertTrue(runBlocking { CurationActionStore(context).snapshot().isEmpty() })
+        }
+    }
+
     @Test fun aConflictKeepsTheDraftAndOffersReapply() {
         val attempts = java.util.concurrent.atomic.AtomicInteger()
         val bodies = java.util.Collections.synchronizedList(mutableListOf<JSONObject>())
