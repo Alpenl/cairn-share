@@ -962,6 +962,7 @@ private fun DetailScreen(
                                 onLoadTaxonomy = onLoadV2Taxonomy, onAction = onV2Action,
                                 onReapply = onV2Reapply, onDiscard = onV2Discard, onFlush = onFlushV2,
                                 onExport = { onCopy(v2ExportMarkdown(link, effective, state.v2Taxonomy ?: state.taxonomy)) },
+                                onOpenExternal = onOpenExternal,
                             )
                             PersonalTagsSection(linkId = id, baseUrl = state.apiBaseUrl, apiToken = state.preferences.apiToken,
                                 onChanged = { onLoadV2(id, true); onEnsureLink(id) }, onFlush = onFlushPersonal, editorDraft = personalEditor)

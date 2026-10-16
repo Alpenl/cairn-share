@@ -34,6 +34,8 @@ import com.alpenl.cairn.share.ui.components.TagChip
 import com.alpenl.cairn.share.ui.components.TagState
 import com.alpenl.cairn.share.ui.components.TagTone
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.alpenl.cairn.share.network.BookmarkTaxonomy
 import com.alpenl.cairn.share.network.MultidimensionalSelection
@@ -65,6 +67,7 @@ internal fun MultidimensionalCurationSection(
     onDiscard: () -> Unit,
     onFlush: () -> Unit,
     onExport: () -> Unit,
+    onOpenExternal: (String) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().testTag("v2_section"),
@@ -159,7 +162,7 @@ internal fun MultidimensionalCurationSection(
         val entities = effective.state?.entities
         Text("实体：${effective.state?.entityStatusLabel ?: "运行状态未知"}", modifier = Modifier.testTag("v2_entities_status"), style = MaterialTheme.typography.bodySmall)
         entities?.values?.forEach { Text("${it.term} · ${it.label}", style = MaterialTheme.typography.bodySmall) }
-        EntityJudgmentDetails(effective.state?.entityObservations)
+        EntityJudgmentDetails(effective.state?.entityObservations, onOpenExternal)
         }
         if (effective.state?.evidencePartial == true) Text("来源证据不完整，建议仅基于已取得的内容。", modifier = Modifier.testTag("v2_evidence_partial"), style = MaterialTheme.typography.bodySmall)
         if (effective.state?.answersPartial == true) Text("部分分类问题尚无结果。", style = MaterialTheme.typography.bodySmall)
@@ -170,7 +173,7 @@ internal fun MultidimensionalCurationSection(
 }
 
 @Composable
-private fun EntityJudgmentDetails(observations: List<EntityObservation>?) {
+private fun EntityJudgmentDetails(observations: List<EntityObservation>?, onOpenExternal: (String) -> Unit) {
     if (observations.isNullOrEmpty()) {
         Text(if (observations == null) "实体判断依据不可用" else "当前没有可展示的实体判断记录", style = MaterialTheme.typography.bodySmall)
         return
@@ -193,7 +196,17 @@ private fun EntityJudgmentDetails(observations: List<EntityObservation>?) {
                         Text(o.effectiveLabel)
                         Text("来源：${o.sourceLabel}")
                         Text("来源版本 ${o.sourceRevision} · 身份目录 ${o.catalogVersion}")
-                        o.identifiers.forEach { Text(it) }
+                        (listOfNotNull(o.sourceUrl) + o.identifiers).distinct().forEachIndexed { linkIndex, url ->
+                            if (validateHttpUrl(url)) {
+                                TextButton(
+                                    onClick = { onOpenExternal(url) },
+                                    modifier = Modifier.fillMaxWidth().testTag("v2_entity_link_${index}_$linkIndex")
+                                        .semantics { contentDescription = "在浏览器中打开依据：$url" },
+                                ) { Text(url, style = MaterialTheme.typography.bodySmall) }
+                            } else {
+                                Text(url, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
                     }
                 }
             }
