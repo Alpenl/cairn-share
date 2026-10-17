@@ -6,7 +6,7 @@ import android.app.Instrumentation
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -33,6 +33,8 @@ import java.util.concurrent.atomic.AtomicReference
  */
 @RunWith(AndroidJUnit4::class)
 class V2CurationInstrumentedTest {
+    // Queue coroutine resumes on the test scheduler; v1's unconfined
+    // dispatcher could run frame application on the HTTP executor thread.
     @get:Rule val compose = createEmptyComposeRule()
     private val server = MockWebServer()
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext

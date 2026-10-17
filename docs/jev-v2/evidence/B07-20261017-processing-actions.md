@@ -44,4 +44,10 @@ Worker 固定 `a54a57ec2e9371bc2b923f6cad38f4e90d4adf62`，Go 固定 `f081b31725
 
 本地首轮完整 API35 为 117 XML：91 通过、1 失败、25 专用 skip；后续真实 Worker 阶段未启动。新增账号恢复测试在确认成功后刷新详情，夹具却返回 404，导致正常删除保护清理状态，等待成功提示超时。补齐该收藏的真实详情响应，并增加详情确实刷新、草稿清除及提示仍存在的断言；没有修改生产删除保护或放宽期限。原失败 JUnit/日志保留，最终结果按准确候选运行核对。
 
+初始候选 `41d63ec45c27f3d54361d1f317651eb4e8124b77` 的四项源码 CI 全通过；本地完整 API35 92 普通检查及 25 真实 Worker/D1/R2 阶段通过。远端首轮 API35 却在既有分类历史场景中中止：104 XML 为 78 通过、1 失败、25 skip，余下 13 项未执行，Worker 专用阶段未开始。JUnit 最终为 SlotTable 数组越界；完整 logcat 更早记录 `CalledFromWrongThreadException`，实际 `cairn-read` 线程在 `TestMonotonicFrameClock` / `FrameDeferringContinuationInterceptor` 中应用界面变化。销毁时的数组错误是后续异常，不能只加销毁等待掩盖。
+
+按 [Android 官方测试迁移说明](https://developer.android.com/develop/ui/compose/testing/migrate-v2)，将该类的测试环境从已弃用 v1 改为现有依赖提供的 v2 `createEmptyComposeRule`，使用标准排队调度，避免在网络完成线程内联推进测试帧。没有升级依赖、修改生产实现、跳过原检查或放宽期限；修正后的本地及双平台完整运行另按准确提交验收。其余历史偶发 Back/IME 失败也不能因此追认为已证明同一原因。
+
+迁移后本地 API35 整个 `V2CurationInstrumentedTest` 的 20 项实际运行全部通过（41.362 秒）。运行时与初始 41 候选逐字节相同，修正只涉及该测试环境和证据文档；完整候选仍要求双平台固定工作流通过。
+
 完整零模型策略重放、全部旧新 App/Worker/flags 组合、真实 Web/App 竞争向量及最终独立复审继续开放。不关闭整个 B07，不 merge、转 Ready、签名、发布、部署、远程迁移或付费调用。开源发布另需用户明确同意。
