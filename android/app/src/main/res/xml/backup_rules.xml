@@ -3,4 +3,5 @@
     <exclude domain="root" path="." />
     <exclude domain="file" path="offline-reading-v1.json" />
     <exclude domain="file" path="datastore/cairn_personal_tag_outbox.preferences_pb" />
+    <exclude domain="file" path="datastore/cairn_curation_actions.preferences_pb" />
 </full-backup-content>

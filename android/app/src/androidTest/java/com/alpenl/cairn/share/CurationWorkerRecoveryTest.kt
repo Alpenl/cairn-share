@@ -90,6 +90,21 @@ class CurationWorkerRecoveryTest {
         val before = read()
         assertEquals(listOf("acme-a", "acme-b", null), before.state!!.entityObservations!!.map { it.canonicalId })
         assertTrue(before.state.entityObservations.all { it.effective })
+        val evidenceClient = com.alpenl.cairn.share.network.EntityEvidenceClient(base)
+        for (observation in before.state.entityObservations) {
+            val ref = com.alpenl.cairn.share.network.EntityEvidenceReference(
+                observation.evidenceSnapshotId, observation.sourceRevision, observation.blockId,
+                observation.start, observation.end, observation.surface)
+            val loaded = evidenceClient.load(id, ref, token) as com.alpenl.cairn.share.network.EntityEvidenceResult.Loaded
+            assertEquals("Acme", loaded.value.quote)
+            assertTrue(loaded.value.current)
+            assertEquals(if (observation.blockId == "a") "primary" else "quoted", loaded.value.role)
+            assertEquals(com.alpenl.cairn.share.network.EntityEvidenceResult.Unavailable,
+                evidenceClient.load(id, ref.copy(blockId = "missing"), token))
+            assertEquals(com.alpenl.cairn.share.network.EntityEvidenceResult.Failed(com.alpenl.cairn.share.network.FailureKind.Unauthorized),
+                evidenceClient.load(id, ref, "wrong-account"))
+        }
+        assertEquals(before.revision, read().revision)
         for ((action, expected) in listOf("reject" to false, "reset" to true)) {
             val current = read()
             http("/__test/direct/api/bookmarks/$id/v2-override", JSONObject().put("field", "entities")
@@ -103,6 +118,111 @@ class CurationWorkerRecoveryTest {
             assertEquals(expected, exported.contains("acme-a"))
             assertEquals(expected, exported.contains("acme-b"))
         }
+    }
+
+    private fun entityBookmarkId(): Int {
+        val items = http("/__test/direct/api/links?limit=100").getJSONArray("items")
+        return (0 until items.length()).map { items.getJSONObject(it) }
+            .single { it.getString("url") == "https://example.com/android-entity" }.getInt("id")
+    }
+
+    private fun entityRemote(id: Int) =
+        http("/__test/direct/api/bookmarks/" + id + "/v2-selection?include_state=1&include_automatic=1")
+
+    @Test fun persistEntityNameIntentsAndLoseCommittedResponse() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        control("online")
+        SharePreferencesStore(context).setApiToken(token)
+        val id = entityBookmarkId()
+        val before = entityRemote(id)
+        val baseRevision = before.getLong("revision")
+        assertEquals("completed_nonempty", before.getJSONObject("state").getJSONObject("entities").getString("status"))
+        val human = "🙂".repeat(60)
+        val intents = listOf("accept" to human, "reject" to "Acme", "set_empty" to "",
+            "reset" to "Acme", "accept" to human, "reject" to human, "reset" to "")
+        val model = start()
+        try {
+            waitFor { withContext(Dispatchers.Main) { model.uiState.preferencesLoaded } }
+            withContext(Dispatchers.Main) { model.loadV2Selection(id) }
+            waitFor { withContext(Dispatchers.Main) { model.uiState.v2Selections[id]?.state?.entityAutomatic == listOf("Acme") } }
+            control("offline")
+            withContext(Dispatchers.Main) { intents.forEach { (action, term) -> model.applyV2Action(id, "entities", term, action) } }
+            waitFor { store.snapshot().count { it.accountKey == account && it.linkId == id } == intents.size &&
+                withContext(Dispatchers.Main) { id !in model.uiState.v2Busy } }
+            withContext(Dispatchers.Main) { store.syncMutex.withLock { } }
+            val queued = store.snapshot().filter { it.accountKey == account && it.linkId == id }
+            assertEquals(intents, queued.map { it.action to it.term })
+            assertEquals(baseRevision, queued.first().expectedRevision)
+            queued.zipWithNext().forEach { (parent, child) ->
+                assertEquals(parent.operationKey, child.predecessorKey); assertNull(child.expectedRevision)
+            }
+            withContext(Dispatchers.Main) {
+                val draft = model.uiState.v2Drafts.getValue(id)
+                assertEquals(listOf("Acme"), draft.entityNames)
+                assertEquals("completed_nonempty", draft.state!!.entities!!.status)
+                assertTrue("entities" in draft.pendingFields)
+            }
+            store.enqueue(QueuedCurationAction(id, "entity-foreign-keep", "entities", "Foreign", "accept", 0, "foreign-entity-account"))
+            control("lose_first")
+            withContext(Dispatchers.Main) { model.flushV2Queue() }
+            waitFor { entityRemote(id).getLong("revision") == baseRevision + 1 }
+            waitFor { withContext(Dispatchers.Main) { model.uiState.message?.text?.contains("网络不可用") == true } }
+            withContext(Dispatchers.Main) { store.syncMutex.withLock { } }
+            assertEquals(queued, store.snapshot().filter { it.accountKey == account && it.linkId == id })
+            val actual = entityRemote(id).getJSONObject("state").getJSONObject("entities")
+            assertEquals(before.getJSONObject("state").getJSONObject("entities").getLong("revision"), actual.getLong("revision"))
+            assertEquals("completed_nonempty", actual.getString("status"))
+            assertTrue((0 until actual.getJSONArray("values").length()).map { actual.getJSONArray("values").getJSONObject(it).getString("term") }.contains(human))
+        } finally { withContext(Dispatchers.Main) { models.clear() } }
+    }
+
+    @Test fun recoverEntityNameIntentsWithoutReclassifyingOrChangingIdentity() = runBlocking<Unit> {
+        assumeTrue("requires the isolated real Worker harness", base.isNotEmpty())
+        val id = entityBookmarkId()
+        val original = store.snapshot().filter { it.accountKey == account && it.linkId == id }
+        assertEquals(7, original.size)
+        assertTrue(original.all { it.field == "entities" })
+        val baseRevision = original.first().expectedRevision!!
+        val foreign = store.snapshot().filter { it.accountKey != account }
+        assertTrue(foreign.any { it.operationKey == "entity-foreign-keep" })
+        control("online")
+        val model = start()
+        try {
+            waitFor { store.snapshot().none { it.accountKey == account && it.linkId == id } }
+            waitFor { withContext(Dispatchers.Main) {
+                model.uiState.v2Selections[id]?.revision == baseRevision + original.size &&
+                    model.uiState.v2Selections[id]?.entityNames == listOf("Acme") &&
+                    !model.uiState.v2Drafts.containsKey(id)
+            } }
+            assertEquals(foreign, store.snapshot().filter { it.accountKey != account })
+            val actual = entityRemote(id)
+            assertEquals(baseRevision + original.size, actual.getLong("revision"))
+            val entities = actual.getJSONObject("state").getJSONObject("entities")
+            assertEquals("completed_nonempty", entities.getString("status"))
+            assertEquals(1L, entities.getLong("revision"))
+            assertEquals(listOf("Acme"), (0 until entities.getJSONArray("automatic").length()).map { entities.getJSONArray("automatic").getString(it) })
+            assertEquals(listOf("Acme"), (0 until entities.getJSONArray("values").length()).map { entities.getJSONArray("values").getJSONObject(it).getString("term") })
+            val observations = entities.getJSONArray("observations")
+            assertEquals(listOf("acme-a", "acme-b", null), (0 until observations.length()).map {
+                observations.getJSONObject(it).opt("canonical_id").takeUnless { value -> value == JSONObject.NULL }
+            })
+            val transport = http("/__test/control").getJSONArray("requests")
+            val requests = (0 until transport.length()).map { transport.getJSONObject(it) }
+            val keys = original.map { it.operationKey }
+            assertTrue("offline attempt, lost commit and recovery must reuse the first key",
+                requests.count { it.optString("operation_key") == keys.first() } >= 3)
+            original.drop(1).forEach { action ->
+                assertEquals("each dependent intent applies only after its predecessor is acknowledged", 1,
+                    requests.count { it.optString("operation_key") == action.operationKey })
+            }
+            assertFalse(requests.any { it.optString("operation_key") == "entity-foreign-keep" })
+            val saved = LinkJson.decodeLink(http("/__test/direct/api/links/" + id))
+            withContext(Dispatchers.Main) {
+                assertEquals("completed_nonempty", model.uiState.v2Selections.getValue(id).state!!.entities!!.status)
+                assertTrue(v2ExportMarkdown(saved,
+                    model.uiState.v2Selections[id], null).contains("acme-a"))
+            }
+        } finally { withContext(Dispatchers.Main) { models.clear() } }
     }
 
     @Test fun persistBeforeSendAndLoseFirstResponse() = runBlocking<Unit> {

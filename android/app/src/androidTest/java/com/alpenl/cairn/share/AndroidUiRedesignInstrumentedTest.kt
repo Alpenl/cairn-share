@@ -3,9 +3,16 @@ package com.alpenl.cairn.share
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.SystemClock
+import android.os.ParcelFileDescriptor
+import android.os.PowerManager
+import android.app.KeyguardManager
 import android.view.KeyEvent
 import android.view.KeyCharacterMap
 import android.view.InputDevice
+import android.util.Log
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.unit.dp
@@ -138,8 +145,51 @@ class AndroidUiRedesignInstrumentedTest {
         .putExtra(ShareActivity.EXTRA_API_BASE_URL, base)
         .putExtra(ShareActivity.EXTRA_RELEASES_API_URL, server.url("/latest").toString()))
 
-    private fun waitTag(tag: String) = compose.waitUntil(20_000) {
-        runCatching { compose.onNodeWithTag(tag).assertExists(); true }.getOrDefault(false)
+    private fun waitTag(tag: String) {
+        try {
+            compose.waitUntil(20_000) {
+                runCatching { compose.onNodeWithTag(tag).assertExists(); true }.getOrDefault(false)
+            }
+        } catch (failure: Throwable) {
+            backDiagnostic("wait-timeout:" + tag)
+            throw failure
+        }
+    }
+
+    // Synthetic UI test diagnostics only: tags and window/lifecycle flags,
+    // never visible text, draft values, account keys, tokens or source bodies.
+    private fun backDiagnostic(point: String) {
+        runCatching {
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            val activities = mutableListOf<String>()
+            instrumentation.runOnMainSync {
+                ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED).forEach {
+                    activities.add(it.javaClass.simpleName + ":focus=" + it.hasWindowFocus() +
+                        ":finishing=" + it.isFinishing + ":destroyed=" + it.isDestroyed)
+                }
+            }
+            val tags = compose.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.TestTag),
+                useUnmergedTree = true).fetchSemanticsNodes().map { it.config[SemanticsProperties.TestTag] }
+                .distinct().sorted()
+            val windows = instrumentation.uiAutomation.windows.map {
+                "id=" + it.id + ":type=" + it.type + ":focused=" + it.isFocused + ":active=" + it.isActive
+            }
+            val nativeFocus = ParcelFileDescriptor.AutoCloseInputStream(
+                instrumentation.uiAutomation.executeShellCommand("dumpsys window")
+            ).bufferedReader().useLines { lines ->
+                lines.filter { it.trimStart().startsWith("mCurrentFocus=") || it.trimStart().startsWith("mFocusedApp=") }
+                    .map { line -> JSONObject().put("kind", line.trim().substringBefore('='))
+                        .put("components", JSONArray(Regex("[A-Za-z][A-Za-z0-9_.]+/[A-Za-z0-9_.]+")
+                            .findAll(line).map { it.value }.toList()))
+                        .put("none", line.substringAfter('=').trim() == "null") }.toList()
+            }
+            Log.i("CairnUiBackDiagnostic", JSONObject().put("point", point)
+                .put("activities", JSONArray(activities)).put("tags", JSONArray(tags))
+                .put("windows", JSONArray(windows)).put("native_focus", JSONArray(nativeFocus))
+                .put("interactive", context.getSystemService(PowerManager::class.java).isInteractive)
+                .put("keyguard_locked", context.getSystemService(KeyguardManager::class.java).isKeyguardLocked)
+                .toString())
+        }.onFailure { Log.w("CairnUiBackDiagnostic", "diagnostic unavailable: " + it.javaClass.simpleName) }
     }
 
     private fun waitBody() = compose.waitUntil(20_000) {
@@ -151,7 +201,22 @@ class AndroidUiRedesignInstrumentedTest {
     }
 
     private fun systemBack() {
+        compose.waitForIdle()
+        backDiagnostic("before-system-back")
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        try {
+            compose.waitUntil(5_000) {
+                var focused = false
+                instrumentation.runOnMainSync {
+                    focused = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
+                        .any { it is LauncherActivity && it.hasWindowFocus() }
+                }
+                focused
+            }
+        } catch (failure: Throwable) {
+            backDiagnostic("native-focus-timeout")
+            throw failure
+        }
         // A dismissed dialog can still own the native window while Compose is already idle.
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
         SystemClock.sleep(800)
@@ -167,6 +232,7 @@ class AndroidUiRedesignInstrumentedTest {
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
         SystemClock.sleep(800)
         compose.waitForIdle()
+        backDiagnostic("after-system-back")
     }
 
     private fun screenshot(name: String, target: SemanticsNodeInteraction) {

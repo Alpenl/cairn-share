@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "bookmark_id": 1,
+  "evidence_snapshot_id": 1,
+  "content_revision": 1,
+  "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "current": true,
+  "block_id": "a",
+  "role": "quoted",
+  "span_start": 2,
+  "span_end": 6,
+  "context_start": 0,
+  "before": "前🙂",
+  "quote": "Acme",
+  "after": " 后𠮷",
+  "clipped_before": false,
+  "clipped_after": false,
+  "truncated": false,
+  "completeness": "complete"
+}

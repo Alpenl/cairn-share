@@ -36,7 +36,11 @@ internal data class MultidimensionalSelection(
     val tagSystem: Boolean = false,
     /** E4: AI suggestions held for confirmation (state.ai_pending); not part of the selection. */
     val aiPending: List<AiPendingSuggestion> = emptyList(),
-)
+    /** Optional entity values; AI lifecycle and origins remain in the server state. */
+    val entities: List<String>? = null,
+) {
+    val entityNames: List<String>? get() = entities ?: state?.entities?.values?.map { it.term }
+}
 
 internal data class AiPendingSuggestion(val field: String, val term: String, val reason: String)
 
@@ -103,7 +107,7 @@ internal class V2CurationClient(
             when (val status = connection.responseCode) {
                 HttpURLConnection.HTTP_OK -> decodeSelection(JSONObject(connection.inputStream.bufferedReader().readText()))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> V2Result.Failed(FailureKind.Unauthorized)
-                HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD -> V2Result.Unsupported
+                HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD, HttpURLConnection.HTTP_NOT_IMPLEMENTED -> V2Result.Unsupported
                 else -> if (status == 501) V2Result.Unsupported else V2Result.Failed(FailureKind.Server)
             }
         } catch (_: SocketTimeoutException) {
@@ -140,7 +144,7 @@ internal class V2CurationClient(
             when (connection.responseCode) {
                 HttpURLConnection.HTTP_OK -> V2Result.Loaded(JSONObject(connection.inputStream.bufferedReader().readText()))
                 HttpURLConnection.HTTP_UNAUTHORIZED -> V2Result.Failed(FailureKind.Unauthorized)
-                HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD -> V2Result.Unsupported
+                HttpURLConnection.HTTP_NOT_FOUND, HttpURLConnection.HTTP_BAD_METHOD, HttpURLConnection.HTTP_NOT_IMPLEMENTED -> V2Result.Unsupported
                 HttpURLConnection.HTTP_CONFLICT -> {
                     val payload = runCatching { JSONObject(connection.errorStream?.bufferedReader()?.readText() ?: "{}") }.getOrNull()
                     if (payload?.optString("error") == "revision_conflict") {
@@ -301,6 +305,7 @@ internal class V2CurationClient(
                 available = true,
                 automatic = decodeAutomatic(payload.optJSONObject("automatic")),
                 state = state,
+                entities = state?.entities?.values?.map { it.term },
                 aiPending = decodeAiPending(payload.optJSONObject("state")),
             )
         )

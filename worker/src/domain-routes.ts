@@ -4,11 +4,15 @@ import { historicalCatalog, managedCatalog } from "./tag-catalog";
 import { readJSONObject } from "./json-body";
 import { entityCacheRoute } from "./entity-cache";
 import {validEntityObservations,type EntityBlock} from "./entity-judgments";
+import { entityEvidenceRoute } from "./entity-evidence";
 import { classificationBudgetRoute } from "./classification-budget";
 import { classificationAttemptsRoute } from "./classification-attempts";
 import { readSelectionSnapshot, readSelectionSnapshots } from "./selection-state";
 import type { RequestD1Stats } from "./observability";
 import { extensionBudgetRoute } from "./extension-budget";
+import { savedRecordsRoute, type SavedRecordKind } from "./saved-records";
+import { manualMaterialRoute } from "./manual-material";
+import { processingRoute } from "./processing";
 import { rerankCacheRoute } from "./rerank-cache";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
@@ -48,6 +52,17 @@ type QueryObserver = {
 };
 
 export async function domainRoute(request: Request, env: Env, path: string, observer?: QueryObserver): Promise<Response> {
+  const processing = path.match(/^\/api\/v2\/links\/(\d+)\/processing$/);
+  if (processing) return processingRoute(request, env, Number(processing[1]));
+  const manualMaterial = path.match(/^\/api\/v2\/links\/(\d+)\/manual-material$/);
+  if (manualMaterial) return manualMaterialRoute(request, env, Number(manualMaterial[1]));
+  const saved = path.match(/^\/api\/v2\/links\/(\d+)\/saved-records\/(sources|entities|overrides|events)$/);
+  if (saved) return savedRecordsRoute(request, env, Number(saved[1]), saved[2] as SavedRecordKind);
+  const appHistory = path.match(/^\/api\/v2\/links\/(\d+)\/run-history(?:\/(\d+))?$/);
+  if (appHistory) return appRunHistoryRoute(request, env, Number(appHistory[1]),
+    appHistory[2] === undefined ? undefined : Number(appHistory[2]));
+  const entityEvidence = path.match(/^\/api\/v2\/links\/(\d+)\/entity-evidence$/);
+  if (entityEvidence) return entityEvidenceRoute(request, env, Number(entityEvidence[1]));
   if (path === "/api/v2/links/effective-batch") {
     return request.method === "POST" ? effectiveBatch(request, env, observer) : fail("method_not_allowed", 405);
   }
@@ -521,11 +536,54 @@ async function runDetail(request: Request, env: Env, id: number, runId: number):
   if (new URL(request.url).searchParams.size) return fail("invalid_query");
   const row = await env.DB.prepare(`SELECT ${runColumns},policy,answers,usage,raw_judgments,archive_key,archive_hash,archive_bytes
     FROM classification_runs WHERE link_id=? AND id=?`).bind(id, runId).first<RunRow>();
-  if (!row) return fail("not_found", 404);
+  if (!row) {
+    const response = fail("not_found", 404);
+    response.headers.set("X-Cairn-Run-History", "1"); return response;
+  }
   try {
     const response = reply({ ...runView(await hydrateRunPayload(env, row)), archived: !!row.archive_key });
     response.headers.set("X-Cairn-Run-History", "1"); return response;
-  } catch { return fail("run_archive_unavailable", 503); }
+  } catch {
+    const response = fail("run_archive_unavailable", 503);
+    response.headers.set("X-Cairn-Run-History", "1"); return response;
+  }
+}
+
+// An explicit, read-only App contract. It never aliases arbitrary internal
+// routes, submits a run, loads every payload or invokes a provider.
+export async function appRunHistoryRoute(request: Request, env: Env, id: number, runId?: number): Promise<Response> {
+  const respond = (value: unknown, status = 200) => {
+    const response = reply(value, status);
+    response.headers.set("X-Cairn-App-Run-History", "1"); return response;
+  };
+  if (request.method !== "GET") return respond({ error: "method_not_allowed" }, 405);
+  if (request.headers.get("X-Cairn-App-Run-History") !== "1") return respond({ error: "capability_mismatch" }, 409);
+  if (!Number.isSafeInteger(id) || id < 1 || runId !== undefined && (!Number.isSafeInteger(runId) || runId < 1))
+    return respond({ error: "invalid_id" }, 400);
+  const url = new URL(request.url), params = url.searchParams;
+  if ([...params.keys()].some(key => key !== "after_id" || params.getAll(key).length !== 1) ||
+    runId !== undefined && params.size || params.has("after_id") &&
+    (!/^[1-9]\d*$/.test(params.get("after_id")!) || !Number.isSafeInteger(Number(params.get("after_id")))))
+    return respond({ error: "invalid_query" }, 400);
+  if (!await env.DB.prepare("SELECT id FROM links WHERE id=?").bind(id).first())
+    return respond({ error: "run_unavailable" }, 404);
+  const after = params.get("after_id");
+  url.search = runId === undefined ? `?view=summary&limit=50${after ? `&after_id=${after}` : ""}` : "";
+  const forwarded = new Headers(request.headers); forwarded.set("X-Cairn-Run-History", "1");
+  const internal = new Request(url, { method: "GET", headers: forwarded, signal: request.signal });
+  const result = runId === undefined ? await listRuns(internal, env, id) : await runDetail(internal, env, id, runId);
+  if (!result.ok) {
+    result.headers.set("X-Cairn-App-Run-History", "1"); return result;
+  }
+  const stored = await result.json();
+  // R2 hydration already verifies its 4 MiB payload bound and digest. Match
+  // the client response budget without returning a silently clipped record.
+  const value = runId === undefined ? { ...(stored as Record<string, unknown>), version: 1, bookmark_id: id }
+    : { version: 1, bookmark_id: id, run: stored };
+  const encoded = JSON.stringify(value);
+  if (new TextEncoder().encode(encoded).length > (runId === undefined ? 128 << 10 : 5 << 20))
+    return respond({ error: "run_history_too_large" }, 413);
+  return new Response(encoded, { headers: { ...headers, "X-Cairn-App-Run-History": "1" } });
 }
 async function listRuns(request: Request, env: Env, id: number): Promise<Response> {
   const params = new URL(request.url).searchParams, modern = request.headers.get("X-Cairn-Run-History") === "1";
@@ -987,7 +1045,8 @@ async function applyOverride(request: Request, env: Env, id: number): Promise<Re
   const action = body.action as OverrideAction;
   const term = typeof body.term === "string" ? body.term : "";
   if (!text(operationKey, 200)) return fail("invalid_operation_key");
-  if (!field || !validOverride(field, action, term, (await managedCatalog(env)).catalog)) return fail("invalid_override");
+  if (!field || !validOverride(field, action, term,
+    field === "entities" ? undefined : (await managedCatalog(env)).catalog)) return fail("invalid_override");
   return recordOverride(env, id, field, action, term, operationKey, body.expected_revision);
 }
 

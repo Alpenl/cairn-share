@@ -345,6 +345,9 @@ internal fun CairnLinksApp(
                 arguments = listOf(navArgument("id") { type = NavType.IntType }),
             ) { entry ->
                 val id = entry.arguments?.getInt("id") ?: return@composable
+                val displayContext = remember(state.apiBaseUrl, state.preferences.apiToken, state.accountGeneration) {
+                    CurationDisplayContext(accountKeyFor(state.apiBaseUrl, state.preferences.apiToken), state.accountGeneration)
+                }
                 DetailScreen(
                     id = id,
                     state = state,
@@ -361,13 +364,17 @@ internal fun CairnLinksApp(
                     onSaveCuration = { update, onSuccess -> viewModel.saveCuration(id, update, onSuccess) },
                     onLoadV2 = viewModel::loadV2Selection,
                     onLoadV2Taxonomy = viewModel::loadV2Taxonomy,
-                    onV2Action = { field, term, action -> viewModel.applyV2Action(id, field, term, action) },
-                    onV2Reapply = { viewModel.reapplyV2Draft(id) },
-                    onV2Discard = { viewModel.discardV2Draft(id) },
+                    onLoadEntityEvidence = { viewModel.loadEntityEvidence(id, it) },
+                    onCloseEntityEvidence = viewModel::closeEntityEvidence,
+                    onRetryEntityEvidence = viewModel::retryEntityEvidence,
+                    onRefreshEntityEvidence = viewModel::refreshEntityEvidence,
+                    onV2Action = { field, term, action -> viewModel.applyV2Action(id, field, term, action, displayContext) },
+                    onV2Reapply = { viewModel.reapplyV2Draft(id, displayContext) },
+                    onV2Discard = { viewModel.discardV2Draft(id, displayContext) },
                     onFlushV2 = viewModel::flushV2Queue,
                     onFlushPersonal = viewModel::flushPersonalTags,
                     onOfflinePin = { pinned -> viewModel.setOfflinePinned(id, pinned) },
-                    onRecoverLegacyV2 = { viewModel.recoverLegacyV2Actions(id, accountKeyFor(state.apiBaseUrl, state.preferences.apiToken)) },
+                    onRecoverLegacyV2 = { viewModel.recoverLegacyV2Actions(id, displayContext.accountKey, displayContext) },
                     onDelete = { viewModel.deleteLink(id) { navController.popBackStack() } },
                 )
             }
@@ -853,6 +860,10 @@ private fun DetailScreen(
     onSaveCuration: (CurationUpdate, () -> Unit) -> Unit,
     onLoadV2: (Int, Boolean) -> Unit,
     onLoadV2Taxonomy: () -> Unit,
+    onLoadEntityEvidence: (com.alpenl.cairn.share.network.EntityObservation) -> Unit,
+    onCloseEntityEvidence: (Long) -> Unit,
+    onRetryEntityEvidence: (Long) -> Unit,
+    onRefreshEntityEvidence: (Long) -> Unit,
     onV2Action: (String, String, String) -> Unit,
     onV2Reapply: () -> Unit,
     onV2Discard: () -> Unit,
@@ -956,13 +967,24 @@ private fun DetailScreen(
                             editorState.SaveableStateProvider("$id:${state.accountGeneration}") {
                             MultidimensionalCurationSection(
                                 linkId = id, taxonomy = state.v2Taxonomy ?: state.taxonomy,
+                                accountIdentity = accountKeyFor(state.apiBaseUrl, state.preferences.apiToken),
                                 selection = state.v2Selections[id], draft = state.v2Drafts[id],
                                 conflictRevision = state.v2Conflicts[id], busy = id in state.v2Busy,
                                 queuedCount = state.v2Queued[id] ?: 0, available = state.v2Available,
                                 onLoadTaxonomy = onLoadV2Taxonomy, onAction = onV2Action,
                                 onReapply = onV2Reapply, onDiscard = onV2Discard, onFlush = onFlushV2,
                                 onExport = { onCopy(v2ExportMarkdown(link, effective, state.v2Taxonomy ?: state.taxonomy)) },
+                                onOpenExternal = onOpenExternal,
+                                entityEvidence = state.entityEvidence?.takeIf { it.linkId == id },
+                                onLoadEntityEvidence = onLoadEntityEvidence,
+                                onCloseEntityEvidence = onCloseEntityEvidence,
+                                onRetryEntityEvidence = onRetryEntityEvidence,
+                                onRefreshEntityEvidence = onRefreshEntityEvidence,
                             )
+                            RunHistorySection(linkId = id, baseUrl = state.apiBaseUrl, token = state.preferences.apiToken,
+                                accountGeneration = state.accountGeneration)
+                            ManualMaterialSection(linkId = id, baseUrl = state.apiBaseUrl, token = state.preferences.apiToken,
+                                accountGeneration = state.accountGeneration, onSaved = { onLoadV2(id, true); onEnsureLink(id) })
                             PersonalTagsSection(linkId = id, baseUrl = state.apiBaseUrl, apiToken = state.preferences.apiToken,
                                 onChanged = { onLoadV2(id, true); onEnsureLink(id) }, onFlush = onFlushPersonal, editorDraft = personalEditor)
                             if (enrichment != null) BookmarkCuration(id, enrichment, state.v2Taxonomy ?: state.taxonomy,
