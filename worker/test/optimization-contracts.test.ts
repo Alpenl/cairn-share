@@ -1,10 +1,11 @@
 import { applyD1Migrations, env, reset } from "cloudflare:test";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { EMPTY_AUTOMATIC, canonicalJSON } from "../src/domain";
 import { readBoundedJSON } from "../src/json-body";
 import { archiveOldRunPayloads, hydrateRunPayload } from "../src/run-archive";
 import { validRunProvenance } from "../src/run-provenance";
+import { computeEffective } from "../src/domain-routes";
 import go from "./fixtures/tag-system-go-completion.json";
 
 beforeEach(async () => { await reset(); await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
@@ -176,6 +177,150 @@ async function digest(value: unknown) {
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalJSON(value)));
   return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
+
+const previewHeaders = { ...modern, "X-Cairn-App-Policy-Replay": "1" };
+async function policyFixture() {
+  const { run } = await goComplete();
+  const view = await state(1), policy = { ...go.result.policy, version: "replay-reviewed", topic_accept: .75 };
+  const generation = await env.DB.prepare("SELECT generation FROM classification_target_state WHERE id=1").first<number>("generation");
+  const plan = { run_ids: [run.id], policy_version: policy.version, policy, policy_hash: await digest(policy),
+    automatic: go.result.automatic, expected_revision: view.revision, content_revision: run.content_revision,
+    spec_id: run.spec_id, spec_hash: run.spec_hash, requested_model: run.requested_model,
+    resolved_model: run.resolved_model, expected_target_generation: generation };
+  const body = { version: 1, preview_key: "confirmed-preview", plan };
+  const request = (path: string, payload?: unknown, DB = env.DB, token = "internal") => call(path, payload, previewHeaders, DB, token);
+  const prepare = () => request("v2/links/1/app-policy-previews", body);
+  return { body, request, prepare };
+}
+async function policyCounts() {
+  return env.DB.prepare(`SELECT (SELECT COUNT(*) FROM classification_runs) AS runs,
+    (SELECT COUNT(*) FROM classification_decisions) AS decisions,(SELECT COUNT(*) FROM curation_events) AS events,
+    (SELECT COUNT(*) FROM curation_overrides) AS overrides,(SELECT COUNT(*) FROM budget_ledger) AS budget,
+    (SELECT COUNT(*) FROM classification_provider_attempts) AS attempts`).first();
+}
+
+it("persists one immutable policy preview without changing any source, decision, queue, human fact or provider ledger", async () => {
+  const f = await policyFixture(), before = await policyCounts();
+  const link = await env.DB.prepare("SELECT * FROM links WHERE id=1").first();
+  const job = await env.DB.prepare("SELECT * FROM classification_jobs WHERE link_id=1").first();
+  const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Preview must never call a provider"));
+  try {
+    const responses = await Promise.all([f.prepare(), f.prepare()]);
+    expect(responses.map(r => r.status)).toEqual([200, 200]);
+    const [a, b] = await Promise.all(responses.map(r => r.json())) as any[];
+    expect(a).toEqual(b); expect(a).toMatchObject({ version: 1, id: 1, status: "prepared", model_calls: 0, preview_key: f.body.preview_key });
+    expect(a.preview_hash).toMatch(/^[a-f0-9]{64}$/); expect(a.review_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(a.plan.operation_key).toBe(`app-policy:1:${f.body.preview_key}:${a.preview_hash}`);
+    expect(await policyCounts()).toEqual(before); expect(network).not.toHaveBeenCalled();
+    expect(await env.DB.prepare("SELECT * FROM links WHERE id=1").first()).toEqual(link);
+    expect(await env.DB.prepare("SELECT * FROM classification_jobs WHERE link_id=1").first()).toEqual(job);
+    expect(await env.DB.prepare("SELECT COUNT(*) FROM classification_operations WHERE status='app_policy_preview'").first("COUNT(*)")).toBe(1);
+    expect(await (await f.request(`v2/links/1/app-policy-previews?preview_key=${f.body.preview_key}`)).json()).toEqual(a);
+    expect((await f.request("v2/links/1/app-policy-previews", { ...f.body, plan: { ...f.body.plan, expected_revision: 99 } })).status).toBe(409);
+  } finally { network.mockRestore(); }
+});
+
+it("keeps preview preparation internal and rejects arbitrary request and plan operation identities", async () => {
+  const f = await policyFixture(), before = await policyCounts();
+  expect((await f.request("v2/links/1/app-policy-previews", f.body, env.DB, "app")).status).toBe(401);
+  expect((await f.request("v2/links/1/app-policy-previews", { ...f.body, extra: true })).status).toBe(400);
+  expect((await f.request("v2/links/1/app-policy-previews", { ...f.body, plan: { ...f.body.plan, operation_key: "injected" } })).status).toBe(400);
+  expect((await f.request("v2/links/1/app-policy-previews?preview_key=a&preview_key=b")).status).toBe(400);
+  expect((await f.request("v2/links/1/app-policy-previews?preview_key=a&unknown=b")).status).toBe(400);
+  expect((await call("v2/links/1/app-policy-previews", f.body, modern, env.DB, "internal")).status).toBe(409);
+  expect(await policyCounts()).toEqual(before);
+});
+
+it("applies exactly the persisted plan once under concurrent confirmation and preserves manual facts", async () => {
+  const f = await policyFixture(), before = await policyCounts();
+  const prepared = await (await f.prepare()).json() as any;
+  const body = { version: 1, preview_key: prepared.preview_key, preview_hash: prepared.preview_hash };
+  const link = await env.DB.prepare("SELECT original_text,note,why,personal_revision,content_revision FROM links WHERE id=1").first();
+  const results = await Promise.all([f.request("v2/links/1/app-policy-replays", body), f.request("v2/links/1/app-policy-replays", body)]);
+  expect(results.map(r => r.status)).toEqual([200, 200]);
+  const receipts = await Promise.all(results.map(r => r.json())) as any[];
+  expect(receipts.map(r => r.replayed).sort()).toEqual([false, true]);
+  expect(receipts[0]).toMatchObject({ status: "applied", preview_key: prepared.preview_key, preview_hash: prepared.preview_hash, model_calls: 0 });
+  expect(await policyCounts()).toEqual({ ...before!, decisions: Number((before as any).decisions) + 1 });
+  expect(await env.DB.prepare("SELECT original_text,note,why,personal_revision,content_revision FROM links WHERE id=1").first()).toEqual(link);
+  expect((await computeEffective(settings(), 1)).view).toEqual(prepared.after);
+});
+
+it.each(["personal", "source", "target", "preferences"])("refuses a prepared policy after an independent %s change without modifying its stored approval", async change => {
+  const f = await policyFixture(), prepared = await (await f.prepare()).json() as any;
+  if (change === "personal") await env.DB.prepare("UPDATE links SET personal_revision=personal_revision+1 WHERE id=1").run();
+  if (change === "source") await env.DB.prepare("UPDATE links SET original_text='Changed after preview' WHERE id=1").run();
+  if (change === "target") await env.DB.prepare("UPDATE classification_target_state SET generation=0 WHERE id=1").run();
+  if (change === "preferences") await env.DB.prepare("UPDATE preferences SET value='{\"ai_confirm_before_apply\":true}',revision=revision+1 WHERE id=1").run();
+  const before = await policyCounts();
+  const response = await f.request("v2/links/1/app-policy-replays", { version: 1, preview_key: prepared.preview_key, preview_hash: prepared.preview_hash });
+  expect(response.status, await response.clone().text()).toBe(409);
+  expect(await policyCounts()).toEqual(before);
+  expect(await (await f.request(`v2/links/1/app-policy-previews?preview_key=${prepared.preview_key}`)).json()).toEqual(prepared);
+});
+
+it("confirms a lost applied receipt after preview retention and later source/human changes without another decision", async () => {
+  const f = await policyFixture(), prepared = await (await f.prepare()).json() as any;
+  const body = { version: 1, preview_key: prepared.preview_key, preview_hash: prepared.preview_hash };
+  expect((await f.request("v2/links/1/app-policy-replays", body)).status).toBe(200);
+  await env.DB.prepare("DELETE FROM classification_operations WHERE status='app_policy_preview'").run();
+  await env.DB.prepare("UPDATE links SET original_text='Later source',personal_revision=personal_revision+1 WHERE id=1").run();
+  const before = await policyCounts();
+  expect(await (await f.request("v2/links/1/app-policy-replays", body)).json()).toMatchObject({ status: "applied", replayed: true, model_calls: 0 });
+  expect(await (await f.request(`v2/links/1/app-policy-previews?preview_key=${prepared.preview_key}&preview_hash=${prepared.preview_hash}`)).json())
+    .toMatchObject({ status: "applied", replayed: true });
+  expect((await f.request("v2/links/1/app-policy-replays", { ...body, preview_key: "wrong-key" })).status).toBe(503);
+  expect(await policyCounts()).toEqual(before);
+  await env.DB.prepare("DELETE FROM links WHERE id=1").run();
+  expect((await f.request("v2/links/1/app-policy-replays", body)).status).toBe(404);
+  expect(await env.DB.prepare("SELECT COUNT(*) FROM links").first("COUNT(*)")).toBe(0);
+});
+
+it("does not apply a corrupted persisted preview or misreport it as a confirmed refusal", async () => {
+  const f = await policyFixture(), prepared = await (await f.prepare()).json() as any;
+  await env.DB.prepare("UPDATE classification_operations SET response=json_set(response,'$.plan.automatic.topics',json('[\"forged\"]')) WHERE status='app_policy_preview'").run();
+  const before = await policyCounts();
+  const response = await f.request("v2/links/1/app-policy-replays", { version: 1, preview_key: prepared.preview_key, preview_hash: prepared.preview_hash });
+  expect(response.status).toBe(503); expect(await policyCounts()).toEqual(before);
+});
+
+it.each(["personal", "preferences"])("checks an interleaved %s change at both preview persistence and final decision commit", async change => {
+  const f = await policyFixture();
+  const mutate = () => env.DB.prepare(change === "personal" ? "UPDATE links SET personal_revision=personal_revision+1 WHERE id=1"
+    : "UPDATE preferences SET revision=revision+1 WHERE id=1").run();
+  let inserted = false;
+  const previewDB = new Proxy(env.DB, { get(target, key) {
+    if (key === "prepare") return (sql: string) => {
+      const statement = target.prepare(sql);
+      if (!sql.startsWith("INSERT INTO classification_operations")) return statement;
+      const wrap = (s: D1PreparedStatement): D1PreparedStatement => new Proxy(s, { get(inner, property) {
+        if (property === "bind") return (...values: unknown[]) => wrap(inner.bind(...values));
+        if (property === "all") return async () => { inserted = true; await mutate(); return inner.all(); };
+        const value = Reflect.get(inner, property); return typeof value === "function" ? value.bind(inner) : value;
+      } });
+      return wrap(statement);
+    };
+    const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+  } });
+  expect((await f.request("v2/links/1/app-policy-previews", f.body, previewDB)).status).toBe(409);
+  expect(inserted).toBe(true);
+  expect(await env.DB.prepare("SELECT COUNT(*) FROM classification_operations WHERE status='app_policy_preview'").first("COUNT(*)")).toBe(0);
+  // A fresh view explicitly prepares against the changed version; this is not
+  // an automatic rebase of an already approved body.
+  const current = await state(1);
+  const response = await f.request("v2/links/1/app-policy-previews", { ...f.body,
+    plan: { ...f.body.plan, expected_revision: current.revision } });
+  expect(response.status, await response.clone().text()).toBe(200);
+  const prepared = await response.json() as any, before = await policyCounts();
+  let committed = false;
+  const applyDB = new Proxy(env.DB, { get(target, key) {
+    if (key === "batch") return async (statements: D1PreparedStatement[]) => { committed = true; await mutate(); return target.batch(statements); };
+    const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+  } });
+  expect((await f.request("v2/links/1/app-policy-replays", { version: 1, preview_key: prepared.preview_key,
+    preview_hash: prepared.preview_hash }, applyDB)).status).toBe(409);
+  expect(committed).toBe(true); expect(await policyCounts()).toEqual(before);
+});
 
 it("replays a new target policy over an old generation without changing source, manual facts or provider budget", async () => {
   const { internal, target, run } = await goComplete();

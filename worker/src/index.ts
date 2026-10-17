@@ -25,6 +25,7 @@ import { appRunHistoryRoute, computeEffective, domainRoute, persistSelectionOver
 import { savedRecordsRoute, type SavedRecordKind } from "./saved-records";
 import { manualMaterialRoute } from "./manual-material";
 import { processingRoute } from "./processing";
+import { appPolicyProxyRoute } from "./policy-proxy";
 import { entityEvidenceRoute } from "./entity-evidence";
 import { applyV1Write, topicGranularityAware } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
@@ -47,6 +48,7 @@ export interface Env {
   CAIRN_API_TOKEN: string;
   CAIRN_ENRICHER_TOKEN: string;
   CAIRN_OPERATOR_TOKEN?: string;
+  CAIRN_POLICY_REPLAY_URL?: string;
   HISTORY_RETENTION_DAYS?: string;
 }
 
@@ -619,6 +621,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
   }
   // App-facing curation is an exact allowlist, never an alias for arbitrary
   // internal v2 paths. Reads and human field actions do not invoke a model.
+  const appPolicy = path.match(/^\/api\/bookmarks\/(\d+)\/policy-replay\/(capabilities|preview|apply)$/);
+  if (appPolicy) {
+    const denied = requireApiToken(request, env);
+    if (denied !== null) return denied;
+    return appPolicyProxyRoute(request, env, appPolicy[1], appPolicy[2] as "capabilities" | "preview" | "apply");
+  }
   const appEvidence = path.match(/^\/api\/bookmarks\/(\d+)\/entity-evidence$/);
   if (appEvidence) {
     const denied = requireApiToken(request, env);
