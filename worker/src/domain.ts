@@ -184,7 +184,9 @@ export function validOverride(field: OverrideField, action: OverrideAction, term
     if (field === "resource_kinds") return validV2Term("resource_kinds", term, catalog);
     if (field === "form") return validV2Term("forms", term, catalog);
     if (field === "use") return validV2Term("uses", term, catalog);
-    return term.length > 0 && term.length <= 80;
+    // Entity state already accepts names up to 120 UTF-16 code units. Human
+    // corrections must be able to remove or keep every valid automatic name.
+    return field === "entities" && term.length > 0 && term.length <= 120;
   }
   return false;
 }

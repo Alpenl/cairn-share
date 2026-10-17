@@ -990,7 +990,8 @@ async function applyOverride(request: Request, env: Env, id: number): Promise<Re
   const action = body.action as OverrideAction;
   const term = typeof body.term === "string" ? body.term : "";
   if (!text(operationKey, 200)) return fail("invalid_operation_key");
-  if (!field || !validOverride(field, action, term, (await managedCatalog(env)).catalog)) return fail("invalid_override");
+  if (!field || !validOverride(field, action, term,
+    field === "entities" ? undefined : (await managedCatalog(env)).catalog)) return fail("invalid_override");
   return recordOverride(env, id, field, action, term, operationKey, body.expected_revision);
 }
 

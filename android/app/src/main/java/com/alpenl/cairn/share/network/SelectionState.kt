@@ -38,6 +38,9 @@ internal data class SelectionState(
     val evidencePartial: Boolean?,
     val answersPartial: Boolean = false,
     val entityObservations: List<EntityObservation>? = null,
+    // Independent from the six-dimensional automatic baseline. Missing is
+    // unknown, not an empty result reconstructed from human-corrected values.
+    val entityAutomatic: List<String>? = null,
 ) {
     val entityStatusLabel: String get() = if (entities?.status == "completed_empty") "已完成，暂无相关实体建议"
         else entities?.label ?: "运行状态未知"
@@ -89,6 +92,12 @@ internal fun decodeSelectionState(json: JSONObject?, revision: Long): SelectionS
     }
     val entityJson = json.optJSONObject("entities")
     val entities = field(entityJson)
+    val entityAutomatic = entityJson?.optJSONArray("automatic")?.let { array ->
+        val names = (0 until array.length()).map { array.opt(it) as? String ?: return@let null }
+        names.takeIf { it.all(::validEntityName) && it.distinct().size == it.size }
+    }
     return SelectionState(contentRevision, decoded, entities, partial, json.opt("decision_answers_partial") == true,
-        decodeEntityObservations(entityJson, contentRevision, entities))
+        decodeEntityObservations(entityJson, contentRevision, entities), entityAutomatic)
 }
+
+internal fun validEntityName(value: String): Boolean = value.isNotBlank() && value.length <= 120

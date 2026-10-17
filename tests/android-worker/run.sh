@@ -57,7 +57,7 @@ proxy_pid=$!
 # Reset only before the first phase so durable bodies from a previous run do
 # not masquerade as this database's list projection. Phases keep all app data.
 "$adb" -s "$serial" shell pm clear com.alpenl.cairn.share > /dev/null
-for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConflictsAndMidChainFailure discardAndAccountSwitchPreserveUnrelatedActions preserveAmbiguousLegacyAndSeparateSameSuffixAccounts explicitlyRecoverLegacyAfterRestart persistResetWithIndependentAutomaticBaseline restoreAutomaticDraftAfterProcessDeath persistTermResetAfterExplicitEmpty restoreTermResetAfterProcessDeath confirmedCurationRefreshesRealFilteredSearch blankKeywordLibraryUsesFullEffectiveFiltersAndConfirmedWrites persistDeletionAfterRealCommitResponseLoss recoverDeletionAfterProcessDeathWithoutReplayingCuration readEntityProvenanceAndHumanOverridesFromRealWorker; do
+for phase in persistBeforeSendAndLoseFirstResponse recoverThenHandleTwoRealConflictsAndMidChainFailure discardAndAccountSwitchPreserveUnrelatedActions preserveAmbiguousLegacyAndSeparateSameSuffixAccounts explicitlyRecoverLegacyAfterRestart persistResetWithIndependentAutomaticBaseline restoreAutomaticDraftAfterProcessDeath persistTermResetAfterExplicitEmpty restoreTermResetAfterProcessDeath confirmedCurationRefreshesRealFilteredSearch blankKeywordLibraryUsesFullEffectiveFiltersAndConfirmedWrites persistDeletionAfterRealCommitResponseLoss recoverDeletionAfterProcessDeathWithoutReplayingCuration readEntityProvenanceAndHumanOverridesFromRealWorker persistEntityNameIntentsAndLoseCommittedResponse recoverEntityNameIntentsWithoutReclassifyingOrChangingIdentity; do
   "$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
   "$adb" -s "$serial" shell am instrument -w -r \
     -e class "com.alpenl.cairn.share.CurationWorkerRecoveryTest#$phase" \
@@ -83,4 +83,4 @@ for phase in persistOfflineCollectionAndLoseCommittedCreateResponse recoverAfter
   grep -Eq '^OK \(1 test\)' "$work/$phase.log"
 done
 curl -fsS "http://127.0.0.1:$proxy_port/__test/control" > "$work/transport-history.json"
-echo "PASS: eighteen phases ran in separate Android processes against actual authenticated Worker/D1"
+echo "PASS: twenty phases ran in separate Android processes against actual authenticated Worker/D1"

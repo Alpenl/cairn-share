@@ -56,6 +56,7 @@ import com.alpenl.cairn.share.network.evidenceReference
 @Composable
 internal fun MultidimensionalCurationSection(
     linkId: Int,
+    accountIdentity: String,
     taxonomy: BookmarkTaxonomy?,
     selection: MultidimensionalSelection?,
     draft: MultidimensionalSelection?,
@@ -166,10 +167,10 @@ internal fun MultidimensionalCurationSection(
             singleValue = true, state = effective.state?.fields?.get("form"), pending = "form" in effective.pendingFields, known = "form" !in effective.unknownResetFields)
         DimensionRow("用途", "use", taxonomy.uses.map { it.id to it.label }, listOf(effective.use).filter { it.isNotEmpty() }, busy, onAction,
             singleValue = true, state = effective.state?.fields?.get("use"), pending = "use" in effective.pendingFields, known = "use" !in effective.unknownResetFields)
-        val entities = effective.state?.entities
         Text("实体：${effective.state?.entityStatusLabel ?: "运行状态未知"}", modifier = Modifier.testTag("v2_entities_status"), style = MaterialTheme.typography.bodySmall)
-        entities?.values?.forEach { Text("${it.term} · ${it.label}", style = MaterialTheme.typography.bodySmall) }
-        EntityJudgmentDetails(effective.state?.entityObservations, onOpenExternal, onLoadEntityEvidence)
+        ManualEntitySection(linkId, accountIdentity, effective, busy, onAction)
+        EntityJudgmentDetails(effective.state?.entityObservations, onOpenExternal, onLoadEntityEvidence,
+            pending = "entities" in effective.pendingFields)
         }
         if (effective.state?.evidencePartial == true) Text("来源证据不完整，建议仅基于已取得的内容。", modifier = Modifier.testTag("v2_evidence_partial"), style = MaterialTheme.typography.bodySmall)
         if (effective.state?.answersPartial == true) Text("部分分类问题尚无结果。", style = MaterialTheme.typography.bodySmall)
@@ -187,6 +188,7 @@ private fun EntityJudgmentDetails(
     observations: List<EntityObservation>?,
     onOpenExternal: (String) -> Unit,
     onReadSource: (EntityObservation) -> Unit,
+    pending: Boolean,
 ) {
     if (observations.isNullOrEmpty()) {
         Text(if (observations == null) "实体判断依据不可用" else "当前没有可展示的实体判断记录", style = MaterialTheme.typography.bodySmall)
@@ -207,7 +209,7 @@ private fun EntityJudgmentDetails(
                     Column(Modifier.testTag("v2_entity_record_$index")) {
                         Text("${o.surface} · ${o.decisionLabel}")
                         Text(o.identityLabel)
-                        Text(o.effectiveLabel)
+                        Text(if (pending) "人工修改待同步，此处保留服务端判断记录" else o.effectiveLabel)
                         Text("来源：${o.sourceLabel}")
                         Text("来源版本 ${o.sourceRevision} · 身份目录 ${o.catalogVersion}")
                         if (o.evidenceReference() != null) TextButton(
@@ -368,6 +370,7 @@ internal fun LegacyCurationRecoveryNotice(
                     val field = when (action.field) {
                         "topics" -> "主题"
                         "content_functions" -> "内容功能"
+                        "entities" -> "实体名称"
                         "carriers" -> "载体"
                         "affordances" -> "潜在用途"
                         "form" -> "形态"
@@ -418,14 +421,17 @@ internal fun v2ExportMarkdown(
         terms?.firstOrNull { it.id == id }?.label ?: id
     }
     fun rendered(field: String, values: List<String>): String =
-        if (field in selection?.unknownResetFields.orEmpty()) "（恢复自动，待服务端确认）"
+        if (field in selection?.unknownResetFields.orEmpty())
+            if (field == "entities") "（实体结果待服务端确认）" else "（恢复自动，待服务端确认）"
         else values.joinToString(" / ") { term ->
             val origin = if (field in selection?.pendingFields.orEmpty()) "本地修改，待同步"
-                else selection?.state?.fields?.get(field)?.values?.firstOrNull { it.term == term }?.label ?: "来源未知"
+                else (if (field == "entities") selection?.state?.entities else selection?.state?.fields?.get(field))
+                    ?.values?.firstOrNull { it.term == term }?.label ?: "来源未知"
             "${label(field, term)}（$origin）"
         }.ifEmpty {
             if (field in selection?.pendingFields.orEmpty()) "本地留空，待同步"
-            else selection?.state?.fields?.get(field)?.emptyOrigin?.let { "明确留空 · ${it.label}" } ?: "当前没有有效值"
+            else (if (field == "entities") selection?.state?.entities else selection?.state?.fields?.get(field))
+                ?.emptyOrigin?.let { "明确留空 · ${it.label}" } ?: "当前没有有效值"
         }
     val enrichment = link.enrichment
     val builder = StringBuilder()
@@ -455,10 +461,12 @@ internal fun v2ExportMarkdown(
         link.customTags.forEach { builder.appendLine("- 自定义标记身份：${it.tagRef} · 显示版本 ${it.revision}") }
     }
     enrichment?.why?.takeIf { it.isNotBlank() }?.let { builder.appendLine("- 收藏原因：$it") }
-    val entities = selection?.state?.entities
     builder.appendLine("- 实体状态：${selection?.state?.entityStatusLabel ?: "运行状态未知"}")
-    if (!entities?.values.isNullOrEmpty()) builder.appendLine("- 实体：${entities!!.values.joinToString(" / ") { "${it.term}（${it.label}）" }}")
-    selection?.state?.entityObservations.orEmpty().filter { it.effective }.forEach {
+    selection?.entityNames?.let { builder.appendLine("- 实体：${rendered("entities", it)}") }
+    selection?.state?.entityObservations.orEmpty().filter {
+        it.effective && "entities" !in selection?.pendingFields.orEmpty() &&
+            it.surface in selection?.entityNames.orEmpty()
+    }.forEach {
         builder.appendLine("- 实体自动依据：${it.surface} · ${it.identityLabel} · ${it.sourceLabel}")
     }
     enrichment?.summary?.takeIf { it.isNotBlank() }?.let {
