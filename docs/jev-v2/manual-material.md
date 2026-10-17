@@ -80,6 +80,13 @@ and bookmark. Closing a session cancels its network work. Go and Android refuse
 redirects and validate bounded, source/nonce-bound receipts; there is no old-route
 fallback or automatic write retry.
 
+The editable text, selected gap and bound source also survive Activity recreation.
+Refreshing capabilities preserves those choices. If the source or target changed,
+submission stays disabled until the user explicitly adopts the current source;
+a removed reference must be selected again. A refused stored intent is retained
+while the user prepares its replacement, and source refresh cannot restore the
+old text over that new edit.
+
 ## Remaining original scope
 
 Source creation when there is no primary text, complete separate reading and

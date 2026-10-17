@@ -15,6 +15,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -24,11 +25,18 @@ import com.alpenl.cairn.share.network.ManualMaterialClient
 import com.alpenl.cairn.share.network.ManualMaterialIntent
 import com.alpenl.cairn.share.network.MaterialOption
 import com.alpenl.cairn.share.network.MaterialOptions
+import com.alpenl.cairn.share.network.MaterialSource
 import com.alpenl.cairn.share.network.MaterialWriteResult
 import com.alpenl.cairn.share.network.RunHistoryResult
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+
+private val materialSourceSaver = listSaver<MaterialSource?, Any>(
+    save = { value -> value?.let { listOf<Any>(it.revision, it.snapshotId, it.hash, it.generation) } ?: emptyList() },
+    restore = { values -> if (values.size == 4 && values[0] is Long && values[1] is Long && values[2] is String && values[3] is Long)
+        MaterialSource(values[0] as Long, values[1] as Long, values[2] as String, values[3] as Long) else null },
+)
 
 @Composable
 internal fun ManualMaterialSection(linkId: Int, baseUrl: String, token: String, accountGeneration: Long, onSaved: () -> Unit) {
@@ -50,11 +58,19 @@ private fun ManualMaterialControls(linkId: Int, baseUrl: String, token: String, 
     var readable by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<RunHistoryResult<MaterialOptions>?>(null) }
     var draft by remember { mutableStateOf<StoredManualMaterial?>(null) }
-    var option by remember { mutableStateOf<MaterialOption?>(null) }
-    var reprepare by remember { mutableStateOf(false) }
+    var selectedKind by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedRef by rememberSaveable { mutableStateOf<String?>(null) }
+    var editingSource by rememberSaveable(stateSaver = materialSourceSaver) { mutableStateOf<MaterialSource?>(null) }
+    var reprepare by rememberSaveable { mutableStateOf(false) }
     var text by rememberSaveable { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
     DisposableEffect(Unit) { onDispose { active = false } }
+    fun adoptSource(value: MaterialOptions, firstLoad: Boolean = false) {
+        editingSource = value.source
+        val selected = value.options.firstOrNull { it.kind == selectedKind && it.sourceRef == selectedRef }
+            ?: if (firstLoad && text.isBlank()) value.options.firstOrNull() else null
+        selectedKind = selected?.kind; selectedRef = selected?.sourceRef
+    }
     fun load() {
         if (busy || !active) return
         busy = true; message = ""; open = true
@@ -64,8 +80,9 @@ private fun ManualMaterialControls(linkId: Int, baseUrl: String, token: String, 
                 val loaded = client.options(linkId, token)
                 if (active) {
                     draft = stored; result = loaded; readable = true
-                    if (stored != null) text = stored.intent.text
-                    option = (loaded as? RunHistoryResult.Loaded)?.value?.options?.firstOrNull()
+                    if (stored != null && !reprepare) text = stored.intent.text
+                    val latest = (loaded as? RunHistoryResult.Loaded)?.value
+                    if (latest != null && editingSource == null) adoptSource(latest, firstLoad = true)
                 }
             } catch (error: CancellationException) { throw error
             } catch (_: Exception) { if (active) { readable = false; message = "读取本地草稿失败，未发送任何请求。" }
@@ -80,13 +97,21 @@ private fun ManualMaterialControls(linkId: Int, baseUrl: String, token: String, 
             Text("仅补充原文缺失的外链内容、图片文字或已截断内容。原文、媒体和人工标签保留；这不会自动整理阅读正文。")
             if (busy) Text("正在核对或保存…", modifier = Modifier.testTag("manual_material_busy"))
             val options = (result as? RunHistoryResult.Loaded)?.value
+            val option = options?.options?.firstOrNull { it.kind == selectedKind && it.sourceRef == selectedRef }
+            val sourceChanged = editingSource != null && options != null && options.source != editingSource
             if (draft != null && !reprepare) {
                 Text(if (draft?.rejected == null) "上次保存结果未确认。保留原请求，只能核对或重试，不会另建任务。" else materialReason(draft?.rejected),
                     modifier = Modifier.testTag("manual_material_draft_status"))
                 Text(materialOptionLabel(draft!!.intent.option))
             } else if (options != null) {
                 if (!options.canSubmit) Text(materialReason(options.reason), modifier = Modifier.testTag("manual_material_blocked"))
-                for ((index, value) in options.options.withIndex()) TextButton(onClick = { option = value }, enabled = !busy && options.canSubmit,
+                if (sourceChanged) {
+                    Text("来源或处理规则已更新。文字和引用选择已保留，请核对后再采用当前来源。", modifier = Modifier.testTag("manual_material_source_changed"))
+                    TextButton(enabled = !busy && options.canSubmit && options.source != null, modifier = Modifier.testTag("manual_material_use_current_source"),
+                        onClick = { adoptSource(options) }) { Text("按当前来源继续编辑") }
+                }
+                for ((index, value) in options.options.withIndex()) TextButton(onClick = { selectedKind = value.kind; selectedRef = value.sourceRef },
+                    enabled = !busy && options.canSubmit && !sourceChanged,
                     modifier = Modifier.testTag("manual_material_option_$index")) {
                     Text((if (option == value) "✓ " else "") + materialOptionLabel(value))
                 }
@@ -99,12 +124,12 @@ private fun ManualMaterialControls(linkId: Int, baseUrl: String, token: String, 
                 enabled = !busy && readable && (draft == null || reprepare), minLines = 3, maxLines = 10,
                 modifier = Modifier.fillMaxWidth().testTag("manual_material_text"))
             Text("保存只追加来源记录；有变化时会重新排队分类，后续判断可能产生模型费用。相同材料不重复排队。")
-            val canPrepare = options?.canSubmit == true && options.source != null && option != null && text.isNotBlank() && text.toByteArray(Charsets.UTF_8).size <= 100000
+            val canPrepare = options?.canSubmit == true && editingSource != null && options.source == editingSource && option != null && text.isNotBlank() && text.toByteArray(Charsets.UTF_8).size <= 100000
             Button(enabled = !busy && readable && (draft != null && !reprepare || canPrepare), modifier = Modifier.testTag("manual_material_submit"), onClick = {
                 if (!active || busy) return@Button
                 val old = draft
                 val intent = if (old != null && !reprepare) old.intent else {
-                    val source = options?.source ?: return@Button
+                    val source = editingSource ?: return@Button
                     ManualMaterialIntent(UUID.randomUUID().toString(), source, option ?: return@Button, text)
                 }
                 if (!intent.valid()) { message = "材料过大或包含无效字符，请缩短后重试。"; return@Button }
@@ -120,7 +145,7 @@ private fun ManualMaterialControls(linkId: Int, baseUrl: String, token: String, 
                             is MaterialWriteResult.Saved -> {
                                 store.acknowledge(sent)
                                 if (active) {
-                                    draft = null; text = ""; result = null; readable = false
+                                    draft = null; text = ""; result = null; readable = false; editingSource = null; selectedKind = null; selectedRef = null
                                     message = if (saved.queued) "材料已保存，分类已排队。" else "相同材料已存在，没有重复排队。"
                                     onSaved()
                                 }
@@ -137,7 +162,7 @@ private fun ManualMaterialControls(linkId: Int, baseUrl: String, token: String, 
                 }
             }) { Text(if (draft != null && !reprepare) "核对 / 重试同一请求" else "保存补充并重新分类") }
             if (draft?.rejected != null && !reprepare) TextButton(enabled = !busy, modifier = Modifier.testTag("manual_material_reprepare"), onClick = {
-                reprepare = true; load()
+                reprepare = true; editingSource = null; load()
             }) { Text("保留文本，按当前来源准备新请求") }
             TextButton(onClick = { load() }, enabled = !busy, modifier = Modifier.testTag("manual_material_reload")) { Text("重新核对来源") }
             if (message.isNotEmpty()) Text(message, modifier = Modifier.testTag("manual_material_message"))
