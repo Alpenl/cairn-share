@@ -3,6 +3,9 @@ package com.alpenl.cairn.share
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.SystemClock
+import android.os.ParcelFileDescriptor
+import android.os.PowerManager
+import android.app.KeyguardManager
 import android.view.KeyEvent
 import android.view.KeyCharacterMap
 import android.view.InputDevice
@@ -171,9 +174,21 @@ class AndroidUiRedesignInstrumentedTest {
             val windows = instrumentation.uiAutomation.windows.map {
                 "id=" + it.id + ":type=" + it.type + ":focused=" + it.isFocused + ":active=" + it.isActive
             }
+            val nativeFocus = ParcelFileDescriptor.AutoCloseInputStream(
+                instrumentation.uiAutomation.executeShellCommand("dumpsys window")
+            ).bufferedReader().useLines { lines ->
+                lines.filter { it.trimStart().startsWith("mCurrentFocus=") || it.trimStart().startsWith("mFocusedApp=") }
+                    .map { line -> JSONObject().put("kind", line.trim().substringBefore('='))
+                        .put("components", JSONArray(Regex("[A-Za-z][A-Za-z0-9_.]+/[A-Za-z0-9_.]+")
+                            .findAll(line).map { it.value }.toList()))
+                        .put("none", line.substringAfter('=').trim() == "null") }.toList()
+            }
             Log.i("CairnUiBackDiagnostic", JSONObject().put("point", point)
                 .put("activities", JSONArray(activities)).put("tags", JSONArray(tags))
-                .put("windows", JSONArray(windows)).toString())
+                .put("windows", JSONArray(windows)).put("native_focus", JSONArray(nativeFocus))
+                .put("interactive", context.getSystemService(PowerManager::class.java).isInteractive)
+                .put("keyguard_locked", context.getSystemService(KeyguardManager::class.java).isKeyguardLocked)
+                .toString())
         }.onFailure { Log.w("CairnUiBackDiagnostic", "diagnostic unavailable: " + it.javaClass.simpleName) }
     }
 
@@ -189,6 +204,19 @@ class AndroidUiRedesignInstrumentedTest {
         compose.waitForIdle()
         backDiagnostic("before-system-back")
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        try {
+            compose.waitUntil(5_000) {
+                var focused = false
+                instrumentation.runOnMainSync {
+                    focused = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
+                        .any { it is LauncherActivity && it.hasWindowFocus() }
+                }
+                focused
+            }
+        } catch (failure: Throwable) {
+            backDiagnostic("native-focus-timeout")
+            throw failure
+        }
         // A dismissed dialog can still own the native window while Compose is already idle.
         instrumentation.uiAutomation.waitForIdle(250, 5_000)
         SystemClock.sleep(800)
