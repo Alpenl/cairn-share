@@ -22,11 +22,22 @@ type SourceRow = {
   generation: number | null; protocol: string | null; spec_id: string | null; spec_hash: string | null;
   registered: number; source_busy: number; classification_busy: number; result_unknown: number;
 };
-const unknownClassification = `EXISTS (SELECT 1 FROM classification_reservations r
+// A known HTTP success is not a durable classification result. Match the
+// actual reservation to stored raw calls, or to the normal queue completion's
+// immutable operation receipt (which survives run archival/retention).
+const completedClassification = `(EXISTS(SELECT 1 FROM classification_operations op WHERE op.link_id=l.id AND op.status='applied'
+  AND op.operation_key=CASE WHEN json_valid(r.identity) THEN
+    printf('classify-%d-rev-%d-input-%d-gen-%d',r.link_id,json_extract(r.identity,'$.revision'),json_extract(r.identity,'$.input_revision'),json_extract(r.identity,'$.target_generation')) END
+  AND CASE WHEN json_valid(op.response) THEN json_extract(op.response,'$.status')='completed' ELSE 0 END)
+  OR EXISTS(SELECT 1 FROM classification_runs cr,json_each(CASE WHEN json_valid(cr.raw_judgments) THEN cr.raw_judgments ELSE '{}' END,'$.calls') call
+    WHERE cr.link_id=l.id AND cr.status='succeeded' AND CASE WHEN call.type='object' THEN json_extract(call.value,'$.reservation_key') END=r.reservation_key))`;
+export const unknownClassification = `EXISTS (SELECT 1 FROM classification_reservations r
   LEFT JOIN classification_provider_attempts a ON a.reservation_key=r.reservation_key
   WHERE r.link_id=l.id AND (a.id IS NULL OR CASE WHEN json_valid(a.call_json) THEN
     COALESCE(json_extract(a.call_json,'$.http_status'),0)=0 OR
-    (json_extract(a.call_json,'$.http_status')>=400 AND COALESCE(json_extract(a.call_json,'$.usage_missing'),1)<>0)
+    (json_extract(a.call_json,'$.http_status')>=400 AND COALESCE(json_extract(a.call_json,'$.usage_missing'),1)<>0) OR
+    (json_extract(a.call_json,'$.http_status') BETWEEN 200 AND 299 AND COALESCE(json_extract(a.call_json,'$.error_class'),'none')='none'
+      AND NOT ${completedClassification})
     ELSE 1 END))`;
 async function sourceRow(env: Env, id: number, now: string): Promise<SourceRow | null> {
   return env.DB.prepare(`SELECT l.id,l.url,l.original_text,l.curation_status,l.content_revision,l.images,l.related_links,

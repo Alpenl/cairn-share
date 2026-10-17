@@ -12,6 +12,7 @@ import type { RequestD1Stats } from "./observability";
 import { extensionBudgetRoute } from "./extension-budget";
 import { savedRecordsRoute, type SavedRecordKind } from "./saved-records";
 import { manualMaterialRoute } from "./manual-material";
+import { processingRoute } from "./processing";
 import { rerankCacheRoute } from "./rerank-cache";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
@@ -51,6 +52,8 @@ type QueryObserver = {
 };
 
 export async function domainRoute(request: Request, env: Env, path: string, observer?: QueryObserver): Promise<Response> {
+  const processing = path.match(/^\/api\/v2\/links\/(\d+)\/processing$/);
+  if (processing) return processingRoute(request, env, Number(processing[1]));
   const manualMaterial = path.match(/^\/api\/v2\/links\/(\d+)\/manual-material$/);
   if (manualMaterial) return manualMaterialRoute(request, env, Number(manualMaterial[1]));
   const saved = path.match(/^\/api\/v2\/links\/(\d+)\/saved-records\/(sources|entities|overrides|events)$/);

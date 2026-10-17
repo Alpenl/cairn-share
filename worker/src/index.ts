@@ -24,6 +24,7 @@ import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSource
 import { appRunHistoryRoute, computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
 import { savedRecordsRoute, type SavedRecordKind } from "./saved-records";
 import { manualMaterialRoute } from "./manual-material";
+import { processingRoute } from "./processing";
 import { entityEvidenceRoute } from "./entity-evidence";
 import { applyV1Write, topicGranularityAware } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
@@ -629,6 +630,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const denied = requireApiToken(request, env);
     if (denied !== null) return denied;
     return appRunHistoryRoute(request, env, Number(appHistory[1]), appHistory[2] === undefined ? undefined : Number(appHistory[2]));
+  }
+  const processing = path.match(/^\/api\/bookmarks\/(\d+)\/processing$/);
+  if (processing) {
+    const denied = requireApiToken(request, env);
+    if (denied !== null) return denied;
+    return processingRoute(request, env, Number(processing[1]));
   }
   const manualMaterial = path.match(/^\/api\/bookmarks\/(\d+)\/manual-material$/);
   if (manualMaterial) {
