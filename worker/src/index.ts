@@ -21,7 +21,7 @@ import { selectionFilters, SELECTION_FILTER_KEYS, entityStateSQL } from "./selec
 import { tagSystemRoute, attachTagSummaries, projectTagSummaryRows, contentFunctionsAware } from "./tag-system";
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
-import { computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
+import { appRunHistoryRoute, computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
 import { entityEvidenceRoute } from "./entity-evidence";
 import { applyV1Write, topicGranularityAware } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
@@ -621,6 +621,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const denied = requireApiToken(request, env);
     if (denied !== null) return denied;
     return entityEvidenceRoute(request, env, Number(appEvidence[1]));
+  }
+  const appHistory = path.match(/^\/api\/bookmarks\/(\d+)\/run-history(?:\/(\d+))?$/);
+  if (appHistory) {
+    const denied = requireApiToken(request, env);
+    if (denied !== null) return denied;
+    return appRunHistoryRoute(request, env, Number(appHistory[1]), appHistory[2] === undefined ? undefined : Number(appHistory[2]));
   }
   const appV2 = path.match(/^\/api\/bookmarks\/(\d+)\/(v2-selection|v2-override)$/);
   const appTags = path.match(/^\/api\/bookmarks\/(\d+)\/(tags|tag-history)$/);
