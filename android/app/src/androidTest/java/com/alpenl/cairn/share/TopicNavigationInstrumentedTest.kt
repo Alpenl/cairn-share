@@ -1,6 +1,10 @@
 package com.alpenl.cairn.share
 
 import android.content.Intent
+import android.util.Log
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.unit.dp
@@ -24,7 +28,42 @@ import java.util.concurrent.CopyOnWriteArrayList
 class TopicNavigationInstrumentedTest {
     @get:Rule val compose = createEmptyComposeRule()
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
-    private fun waitTag(tag: String) = compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag(tag).assertExists(); true }.getOrDefault(false) }
+    private var activeScenario: ActivityScenario<LauncherActivity>? = null
+    private fun waitTag(tag: String) {
+        try {
+            compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag(tag).assertExists(); true }.getOrDefault(false) }
+        } catch (failure: Throwable) {
+            probe("timeout:" + tag)
+            throw failure
+        }
+    }
+
+    // This fixture uses only synthetic data. Log flags/tags, never query text,
+    // field values, credentials, account keys or source bodies.
+    private fun probe(point: String) {
+        val value = JSONObject().put("point", point)
+        runCatching {
+            activeScenario?.onActivity {
+                value.put("window_focused", it.hasWindowFocus())
+                value.put("activity_ime_visible", ViewCompat.getRootWindowInsets(it.window.decorView)
+                    ?.isVisible(WindowInsetsCompat.Type.ime()) ?: JSONObject.NULL)
+            }
+        }
+        val tags = runCatching {
+            compose.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.TestTag), useUnmergedTree = true)
+                .fetchSemanticsNodes().map { it.config[SemanticsProperties.TestTag] }.distinct().sorted()
+        }.getOrDefault(emptyList())
+        value.put("tags", JSONArray(tags))
+        value.put("query_empty", runCatching {
+            compose.onNodeWithTag("topic_search").fetchSemanticsNode()
+                .config[SemanticsProperties.EditableText].text.isEmpty()
+        }.getOrNull() ?: JSONObject.NULL)
+        value.put("advanced_expanded", runCatching {
+            compose.onNodeWithTag("advanced_bookmark_filters").fetchSemanticsNode()
+                .config[SemanticsProperties.StateDescription] == "已展开"
+        }.getOrNull() ?: JSONObject.NULL)
+        Log.i("CairnTopicDiagnostic", value.toString())
+    }
     private fun json(value: JSONObject) = MockResponse().setHeader("Content-Type", "application/json")
         .setHeader("X-Cairn-Tag-System", "1").setHeader("X-Cairn-Topic-Granularity", "1").setBody(value.toString())
 
@@ -82,7 +121,8 @@ class TopicNavigationInstrumentedTest {
         val intent = Intent(context, LauncherActivity::class.java).putExtra(ShareActivity.EXTRA_API_BASE_URL, base)
             .putExtra(ShareActivity.EXTRA_RELEASES_API_URL, server.url("/latest").toString())
         try {
-            ActivityScenario.launch<LauncherActivity>(intent).use {
+            ActivityScenario.launch<LauncherActivity>(intent).use { scenario ->
+                activeScenario = scenario
                 waitTag("link_9")
                 compose.waitUntil(15_000) { runCatching {
                     compose.onNodeWithTag("link_tags_9", useUnmergedTree = true).onChildren().onFirst()
@@ -104,8 +144,20 @@ class TopicNavigationInstrumentedTest {
                 assertTrue(pins.getStringSet("pins:${accountKeyFor(base, "another-account")}", emptySet()).orEmpty().isEmpty())
                 compose.onNodeWithTag("manage_topic_pins").performScrollTo().performClick()
                 compose.onNodeWithTag("topic_search").performScrollTo().performTextClearance()
+                // Clearing text refocuses the field and can queue an IME show.
+                // Finish the input session through its real Search action
+                // before touching controls in the sheet.
+                compose.onNodeWithTag("topic_search").performImeAction()
+                compose.onNodeWithTag("topic_search").assertIsNotFocused()
+                compose.waitForIdle()
+                assertTrue("Topic search must remain cleared",
+                    compose.onNodeWithTag("topic_search").fetchSemanticsNode()
+                        .config[SemanticsProperties.EditableText].text.isEmpty())
+                compose.onNodeWithTag("bookmark_filter_sheet").assertIsDisplayed()
                 waitTag("filter_topics_image_creation")
                 compose.onNodeWithTag("filter_topics_image_creation").performScrollTo().performClick()
+                compose.onNodeWithTag("bookmark_filter_sheet").assertIsDisplayed()
+                compose.onNodeWithTag("filter_topics_image_creation").assertIsSelected()
                 waitTag("filter_topics_design")
                 compose.onNodeWithTag("filter_topics_design").performScrollTo().performClick()
                 waitTag("filter_topics_portrait")
@@ -123,6 +175,6 @@ class TopicNavigationInstrumentedTest {
                     .assertHeightIsAtLeast(48.dp).assertWidthIsAtLeast(48.dp)
                 assertTrue(writes.isEmpty())
             }
-        } finally { server.shutdown() }
+        } finally { activeScenario = null; server.shutdown() }
     }
 }
