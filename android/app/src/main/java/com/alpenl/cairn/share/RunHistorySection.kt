@@ -64,35 +64,40 @@ private fun RunHistoryControls(linkId: Int, baseUrl: String, token: String) {
     var pendingExport by remember { mutableStateOf<RunHistoryRecord?>(null) }
     var exportStatus by remember { mutableStateOf("") }
     var exporting by remember { mutableStateOf(false) }
+    var exportRequest by remember { mutableStateOf(0L) }
     var preview by remember { mutableStateOf(false) }
 
+    fun cancelExport() {
+        exportRequest++; exportJob?.cancel(); exportJob = null
+        pendingExport = null; exporting = false; exportStatus = ""
+    }
     DisposableEffect(Unit) {
         onDispose {
-            active = false; request++; job?.cancel(); exportJob?.cancel(); pendingExport = null
+            active = false; request++; job?.cancel(); job = null; cancelExport()
         }
     }
     fun close() {
-        open = false; request++; job?.cancel(); exportJob?.cancel()
-        busy = false; page = null; record = null; pendingExport = null; exportStatus = ""
+        open = false; request++; job?.cancel(); job = null; cancelExport()
+        busy = false; page = null; record = null
     }
     fun readPage(cursor: Long?) {
         if (!active) return
         job?.cancel(); val sent = ++request
-        after = cursor; selected = null; record = null; page = null; busy = true; preview = false; pendingExport = null
-        exportJob?.cancel()
+        after = cursor; selected = null; record = null; page = null; busy = true; preview = false
+        cancelExport()
         job = scope.launch {
             val result = client.page(linkId, cursor, token)
-            if (active && sent == request) { page = result; busy = false }
+            if (active && sent == request) { page = result; busy = false; job = null }
         }
     }
     fun readRecord(id: Long) {
         if (!active) return
         job?.cancel(); val sent = ++request
-        selected = id; record = null; busy = true; preview = false; exportStatus = ""; pendingExport = null
-        exportJob?.cancel()
+        selected = id; record = null; busy = true; preview = false
+        cancelExport()
         job = scope.launch {
             val result = client.record(linkId, id, token)
-            if (active && sent == request) { record = result; busy = false }
+            if (active && sent == request) { record = result; busy = false; job = null }
         }
     }
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
@@ -100,23 +105,24 @@ private fun RunHistoryControls(linkId: Int, baseUrl: String, token: String) {
         if (uri != null && active && open && value != null && selected == value.summary.id &&
             (record as? RunHistoryResult.Loaded)?.value === value) {
             exportJob?.cancel()
+            val sent = ++exportRequest
             exporting = true
             exportJob = scope.launch {
                 try {
                     withContext(Dispatchers.IO) {
-                        if (!active) return@withContext
+                        if (!active || sent != exportRequest) return@withContext
                         val output = resolver.openOutputStream(uri, "wt") ?: throw IOException("export unavailable")
                         output.bufferedWriter(Charsets.UTF_8).use { it.write(value.exportJson) }
                     }
-                    if (active) exportStatus = "已导出所选记录。"
+                    if (active && sent == exportRequest) exportStatus = "已导出所选记录。"
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: IOException) {
-                    if (active) exportStatus = "导出失败，请重试。"
+                    if (active && sent == exportRequest) exportStatus = "导出失败，请重试。"
                 } catch (_: SecurityException) {
-                    if (active) exportStatus = "无法写入所选位置，请重新选择。"
+                    if (active && sent == exportRequest) exportStatus = "无法写入所选位置，请重新选择。"
                 } finally {
-                    if (active) exporting = false
+                    if (active && sent == exportRequest) { exporting = false; exportJob = null }
                 }
             }
         }
@@ -182,7 +188,7 @@ private fun RunHistoryControls(linkId: Int, baseUrl: String, token: String) {
         confirmButton = { TextButton(onClick = ::close, modifier = Modifier.testTag("run_history_close")) { Text("关闭") } },
         dismissButton = {
             if (selected != null) TextButton(onClick = {
-                request++; job?.cancel(); exportJob?.cancel(); pendingExport = null
+                request++; job?.cancel(); job = null; cancelExport()
                 selected = null; record = null; busy = false; preview = false
             }, modifier = Modifier.testTag("run_history_back")) { Text("返回记录列表") }
         },
