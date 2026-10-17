@@ -51,6 +51,15 @@ class SettingsShareInteractionInstrumentedTest {
                 }
             }
             compose.waitForIdle()
+            // Compose being idle does not establish that the translucent
+            // Activity's native window can receive an injected touch yet.
+            compose.waitUntil(5_000) {
+                var ready = false
+                scenario.onActivity { activity ->
+                    ready = activity.hasWindowFocus() && activity.lifecycle.currentState == androidx.lifecycle.Lifecycle.State.RESUMED
+                }
+                ready
+            }
         }
     }
 

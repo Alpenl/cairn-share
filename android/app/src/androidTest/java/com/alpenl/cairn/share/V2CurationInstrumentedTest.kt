@@ -644,6 +644,90 @@ class V2CurationInstrumentedTest {
         }
     }
 
+    @Test fun savedHistoryReadsOriginalSourceEntityAndLegacyLogsAndExportsCompleteSource() {
+        val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val url = request.requestUrl!!
+                paths.add("${request.method} ${url.encodedPath}")
+                val kind = url.encodedPath.substringAfterLast('/')
+                if (url.encodedPath.startsWith("/api/bookmarks/4/saved-records/")) {
+                    assertEquals("1", request.getHeader("X-Cairn-App-Saved-Records"))
+                    assertEquals("Bearer $token", request.getHeader("Authorization"))
+                    val source = if (kind == "entities") 2 else JSONObject.NULL
+                    if (kind == "entities") assertEquals("2", url.queryParameter("source_revision"))
+                    val row = JSONObject().put("key", if (kind == "entities") "opaque-entity" else "2")
+                    when (kind) {
+                        "sources" -> row.put("content_revision", 2).put("completeness", "partial")
+                        "entities" -> row.put("state", "failed").put("outcome", "ignored_stale")
+                        "overrides" -> row.put("source", "legacy_unknown").put("confirmed", 0).put("action", "reject")
+                        "events" -> row.put("action", "why")
+                    }
+                    val result = JSONObject().put("version", 1).put("bookmark_id", 4).put("kind", kind).put("source_revision", source)
+                    if (url.queryParameter("record_key") != null) {
+                        assertEquals(row.getString("key"), url.queryParameter("record_key"))
+                        row.put("payload", JSONObject().put("original", "原文" + "x".repeat(17_000)).put("unknown", JSONObject.NULL).put("truncated", false))
+                        result.put("record", row)
+                    } else result.put("records", JSONArray().put(row)).put("next_after", JSONObject.NULL)
+                    return response(result).setHeader("X-Cairn-App-Saved-Records", "1")
+                }
+                return when (url.encodedPath) {
+                    "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                    "/api/links/4", "/api/bookmarks/4" -> response(link(4))
+                    "/api/bookmarks/4/v2-selection" -> response(selection(3))
+                    "/api/v2-taxonomy" -> response(taxonomy())
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use { scenario ->
+            openDetailAndLoadTaxonomy()
+            assertFalse(paths.any { it.contains("saved-records") })
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("saved_history_open"))
+            compose.onNodeWithTag("saved_history_open").performClick()
+            fun choose(key: String) {
+                compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag("saved_history_row_$key").assertExists(); true }.getOrDefault(false) }
+                compose.onNodeWithTag("saved_history_row_$key").performScrollTo().performClick()
+                compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag("saved_history_export").assertExists(); true }.getOrDefault(false) }
+            }
+            choose("2")
+            val file = java.io.File.createTempFile("cairn-source-", ".json", context.cacheDir)
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            val monitor = object : Instrumentation.ActivityMonitor() {
+                override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                    if (intent.action != Intent.ACTION_CREATE_DOCUMENT) return null
+                    assertEquals("cairn-sources-4.json", intent.getStringExtra(Intent.EXTRA_TITLE))
+                    return Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(android.net.Uri.fromFile(file)))
+                }
+            }
+            instrumentation.addMonitor(monitor)
+            try {
+                compose.onNodeWithTag("saved_history_export").performScrollTo().performClick()
+                compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag("saved_history_export_status").assertTextEquals("已导出所选记录。"); true }.getOrDefault(false) }
+                val payload = JSONObject(file.readText()).getJSONObject("record").getJSONObject("payload")
+                assertEquals(17_002, payload.getString("original").length)
+                assertTrue(payload.isNull("unknown")); assertFalse(payload.getBoolean("truncated"))
+            } finally {
+                instrumentation.removeMonitor(monitor)
+                assertTrue(file.delete())
+            }
+            compose.onNodeWithTag("saved_history_source_entities").performScrollTo().performClick()
+            choose("opaque-entity")
+            compose.onNodeWithText("记录状态：失败").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("处理结果：已忽略旧结果").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithTag("saved_history_kind_overrides").performScrollTo().performClick()
+            choose("2")
+            compose.onNodeWithText("决定来源：旧记录，来源不明").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("确认情况：未确认").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithTag("saved_history_kind_events").performScrollTo().performClick()
+            choose("2")
+            compose.onNodeWithText("动作：修改收藏原因").performScrollTo().assertIsDisplayed()
+            scenario.recreate()
+            compose.onNodeWithTag("saved_history_dialog").assertDoesNotExist()
+            assertTrue("All history navigation is read-only", paths.all { it.startsWith("GET ") })
+        }
+    }
+
     @Test fun classificationHistoryLoadsOnlyOnRequestAndKeepsPartialUnknownAndPagedRecords() {
         val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
         fun row(id: Int) = JSONObject().put("id", id).put("status", "partial")

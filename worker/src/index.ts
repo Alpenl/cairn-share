@@ -22,6 +22,7 @@ import { tagSystemRoute, attachTagSummaries, projectTagSummaryRows, contentFunct
 import { bookmarkSource, record, storedClassification, taxonomy, validCurationStatus, validTerm, validateClassification, validateSelection } from "./curation";
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { appRunHistoryRoute, computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
+import { savedRecordsRoute, type SavedRecordKind } from "./saved-records";
 import { entityEvidenceRoute } from "./entity-evidence";
 import { applyV1Write, topicGranularityAware } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
@@ -627,6 +628,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const denied = requireApiToken(request, env);
     if (denied !== null) return denied;
     return appRunHistoryRoute(request, env, Number(appHistory[1]), appHistory[2] === undefined ? undefined : Number(appHistory[2]));
+  }
+  const saved = path.match(/^\/api\/bookmarks\/(\d+)\/saved-records\/(sources|entities|overrides|events)$/);
+  if (saved) {
+    const denied = requireApiToken(request, env);
+    if (denied !== null) return denied;
+    return savedRecordsRoute(request, env, Number(saved[1]), saved[2] as SavedRecordKind);
   }
   const appV2 = path.match(/^\/api\/bookmarks\/(\d+)\/(v2-selection|v2-override)$/);
   const appTags = path.match(/^\/api\/bookmarks\/(\d+)\/(tags|tag-history)$/);
