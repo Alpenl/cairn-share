@@ -118,5 +118,65 @@ assert row["classification_calls"]==0 and row["reading_calls"]==0, row
 assert (row["original_text"],row["ai_title"],row["summary"],row["translated_text"])==("Manual fixture original source","Keep title","Keep summary","Keep translation"), row
 print("Actual D1: one new snapshot/queue revision, duplicate content is a no-op; original reading kept and zero providers")
 PY
+# Keep the original twenty-two phases unchanged. These three new phases use
+# the actual ViewModel/Repository/DataStore, a real R2 image and distinct PIDs.
+python3 "$root/tests/android-worker/processing_fixture.py" > "$work/processing.sql"
+(cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --file "$work/processing.sql" > "$work/processing-seed.log" 2>&1)
+python3 - "$work/processing.png" <<'PY'
+import base64,sys
+open(sys.argv[1],"wb").write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM7sAAAAASUVORK5CYII="))
+PY
+(cd "$root/worker" && npx wrangler r2 object put "android-recovery/enrichment/9004/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png" --local --config "$work/wrangler.jsonc" --file "$work/processing.png" --content-type image/png > "$work/processing-r2-seed.log" 2>&1)
+processing_sql="SELECT l.content_revision,j.revision,j.input_revision,j.status,l.enrichment_status,l.original_text,l.ai_title,l.summary,l.translated_text,l.images,l.personal_revision,(SELECT COUNT(*) FROM evidence_snapshots WHERE link_id=l.id) AS snapshots,(SELECT COUNT(*) FROM classification_operations WHERE link_id=l.id AND status='app_processing') AS operations,(SELECT COUNT(*) FROM classification_provider_attempts WHERE link_id=l.id) AS classification_calls,(SELECT COUNT(*) FROM enrichment_provider_attempts WHERE link_id=l.id) AS reading_calls,(SELECT COUNT(*) FROM curation_events WHERE link_id=l.id) AS events,(SELECT COUNT(*) FROM curation_overrides WHERE link_id=l.id) AS overrides FROM links l JOIN classification_jobs j ON j.link_id=l.id WHERE l.id=9004"
+(cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --command "$processing_sql" --json > "$work/processing-initial.json")
+for phase in persistPrimaryWithActualViewModelAndLoseCommittedWorkerResponse recoverPrimaryAfterProcessDeathAndRetryOnlyClassificationFromFreshState; do
+  "$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
+  "$adb" -s "$serial" shell am instrument -w -r \
+    -e class "com.alpenl.cairn.share.ProcessingWorkerIntegrationTest#$phase" \
+    -e cairnWorkerUrl http://127.0.0.1:18978 \
+    com.alpenl.cairn.share.test/androidx.test.runner.AndroidJUnitRunner | tee "$work/$phase.log"
+  grep -Eq '^OK \(1 test\)' "$work/$phase.log"
+  if [ "$phase" = "persistPrimaryWithActualViewModelAndLoseCommittedWorkerResponse" ]; then
+    (cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --command "$processing_sql" --json > "$work/processing-after-primary.json")
+    # A controlled fixture advances queue status, never source/history/human
+    # or model ledgers, to make an explicit new classification-only retry eligible.
+    (cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --command "UPDATE links SET enrichment_status='completed' WHERE id=9004; UPDATE classification_jobs SET status='completed' WHERE link_id=9004;" > "$work/processing-stage-ready.log" 2>&1)
+  fi
+done
+(cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --command "$processing_sql" --json > "$work/processing-final.json")
+python3 - "$work/processing-initial.json" "$work/processing-after-primary.json" "$work/processing-final.json" <<'PY'
+import json,sys
+def one(path):
+    rows=json.load(open(path))[0]["results"]
+    assert len(rows)==1,rows
+    return rows[0]
+before,primary,final=map(one,sys.argv[1:])
+for row in (primary,final):
+    for name in ("content_revision","input_revision","snapshots"):
+        assert row[name]==before[name]+1,(name,before,row)
+    for name in ("ai_title","summary","translated_text","images","personal_revision","events","overrides"):
+        assert row[name]==before[name],(name,before,row)
+    assert row["classification_calls"]==row["reading_calls"]==0,row
+assert primary["revision"]==before["revision"]+1 and primary["operations"]==before["operations"]+1,primary
+assert primary["enrichment_status"]=="pending" and primary["status"]=="pending",primary
+assert final["revision"]==before["revision"]+2 and final["operations"]==before["operations"]+2,final
+assert final["enrichment_status"]=="completed" and final["status"]=="pending",final
+assert final["original_text"]=="Human supplied complete primary 🙂\n"+"保留来源"*2000,final
+print("Actual processing D1: source/input/snapshot +1, source plus explicit class-only queue +2, media/reading/human retained, zero providers")
+PY
+phase=confirmedRealDeletionErasesJournalAndRejectsDelayedKnownRequestWithoutResurrection
+"$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
+"$adb" -s "$serial" shell am instrument -w -r \
+  -e class "com.alpenl.cairn.share.ProcessingWorkerIntegrationTest#$phase" \
+  -e cairnWorkerUrl http://127.0.0.1:18978 \
+  com.alpenl.cairn.share.test/androidx.test.runner.AndroidJUnitRunner | tee "$work/$phase.log"
+grep -Eq '^OK \(1 test\)' "$work/$phase.log"
+(cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --command "SELECT (SELECT COUNT(*) FROM links WHERE id=9004) AS links,(SELECT COUNT(*) FROM evidence_snapshots WHERE link_id=9004) AS snapshots,(SELECT COUNT(*) FROM classification_operations WHERE link_id=9004) AS operations" --json > "$work/processing-deleted.json")
+python3 - "$work/processing-deleted.json" <<'PY'
+import json,sys
+row=json.load(open(sys.argv[1]))[0]["results"][0]
+assert row==dict(links=0,snapshots=0,operations=0),row
+print("Actual D1 deletion: no source, operation or bookmark resurrection")
+PY
 curl -fsS "http://127.0.0.1:$proxy_port/__test/control" > "$work/transport-history.json"
-echo "PASS: twenty-two phases ran in separate Android processes against actual authenticated Worker/D1"
+echo "PASS: twenty-five phases ran in separate Android processes against actual authenticated Worker/D1/R2"

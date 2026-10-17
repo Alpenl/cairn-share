@@ -375,6 +375,9 @@ internal fun CairnLinksApp(
                     onFlushPersonal = viewModel::flushPersonalTags,
                     onOfflinePin = { pinned -> viewModel.setOfflinePinned(id, pinned) },
                     onRecoverLegacyV2 = { viewModel.recoverLegacyV2Actions(id, displayContext.accountKey, displayContext) },
+                    onLoadProcessing = { viewModel.loadProcessing(id, displayContext) },
+                    onSubmitProcessing = { viewModel.submitProcessing(id, it, displayContext) },
+                    onDiscardProcessing = { viewModel.discardRefusedProcessing(id, displayContext) },
                     onDelete = { viewModel.deleteLink(id) { navController.popBackStack() } },
                 )
             }
@@ -871,6 +874,9 @@ private fun DetailScreen(
     onFlushPersonal: () -> Unit,
     onOfflinePin: (Boolean) -> Unit,
     onRecoverLegacyV2: () -> Unit,
+    onLoadProcessing: () -> Unit,
+    onSubmitProcessing: (com.alpenl.cairn.share.network.ProcessingIntent) -> Unit,
+    onDiscardProcessing: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val link = state.links.firstOrNull { it.id == id }
@@ -994,6 +1000,13 @@ private fun DetailScreen(
                                 legacyActions, onRecoverLegacyV2)
                             }
                         }
+                    }
+                }
+                item(key = "processing") {
+                    editorState.SaveableStateProvider("processing:$id:${state.accountGeneration}") {
+                        ProcessingSection(linkId = id, accountKey = accountKeyFor(state.apiBaseUrl, state.preferences.apiToken),
+                            accountGeneration = state.accountGeneration, panel = state.processingPanels[id], onLoad = onLoadProcessing,
+                            onSubmit = onSubmitProcessing, onDiscard = onDiscardProcessing)
                     }
                 }
                 state.offlineReads[id]?.takeIf { !it.verified || loadState == DetailLoadState.Failed || it.expired() }?.let { cached ->

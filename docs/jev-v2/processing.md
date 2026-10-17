@@ -1,6 +1,6 @@
 # B07：独立处理状态与显式来源补录合同
 
-本增量完成 Worker 合同及配对 Go 网关，不代表完整 B07 已完成。Android Repository / ViewModel / Compose、持久化处理动作、设备恢复验收与策略重放交互继续按原 issue 执行。没有部署、远程迁移、真实模型调用或版本发布。
+Worker 合同及配对 Go 网关见 Draft #93 / Enricher Draft #59。Android 的 Repository / ViewModel / Compose、持久化处理动作与真实进程恢复见[客户端增量](evidence/B07-20261017-processing-actions.md)。完整 B07、策略重放交互和最终独立复审继续按原 issue 执行。没有部署、远程迁移、真实模型调用或版本发布。
 
 ## 读取
 

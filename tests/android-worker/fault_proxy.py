@@ -10,7 +10,7 @@ import urllib.parse
 import uuid
 
 upstream = urllib.parse.urlsplit(sys.argv[1])
-state = {"mode": "online", "key": "", "requests": [], "materials": [], "selection_reads": [], "deletes": [], "web_writes": 0}
+state = {"mode": "online", "key": "", "requests": [], "materials": [], "processing": [], "selection_reads": [], "deletes": [], "web_writes": 0}
 lock = threading.Lock()
 
 
@@ -62,7 +62,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with lock:
                 if self.command == "POST":
                     change = json.loads(body)
-                    assert change["mode"] in ("online", "offline", "writes_offline", "lose_first", "conflict", "fail_key", "lose_delete")
+                    assert change["mode"] in ("online", "offline", "writes_offline", "lose_first", "conflict", "fail_key", "lose_delete", "lose_processing")
                     state.update(mode=change["mode"], key=change.get("key", ""))
                 data = json.dumps(state).encode()
             return self.respond(200, data)
@@ -74,8 +74,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                    or name.lower().startswith("x-cairn-")}
         mutation = not direct and self.command == "POST" and (path.endswith(("/v2-override", "/tags")) or path.startswith("/api/collections/") and path.endswith("/operations"))
         material = not direct and self.command == "POST" and path.endswith("/manual-material")
+        processing = not direct and self.command == "POST" and path.endswith("/processing")
         deletion = not direct and self.command == "DELETE" and path.startswith("/api/links/")
-        action = json.loads(body) if mutation or material else {}
+        action = json.loads(body) if mutation or material or processing else {}
         with lock:
             mode, key = state["mode"], state["key"]
             if deletion:
@@ -84,6 +85,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if material:
                 state["materials"].append(action)
                 if mode == "lose_first": state["mode"] = "offline"
+            if processing:
+                state["processing"].append(action)
+                if mode == "lose_processing": state["mode"] = "offline"
             if mutation:
                 state["requests"].append(action)
                 if mode in ("lose_first", "fail_key") and (mode == "lose_first" or key == action["operation_key"]):
@@ -91,7 +95,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if mode == "conflict" and key == action["operation_key"]:
                     state["mode"] = "online"
                     state["web_writes"] += 1
-        if not direct and (mode == "offline" or (mode == "writes_offline" and (mutation or material))):
+        if not direct and (mode == "offline" or (mode == "writes_offline" and (mutation or material or processing))):
             return self.drop()
         if mutation and mode == "fail_key" and key == action["operation_key"]:
             return self.drop()
@@ -115,6 +119,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             assert status == 204, (status, result)
             return self.drop()
         if (mutation or material) and mode == "lose_first":
+            assert status == 200, (status, result)
+            return self.drop()
+        if processing and mode == "lose_processing":
             assert status == 200, (status, result)
             return self.drop()
         self.respond(status, result, response_headers)

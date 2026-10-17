@@ -10,13 +10,19 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import com.alpenl.cairn.share.network.ManualMaterialIntent
 import com.alpenl.cairn.share.network.decodeMaterialIntent
+import com.alpenl.cairn.share.network.ProcessingJournal
+import com.alpenl.cairn.share.network.StoredProcessingIntent
+import com.alpenl.cairn.share.network.decodeProcessingIntent
 
 private val Context.curationActionDataStore by preferencesDataStore("cairn_curation_actions")
 private val MATERIALS_KEY = stringPreferencesKey("manual_material_intents_json")
+private val PROCESSING_KEY = stringPreferencesKey("processing_intents_json")
 private val DELETIONS_KEY = stringPreferencesKey("deleted_links_json")
 
 /**
@@ -76,6 +82,8 @@ internal class CurationActionStore(context: Context) : CurationQueue {
                 val actions = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
                 preferences[ACTIONS_KEY] = CurationActionJson.encode(actions.filterNot { it.accountKey == accountKey && it.linkId == linkId })
                 preferences[MATERIALS_KEY] = encodeMaterialDrafts(decodeMaterialDrafts(preferences[MATERIALS_KEY] ?: "[]")
+                    .filterNot { it.accountKey == accountKey && it.linkId == linkId })
+                preferences[PROCESSING_KEY] = encodeProcessingDrafts(decodeProcessingDrafts(preferences[PROCESSING_KEY] ?: "[]")
                     .filterNot { it.accountKey == accountKey && it.linkId == linkId })
             }
         }
@@ -159,7 +167,7 @@ internal class CurationActionStore(context: Context) : CurationQueue {
     }
 
     suspend fun clear() {
-        context.curationActionDataStore.edit { preferences -> preferences.remove(ACTIONS_KEY); preferences.remove(DELETIONS_KEY); preferences.remove(MATERIALS_KEY) }
+        context.curationActionDataStore.edit { preferences -> preferences.remove(ACTIONS_KEY); preferences.remove(DELETIONS_KEY); preferences.remove(MATERIALS_KEY); preferences.remove(PROCESSING_KEY) }
     }
 
     private companion object {
@@ -224,6 +232,68 @@ internal fun decodeMaterialDrafts(value: String): List<StoredManualMaterial> {
             StoredManualMaterial(account, id.toInt(), decodeMaterialIntent(row.getJSONObject("intent"), row.getString("role")), rejected)
         }.also { values -> require(values.distinctBy { it.accountKey to it.linkId }.size == values.size) }
     } catch (error: Exception) { throw java.io.IOException("Invalid manual material draft journal", error) }
+}
+
+/** Same DataStore transaction as confirmed deletion; no token is persisted. */
+internal class ProcessingStore(context: Context) : ProcessingJournal {
+    private val context = context.applicationContext
+    override suspend fun load(accountKey: String, linkId: Int): StoredProcessingIntent? = withContext(Dispatchers.IO) {
+        decodeProcessingDrafts(context.curationActionDataStore.data.first()[PROCESSING_KEY] ?: "[]")
+            .singleOrNull { it.accountKey == accountKey && it.linkId == linkId }
+    }
+
+    override suspend fun prepare(value: StoredProcessingIntent, expected: StoredProcessingIntent?): Unit = withContext(Dispatchers.IO) {
+        require(value.accountKey.matches(Regex("v2:[a-f0-9]{64}")) && value.linkId > 0 && value.intent.valid() && value.rejected == null)
+        context.curationActionDataStore.edit { preferences ->
+            check(decodeDeletions(preferences[DELETIONS_KEY] ?: "[]").none { it.accountKey == value.accountKey && it.linkId == value.linkId })
+            val current = decodeProcessingDrafts(preferences[PROCESSING_KEY] ?: "[]")
+            val old = current.singleOrNull { it.accountKey == value.accountKey && it.linkId == value.linkId }
+            check(old == expected && (old == null || old.rejected != null || old.intent == value.intent))
+            val next = current.filterNot { it.accountKey == value.accountKey && it.linkId == value.linkId } + value
+            check(next.size <= 20) { "Processing draft storage is full" }
+            preferences[PROCESSING_KEY] = encodeProcessingDrafts(next)
+        }
+    }
+    override suspend fun reject(value: StoredProcessingIntent, code: String) {
+        require(code.isNotBlank() && code.length <= 200)
+        update(value, value.copy(rejected = code))
+    }
+    override suspend fun acknowledge(value: StoredProcessingIntent) = update(value, null)
+    override suspend fun discardRefused(value: StoredProcessingIntent) {
+        require(value.rejected != null)
+        update(value, null, strict = true)
+    }
+    private suspend fun update(value: StoredProcessingIntent, replacement: StoredProcessingIntent?, strict: Boolean = false): Unit = withContext(Dispatchers.IO) {
+        context.curationActionDataStore.edit { preferences ->
+            val current = decodeProcessingDrafts(preferences[PROCESSING_KEY] ?: "[]")
+            if (current.singleOrNull { it.accountKey == value.accountKey && it.linkId == value.linkId } != value) {
+                check(!strict) { "Processing draft changed before discard" }
+                return@edit
+            }
+            preferences[PROCESSING_KEY] = encodeProcessingDrafts(current.filterNot { it == value } + listOfNotNull(replacement))
+        }
+    }
+}
+internal fun encodeProcessingDrafts(values: List<StoredProcessingIntent>): String = JSONArray().also { rows -> values.forEach {
+    rows.put(JSONObject().put("account", it.accountKey).put("id", it.linkId).put("intent", it.intent.encode()).put("rejected", it.rejected ?: JSONObject.NULL))
+} }.toString()
+internal fun decodeProcessingDrafts(value: String): List<StoredProcessingIntent> {
+    try {
+        val rows = JSONArray(value)
+        require(rows.length() <= 20)
+        return List(rows.length()) { index ->
+            val row = rows.getJSONObject(index)
+            val account = row.opt("account") as? String ?: error("missing processing account")
+            val id = row.opt("id") as? Number ?: error("missing processing owner")
+            require(account.matches(Regex("v2:[a-f0-9]{64}")) && id.toLong() in 1..Int.MAX_VALUE.toLong() && id.toDouble() == id.toInt().toDouble())
+            require(row.has("rejected"))
+            val rejected = if (row.isNull("rejected")) null else {
+                (row.opt("rejected") as? String)?.takeIf { it.isNotBlank() && it.length <= 200 }
+                    ?: error("invalid processing disposition")
+            }
+            StoredProcessingIntent(account, id.toInt(), decodeProcessingIntent(row.getJSONObject("intent")), rejected)
+        }.also { values -> require(values.distinctBy { it.accountKey to it.linkId }.size == values.size) }
+    } catch (error: Exception) { throw java.io.IOException("Invalid processing draft journal", error) }
 }
 
 internal object CurationActionJson {
