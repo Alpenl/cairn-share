@@ -21,5 +21,5 @@ print("INSERT INTO classification_jobs(link_id,status,target_generation,spec_id,
       f"SELECT l.id,'completed',t.generation,t.spec_id,l.content_revision,s.id,s.content_hash FROM links l "
       "JOIN evidence_snapshots s ON s.link_id=l.id JOIN classification_target_state ts ON ts.id=1 "
       f"JOIN classification_targets t ON t.generation=ts.generation WHERE l.url='{url}' "
-      "ON CONFLICT(link_id) DO UPDATE SET status='completed',revision=0,input_revision=0,target_generation=excluded.target_generation,spec_id=excluded.spec_id,"
+      "ON CONFLICT(link_id) DO UPDATE SET status='completed',target_generation=excluded.target_generation,spec_id=excluded.spec_id,"
       "content_revision=excluded.content_revision,evidence_snapshot_id=excluded.evidence_snapshot_id,evidence_hash=excluded.evidence_hash;")

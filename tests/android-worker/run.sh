@@ -93,6 +93,8 @@ PY
 curl -fsS "http://127.0.0.1:$worker_port/api/enrichment/classifications/target" -H 'Authorization: Bearer internal' -H 'Content-Type: application/json' -d "$target_body" > "$work/material-target.json"
 python3 "$root/tests/android-worker/material_fixture.py" > "$work/material.sql"
 (cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --file "$work/material.sql" > "$work/material-seed.log" 2>&1)
+material_sql="SELECT l.content_revision,j.revision,j.input_revision,j.status,l.original_text,l.ai_title,l.summary,l.translated_text,(SELECT COUNT(*) FROM evidence_snapshots WHERE link_id=l.id) AS snapshots,(SELECT COUNT(*) FROM evidence_requests WHERE link_id=l.id AND protocol=2) AS requests,(SELECT COUNT(*) FROM classification_provider_attempts WHERE link_id=l.id) AS classification_calls,(SELECT COUNT(*) FROM enrichment_provider_attempts WHERE link_id=l.id) AS reading_calls FROM links l JOIN classification_jobs j ON j.link_id=l.id WHERE l.url='https://example.com/android-manual-material'"
+(cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --command "$material_sql" --json > "$work/material-initial.json")
 for phase in persistManualMaterialBeforeSendAndLoseActualCommitResponse recoverManualMaterialAfterProcessDeathWithoutAnotherVersionOrQueue; do
   "$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
   "$adb" -s "$serial" shell am instrument -w -r \
@@ -101,14 +103,17 @@ for phase in persistManualMaterialBeforeSendAndLoseActualCommitResponse recoverM
     com.alpenl.cairn.share.test/androidx.test.runner.AndroidJUnitRunner | tee "$work/$phase.log"
   grep -Eq '^OK \(1 test\)' "$work/$phase.log"
 done
-material_sql="SELECT l.content_revision,j.revision,j.input_revision,j.status,l.original_text,l.ai_title,l.summary,l.translated_text,(SELECT COUNT(*) FROM evidence_snapshots WHERE link_id=l.id) AS snapshots,(SELECT COUNT(*) FROM evidence_requests WHERE link_id=l.id AND protocol=2) AS requests,(SELECT COUNT(*) FROM classification_provider_attempts WHERE link_id=l.id) AS classification_calls,(SELECT COUNT(*) FROM enrichment_provider_attempts WHERE link_id=l.id) AS reading_calls FROM links l JOIN classification_jobs j ON j.link_id=l.id WHERE l.url='https://example.com/android-manual-material'"
 (cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --command "$material_sql" --json > "$work/material-final.json")
-python3 - "$work/material-final.json" <<'PY'
+python3 - "$work/material-initial.json" "$work/material-final.json" <<'PY'
 import json,sys
-rows=json.load(open(sys.argv[1]))[0]["results"]
-assert len(rows)==1, rows
-row=rows[0]
-assert row["snapshots"]==2 and row["requests"]==2 and row["revision"]==1 and row["input_revision"]==1 and row["status"]=="pending", row
+def one(path):
+    rows=json.load(open(path))[0]["results"]
+    assert len(rows)==1, rows
+    return rows[0]
+before,row=map(one,sys.argv[1:])
+for name in ("content_revision","revision","input_revision","snapshots"):
+    assert row[name]==before[name]+1, (name,before[name],row[name])
+assert row["requests"]==before["requests"]+2 and row["status"]=="pending", row
 assert row["classification_calls"]==0 and row["reading_calls"]==0, row
 assert (row["original_text"],row["ai_title"],row["summary"],row["translated_text"])==("Manual fixture original source","Keep title","Keep summary","Keep translation"), row
 print("Actual D1: one new snapshot/queue revision, duplicate content is a no-op; original reading kept and zero providers")
