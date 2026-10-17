@@ -12,8 +12,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
+import com.alpenl.cairn.share.network.ManualMaterialIntent
+import com.alpenl.cairn.share.network.decodeMaterialIntent
 
 private val Context.curationActionDataStore by preferencesDataStore("cairn_curation_actions")
+private val MATERIALS_KEY = stringPreferencesKey("manual_material_intents_json")
+private val DELETIONS_KEY = stringPreferencesKey("deleted_links_json")
 
 /**
  * Persists the offline curation action queue.
@@ -71,6 +75,8 @@ internal class CurationActionStore(context: Context) : CurationQueue {
             if (record.confirmed) {
                 val actions = CurationActionJson.decode(preferences[ACTIONS_KEY] ?: "[]")
                 preferences[ACTIONS_KEY] = CurationActionJson.encode(actions.filterNot { it.accountKey == accountKey && it.linkId == linkId })
+                preferences[MATERIALS_KEY] = encodeMaterialDrafts(decodeMaterialDrafts(preferences[MATERIALS_KEY] ?: "[]")
+                    .filterNot { it.accountKey == accountKey && it.linkId == linkId })
             }
         }
     }
@@ -153,14 +159,71 @@ internal class CurationActionStore(context: Context) : CurationQueue {
     }
 
     suspend fun clear() {
-        context.curationActionDataStore.edit { preferences -> preferences.remove(ACTIONS_KEY); preferences.remove(DELETIONS_KEY) }
+        context.curationActionDataStore.edit { preferences -> preferences.remove(ACTIONS_KEY); preferences.remove(DELETIONS_KEY); preferences.remove(MATERIALS_KEY) }
     }
 
     private companion object {
         val SYNC_MUTEX = Mutex()
         val ACTIONS_KEY = stringPreferencesKey("curation_actions_json")
-        val DELETIONS_KEY = stringPreferencesKey("deleted_links_json")
     }
+}
+
+/** One immutable, persisted request per account/bookmark. Null rejection means
+ * the result is unknown, including a crash between persistence and first send.
+ * An ordinary read never drains these potentially paid intents. */
+internal data class StoredManualMaterial(val accountKey: String, val linkId: Int, val intent: ManualMaterialIntent, val rejected: String? = null)
+
+internal class ManualMaterialStore(context: Context) {
+    private val context = context.applicationContext
+    suspend fun load(accountKey: String, linkId: Int): StoredManualMaterial? =
+        decodeMaterialDrafts(context.curationActionDataStore.data.first()[MATERIALS_KEY] ?: "[]")
+            .singleOrNull { it.accountKey == accountKey && it.linkId == linkId }
+
+    suspend fun prepare(value: StoredManualMaterial, expected: StoredManualMaterial?) {
+        require(value.accountKey.matches(Regex("v2:[a-f0-9]{64}")) && value.linkId > 0 && value.intent.valid() && value.rejected == null)
+        context.curationActionDataStore.edit { preferences ->
+            check(decodeDeletions(preferences[DELETIONS_KEY] ?: "[]").none { it.accountKey == value.accountKey && it.linkId == value.linkId })
+            val current = decodeMaterialDrafts(preferences[MATERIALS_KEY] ?: "[]")
+            val old = current.singleOrNull { it.accountKey == value.accountKey && it.linkId == value.linkId }
+            check(old == expected && (old == null || old.rejected != null || old.intent == value.intent))
+            val next = current.filterNot { it.accountKey == value.accountKey && it.linkId == value.linkId } + value
+            check(next.size <= 20) { "Manual material draft storage is full" }
+            preferences[MATERIALS_KEY] = encodeMaterialDrafts(next)
+        }
+    }
+    suspend fun reject(value: StoredManualMaterial, code: String) = update(value, value.copy(rejected = code))
+    suspend fun acknowledge(value: StoredManualMaterial) = update(value, null)
+    private suspend fun update(value: StoredManualMaterial, replacement: StoredManualMaterial?) {
+        context.curationActionDataStore.edit { preferences ->
+            val current = decodeMaterialDrafts(preferences[MATERIALS_KEY] ?: "[]")
+            if (current.singleOrNull { it.accountKey == value.accountKey && it.linkId == value.linkId } != value) return@edit
+            preferences[MATERIALS_KEY] = encodeMaterialDrafts(current.filterNot { it == value } + listOfNotNull(replacement))
+        }
+    }
+}
+
+internal fun encodeMaterialDrafts(values: List<StoredManualMaterial>): String = JSONArray().also { rows -> values.forEach {
+    rows.put(JSONObject().put("account", it.accountKey).put("id", it.linkId).put("intent", it.intent.encode())
+        .put("role", it.intent.option.role).put("rejected", it.rejected ?: JSONObject.NULL))
+} }.toString()
+
+internal fun decodeMaterialDrafts(value: String): List<StoredManualMaterial> {
+    try {
+        val rows = JSONArray(value)
+        require(rows.length() <= 20)
+        return List(rows.length()) { index ->
+            val row = rows.getJSONObject(index)
+            val account = row.opt("account") as? String ?: error("missing material account")
+            val id = row.opt("id") as? Number ?: error("missing material owner")
+            require(account.matches(Regex("v2:[a-f0-9]{64}")) && id.toLong() in 1..Int.MAX_VALUE.toLong() && id.toDouble() == id.toInt().toDouble())
+            require(row.has("rejected"))
+            val rejected: String? = if (row.isNull("rejected")) null else {
+                (row.opt("rejected") as? String)?.takeIf { it.isNotBlank() && it.length <= 200 }
+                    ?: error("invalid material disposition")
+            }
+            StoredManualMaterial(account, id.toInt(), decodeMaterialIntent(row.getJSONObject("intent"), row.getString("role")), rejected)
+        }.also { values -> require(values.distinctBy { it.accountKey to it.linkId }.size == values.size) }
+    } catch (error: Exception) { throw java.io.IOException("Invalid manual material draft journal", error) }
 }
 
 internal object CurationActionJson {
