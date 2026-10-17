@@ -103,7 +103,8 @@ internal class RunHistoryClient(private val baseUrl: String) {
         }
     }
 
-    private suspend fun <T> read(path: String, token: String, limit: Int,
+    internal suspend fun <T> read(path: String, token: String, limit: Int,
+        capability: String = "X-Cairn-App-Run-History",
         decode: (JSONObject) -> RunHistoryResult<T>): RunHistoryResult<T> = cancellableRead { cancellation ->
         val connection = URL("${baseUrl.trimEnd('/')}$path").openConnection() as HttpURLConnection
         try {
@@ -113,10 +114,10 @@ internal class RunHistoryClient(private val baseUrl: String) {
             connection.setRequestProperty("Authorization", "Bearer ${token.trim()}")
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("User-Agent", AppUserAgent.value())
-            connection.setRequestProperty("X-Cairn-App-Run-History", "1")
+            connection.setRequestProperty(capability, "1")
             cancellation.attach(connection)
             val status = connection.responseCode
-            val supported = connection.getHeaderField("X-Cairn-App-Run-History") == "1"
+            val supported = connection.getHeaderField(capability) == "1"
             when {
                 status == 401 || status == 403 -> RunHistoryResult.Failed(FailureKind.Unauthorized)
                 status == 405 || status == 501 -> RunHistoryResult.Unsupported

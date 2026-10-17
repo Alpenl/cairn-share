@@ -10,6 +10,7 @@ import { classificationAttemptsRoute } from "./classification-attempts";
 import { readSelectionSnapshot, readSelectionSnapshots } from "./selection-state";
 import type { RequestD1Stats } from "./observability";
 import { extensionBudgetRoute } from "./extension-budget";
+import { savedRecordsRoute, type SavedRecordKind } from "./saved-records";
 import { rerankCacheRoute } from "./rerank-cache";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
@@ -49,6 +50,8 @@ type QueryObserver = {
 };
 
 export async function domainRoute(request: Request, env: Env, path: string, observer?: QueryObserver): Promise<Response> {
+  const saved = path.match(/^\/api\/v2\/links\/(\d+)\/saved-records\/(sources|entities|overrides|events)$/);
+  if (saved) return savedRecordsRoute(request, env, Number(saved[1]), saved[2] as SavedRecordKind);
   const appHistory = path.match(/^\/api\/v2\/links\/(\d+)\/run-history(?:\/(\d+))?$/);
   if (appHistory) return appRunHistoryRoute(request, env, Number(appHistory[1]),
     appHistory[2] === undefined ? undefined : Number(appHistory[2]));
