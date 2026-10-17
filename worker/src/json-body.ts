@@ -6,7 +6,7 @@ export class JSONBodyError extends Error {
   }
 }
 
-export async function readBoundedJSON(request: Request, maxBytes = 1 << 20, requireContentType = true): Promise<unknown> {
+export async function readBoundedJSON(request: Request | Response, maxBytes = 1 << 20, requireContentType = true): Promise<unknown> {
   if (requireContentType && request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
     throw new JSONBodyError("invalid_content_type");
   }

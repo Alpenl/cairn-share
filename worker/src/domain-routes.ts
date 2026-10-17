@@ -13,6 +13,8 @@ import { extensionBudgetRoute } from "./extension-budget";
 import { savedRecordsRoute, type SavedRecordKind } from "./saved-records";
 import { manualMaterialRoute } from "./manual-material";
 import { processingRoute } from "./processing";
+import { normalizeAutomatic, validReplayPolicy } from "./decision-validation";
+import { policyPreviewRoute, applyPolicyPreviewRoute, persistPolicyPreview, type PreparedPolicyPreview } from "./policy-preview";
 import { rerankCacheRoute } from "./rerank-cache";
 import { createOwnedEvidenceRequest, evidenceExecutionRoute } from "./evidence-requests";
 import { validRunProvenance } from "./run-provenance";
@@ -23,7 +25,7 @@ import { taxonomyV2, classificationTaxonomy, type V2Selection } from "./taxonomy
 import { storedClassification, taxonomy, record, type Classification } from "./curation";
 import {
   canonicalJSON, contentHash, effectiveView, EMPTY_AUTOMATIC, normalizeField, objectivePayload,
-  semanticSpecHash, snapshotCompleteness, objectiveUseAllowed, validOverride, validQuestionSpec, validSnapshot, validAssessment,
+  semanticSpecHash, snapshotCompleteness, validOverride, validQuestionSpec, validSnapshot,
   type AutomaticView, type EvidenceSnapshot, type EffectiveView, type Override, type OverrideAction,
   type OverrideField, type QuestionSpec
 } from "./domain";
@@ -52,6 +54,12 @@ type QueryObserver = {
 };
 
 export async function domainRoute(request: Request, env: Env, path: string, observer?: QueryObserver): Promise<Response> {
+  const policyPreview = path.match(/^\/api\/v2\/links\/(\d+)\/app-policy-(previews|replays)$/);
+  if (policyPreview) {
+    const id = Number(policyPreview[1]);
+    const submit = (r: Request, preview?: PreparedPolicyPreview, approved?: string) => submitDecision(r, env, id, true, preview, approved);
+    return policyPreview[2] === "previews" ? policyPreviewRoute(request, env, id, submit) : applyPolicyPreviewRoute(request, env, id, submit);
+  }
   const processing = path.match(/^\/api\/v2\/links\/(\d+)\/processing$/);
   if (processing) return processingRoute(request, env, Number(processing[1]));
   const manualMaterial = path.match(/^\/api\/v2\/links\/(\d+)\/manual-material$/);
@@ -778,27 +786,8 @@ interface DecisionRun extends ArchivedPayloadRow {
   wire_evidence_hash: string | null;
 }
 
-function validReplayPolicy(value: Record<string, unknown>): boolean {
-  const allowed = ["version", "calibrated", "topic_accept", "topic_reject", "choice_accept", "choice_margin", "max_display_topics",
-    "max_effective_topics", "allow_alias_drift", "block_personal_use", "min_primary_tags", "max_primary_tags", "function_support_accept", "prefer_specific_topics"];
-  if (Object.keys(value).some(k => !allowed.includes(k)) || typeof value.calibrated !== "boolean" || typeof value.allow_alias_drift !== "boolean" ||
-    value.block_personal_use !== true || !["topic_accept", "topic_reject", "choice_accept", "choice_margin"].every(k =>
-      typeof value[k] === "number" && Number(value[k]) >= 0 && Number(value[k]) <= 1) ||
-    Number(value.topic_reject) > Number(value.topic_accept) ||
-    !["max_display_topics", "max_effective_topics"].every(k => Number.isSafeInteger(value[k]) && Number(value[k]) >= 1 && Number(value[k]) <= 64) ||
-    Number(value.max_display_topics) > Number(value.max_effective_topics)) return false;
-  const density = ["min_primary_tags", "max_primary_tags", "function_support_accept"].some(k => value[k] !== undefined && value[k] !== 0);
-  if (value.prefer_specific_topics !== undefined && typeof value.prefer_specific_topics !== "boolean" ||
-    ["jev-policy-v2", "jev-policy-v3", "jev-policy-v4"].includes(String(value.version)) && value.prefer_specific_topics === true ||
-    value.version === "jev-policy-v5" && value.prefer_specific_topics !== true) return false;
-  if (["jev-policy-v2", "jev-policy-v3"].includes(String(value.version)) && density) return false;
-  return !(["jev-policy-v4", "jev-policy-v5"].includes(String(value.version)) || density) ||
-    Number.isSafeInteger(value.min_primary_tags) && Number.isSafeInteger(value.max_primary_tags) && Number(value.min_primary_tags) >= 1 &&
-    Number(value.max_primary_tags) >= 2 && Number(value.min_primary_tags) <= Number(value.max_primary_tags) && Number(value.max_primary_tags) <= 64 &&
-    typeof value.function_support_accept === "number" && value.function_support_accept > Number(value.topic_reject) && value.function_support_accept <= Number(value.topic_accept);
-}
 
-async function submitDecision(request: Request, env: Env, id: number, policyReplay = false): Promise<Response> {
+async function submitDecision(request: Request, env: Env, id: number, policyReplay = false, preview?: PreparedPolicyPreview, approvedReviewHash?: string): Promise<Response> {
   const body = await bodyOf(request);
   if (!body) return fail("invalid_json");
   if (!Array.isArray(body.run_ids) || body.run_ids.length === 0 || body.run_ids.length > 64 ||
@@ -854,7 +843,7 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
       policy_version: row.policy_version, decision_id: row.id, effective: view.view, replayed: true,
       ...(policyReplay ? { policy_hash: row.policy_hash, target_generation: row.replay_target_generation } : {}) });
   };
-  const existing = await existingResponse();
+  const existing = preview ? null : await existingResponse();
   if (existing) return existing;
   const link = await env.DB.prepare(`SELECT content_revision, personal_revision FROM links WHERE id = ?`).bind(id)
     .first<{ content_revision: number; personal_revision: number }>();
@@ -923,7 +912,8 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
       snapshot.link.personal_revision !== link.personal_revision) return fail("run_stale", 409);
   const futureAutomatic = { ...automatic, entities: snapshot.automatic.entities };
   // E4: the AI tagging preferences decide which of this decision's terms wait for confirmation.
-  const aiHolds = computeHolds(futureAutomatic, (await readPreferences(env)).value);
+  const preferences = await readPreferences(env);
+  const aiHolds = computeHolds(futureAutomatic, preferences.value);
   const futureView = effectiveView(withoutHolds(futureAutomatic, aiHolds), snapshot.projectionInput.overrides, snapshot.deletedTags);
   const heldStatement = holdInsertStatement(env, operationKey, id, aiHolds, new Date().toISOString());
   const inputGuard = projectionInputGuard(id, snapshot);
@@ -953,6 +943,14 @@ async function submitDecision(request: Request, env: Env, id: number, policyRepl
     bindings: [id, link.content_revision, link.personal_revision, JSON.stringify(pinned), id, link.content_revision,
       runIDs.length, ...inputGuard.bindings]
   };
+  if (preview || approvedReviewHash !== undefined) {
+    const reviewHash = await sha256Hex(canonicalJSON({ projection: snapshot.projectionInput, preferences,
+      before: snapshot.view, after: futureView }));
+    if (approvedReviewHash !== undefined && approvedReviewHash !== reviewHash) return fail("preview_changed", 409);
+    guard.sql += " AND COALESCE((SELECT revision FROM preferences WHERE id=1),0)=?";
+    guard.bindings.push(preferences.revision);
+    if (preview) return persistPolicyPreview(env, id, preview, snapshot.view, futureView, reviewHash, guard);
+  }
   const statements = [decisionInsertStatement(env, {
     linkId: id, runOperationKey: primary.operation_key, contentRevision: link.content_revision,
     policyVersion: body.policy_version, policy: body.policy ?? {}, automatic, runIDs, personalRevision: link.personal_revision,
@@ -1005,28 +1003,6 @@ async function validReplayAutomatic(env: Env, automatic: AutomaticView, version:
   });
 }
 
-function normalizeAutomatic(value: Record<string, unknown>): AutomaticView | null {
-  if (!objectiveUseAllowed(value)) return null;
-  if (value.assessment !== undefined && !validAssessment(value.assessment)) return null;
-  const list = (entry: unknown): string[] | null =>
-    Array.isArray(entry) && entry.every((item) => typeof item === "string") ? entry as string[] : null;
-  const topics = list(value.topics ?? []);
-  const contentFunctions = list(value.content_functions ?? []);
-  const carriers = list(value.carriers ?? []);
-  const affordances = list(value.affordances ?? []);
-  const resources = value.resource_kinds === undefined ? undefined : list(value.resource_kinds);
-  const entities = list(value.entities ?? []);
-  if (!topics || !contentFunctions || !carriers || !affordances || !entities) return null;
-  if (resources === null || (resources && resources.length > 6)) return null;
-  if (topics.length > 64 || contentFunctions.length > 8 || carriers.length > 1 || affordances.length > 8) return null;
-  return {
-    ...(value.assessment === undefined ? {} : { assessment: value.assessment }),
-    topics, content_functions: contentFunctions, carriers, affordances, entities,
-    ...(resources ? { resource_kinds: resources } : {}),
-    form: typeof value.form === "string" ? value.form : "",
-    use: typeof value.use === "string" ? value.use : ""
-  };
-}
 
 // --- Overrides --------------------------------------------------------------
 
