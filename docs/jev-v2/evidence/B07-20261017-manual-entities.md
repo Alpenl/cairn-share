@@ -4,8 +4,9 @@
 0822dde5120752426d58cfa712529ef3605c7f68；
 Go候选源码f8e84e30b2dcba3b5705b97b595b6877c7900697
 （0797619后430ddf7补齐501透传，f8e84e3再统一Web输入上限）。
-本报告为2026-10-17 08:02（Asia/Shanghai）的进度快照，最终远端门禁尚未签收。
-Share166df83仅增加旧返回用例诊断，38883d6再补UI就绪同步，均未改App/Worker运行代码。
+截至2026-10-17 09:14（Asia/Shanghai），本增量完整远端门禁已通过，整个B07仍未签收。
+Share最终测试源码d9ce1ac75e0f956f16a725da53acd08e2d5fa0a1；
+166/388/a907/da3/d9均只改测试和证据，没有改变0822的App/Worker运行源码或依赖。
 [Share Draft #89](https://github.com/Alpenl/cairn-share/pull/89)叠加于Draft #88；
 [Go Draft #54](https://github.com/Alpenl/cairn-x-enricher/pull/54)叠加于Draft #53。
 两者保持Draft，不签收整个B07。Go stack-contract固定上述Share运行源码与迁移0068；无新迁移。
@@ -44,9 +45,10 @@ Share166df83仅增加旧返回用例诊断，38883d6再补UI就绪同步，均�
 | Go实际跨服务 | entityhuman场景通过：真实Go代理/client、正常鉴权HTTP、真实Worker/D1，无分类器 |
 | Share代码CI | [38981759656](https://github.com/Alpenl/cairn-share/actions/runs/38981759656)，准确0822源码四项均成功 |
 | 远端初轮设备 | [38981917323](https://github.com/Alpenl/cairn-share/actions/runs/38981917323)，首次0822：API26的76普通+20实际阶段通过；API35的74普通通过/2既有系统返回超时/20 skip，实际Worker未执行；新增4项两平台均通过，正在补只读诊断 |
-| Go完整候选CI | [38983994236](https://github.com/Alpenl/cairn-x-enricher/actions/runs/38983994236)，准确f8源码仍执行，runner共45个独立真实D1场景；430的38982210317因新Web修复被自动并发规则取消，不算通过 |
+| Go完整CI | [38983994236](https://github.com/Alpenl/cairn-x-enricher/actions/runs/38983994236)，准确f8三项全部成功：45个独立真实D1场景、179浏览器检查、55真实栈端到端检查，以及amd64/arm64构建；push:false，无发布。430的被取消任务不算通过 |
 | Share诊断代码CI | [38983073075](https://github.com/Alpenl/cairn-share/actions/runs/38983073075)，166源码四项成功 |
-| Share候选门禁 | 388源码[代码38984250799](https://github.com/Alpenl/cairn-share/actions/runs/38984250799)与[设备38984247324](https://github.com/Alpenl/cairn-share/actions/runs/38984247324)仍执行 |
+| Share388历史候选 | [代码38984250799](https://github.com/Alpenl/cairn-share/actions/runs/38984250799)成功；[设备38984247324](https://github.com/Alpenl/cairn-share/actions/runs/38984247324)API35旧主题测试等待15秒仍缺选项，完整矩阵失败，原日志保留 |
+| Share最终门禁 | 准确d9的[四项代码CI38989268596](https://github.com/Alpenl/cairn-share/actions/runs/38989268596)与[设备38989265355](https://github.com/Alpenl/cairn-share/actions/runs/38989265355)全部成功；API26/API35各96条XML=76普通通过+20专用skip，随后各20独立进程真实Worker/D1阶段全部实际执行通过 |
 
 新增七个JVM用例覆盖独立基线、坏/缺元数据、未确认导出、清空/单名恢复、未运行/
 失败/过期/已完成空保持、不支持队列、UTF-16边界。
@@ -71,7 +73,7 @@ AI未运行仍未运行、明确留空的人工作用、单名/全部恢复及�
 没有增加抽象。原有浏览器用例改为真实键盘逐字输入120单元并核对实际HTTP动作和完整显示：
 修复前178/179，仅此边界失败；修复后179/179通过，完整make verify同样通过。
 既有chip的max-width及文字省略保留；没有更改其他输入或分类规则。
-这份UI代码已随f8e84e3推送，完整远端CI仍在执行。
+这份UI代码已随f8e84e3推送，完整远端CI现已成功，原始日志已核对。
 
 ## 初次失败与环境记录
 
@@ -115,7 +117,31 @@ API35的两条既有系统返回及4项新增实体用例通过，但旧TopicNav
 388加入显式compose.waitForIdle作为真实按键的前置条件，避免同步依赖日志读取；
 主题测试每次依赖前一筛选动作的新选项先用原有waitTag(15秒)确认就绪。
 所有原业务断言、事件和原期限保留，没有改产品逻辑。该版本地首轮两条返回+主题共3通过，
-主题再4次通过，合计7通过；等待远端全量复验。缺节点的精确时序根因仍不作超出证据的确认。
+主题再4次通过，合计7通过；随后远端仍失败，不能将本地重复通过当成根因已修复。
+
+### 原生输入同步、实际失败和消融边界
+
+388的主题缺节点问题在本地API35实际复现：输入/清空后物理点击期间整个筛选Dialog消失，
+而非仅设计选项尚未加载。Activity背后的IME insets不能代表当前Dialog；诊断明确标为
+activity_ime_visible。a907通过真实Search动作结束清空输入会话，但其远端
+[38987303074](https://github.com/Alpenl/cairn-share/actions/runs/38987303074)又出现两旧返回失败。
+失败前Activity焦点为false，原注入返回true不能证明按键已送到目标窗口。
+
+da3增加原生焦点前置条件及只输出组件名/窗口标志的系统诊断，未记录窗口标题或内容。
+[38988367421](https://github.com/Alpenl/cairn-share/actions/runs/38988367421)中两个旧返回通过；
+系统当前窗口是Cairn，设备亮屏且未锁屏，不能推断为其他应用或锁屏抢焦点。
+同轮主题测试更早的输入后固定按钮未生效，原5秒持久化断言失败，矩阵仍失败。
+
+最终d9在输入和清空两处结束真实Search输入会话，保留搜索内容断言，API29以上使用
+[WindowInspector](https://developer.android.com/reference/android/view/inspector/WindowInspector)
+获取实际有焦点窗口，等待其IME隐藏后才进行物理点击。旧筛选、固定持久化、账号隔离、
+返回和草稿保护断言及原5/15/20秒期限均保留；没有用直接调用业务回调替换真实按键/点击。
+本地三条相关旧用例及严格144单测/lint/APK门禁通过，最终完整远端两平台结果见上表。
+
+曾比较Espresso关闭键盘、仅Search与无新增输入结束动作。去掉动作的对照3/3通过，
+仅Search样本3/3也通过，因此样本不能证明某个动作是唯一原因。未保留Espresso显式依赖、
+新增校验元数据或任何依赖升级；最终只保留原有Compose/平台API和错误诊断。
+这些证据证明当前完整矩阵通过，不宣称所有历史偶发失败具有唯一相同根因。
 
 ## 未完成范围与权限
 
