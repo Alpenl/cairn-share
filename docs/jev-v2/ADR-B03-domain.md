@@ -127,3 +127,42 @@ against Worker/D1, in addition to 33 shared Go/Worker action vectors.
 The current v2 filter helper is not wired into the list routes. Legacy filters
 still use the bounded v1 projection; fourth-topic and hidden-dimension filtering
 remain original-scope work, separate from this repair.
+
+## 2026-10-16: bounded expiry for superseded entity operations (B03-T13 subset)
+
+Migration 0069 adds an age/key index and `entity_operation_tombstones`; it does
+not rewrite existing results, source input, current state or human decisions.
+The scheduled live-history pass checks at most 100 age-ordered entity operations
+per invocation, using the existing 90-day default and validated 30–365-day
+configuration. Its persistent `(created_at, operation_key)` cursor seeks through
+the covering index, advances across protected pages and wraps at the end.
+
+Only applied `stored`/`ignored_stale` receipts with a valid SHA-256 request hash
+are eligible. Every operation still named by `entity_states.operation_key` is
+protected, including failed, empty, stale and not-run states. Unknown historical
+identities and unapplied operations stay intact. Eligibility is checked again
+inside one D1 batch that inserts compact receipts, removes old payloads and
+advances the cursor. A failure rolls back all three. Existing snapshot guards
+still protect current content, runs, entity state, requests, cache and jobs;
+removing an unused entity operation merely allows an otherwise unreferenced
+old snapshot to expire.
+
+A compact receipt retains the operation key, bookmark ID, request hash, accepted
+content revision, outcome and creation/expiry timestamps. It contains no entity
+payload or snapshot reference. A matching expired entity-state submission returns
+HTTP 410 `entity_operation_expired`; a different payload or bookmark returns 409
+`operation_conflict`. Neither response repairs projections or reapplies history.
+Live receipts keep the existing 200 replay contract. The insert rechecks the
+expiry fence inside its transaction, and a database trigger also rejects direct
+insertion of an expired key. An old writer that does not understand expiry must
+fail closed; a 410 is not permission to generate a fresh key or rerun inference.
+Bookmark deletion cascades the compact receipts as well as full entity history.
+
+Apply the additive migration before serving the new Worker. Preserve it on
+application rollback: deleting tombstones or using a destructive down migration
+would remove the idempotency fence. Earlier Worker writers remain fenced at the
+database level but do not offer the new 410 response contract. This subset does
+not compact human decision/override history or other operation receipts. Compact
+receipt count remains proportional to retained operations until the bookmark
+is deleted; this is no claim of a hard total-history size bound. Local D1 tests
+and cross-repo fixtures do not establish remote D1 billing or production scale.

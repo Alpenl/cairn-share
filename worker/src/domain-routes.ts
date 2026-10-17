@@ -224,15 +224,20 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
   const observations=body.observations??[];
   if(!Array.isArray(observations)||observations.length>40)return fail("invalid_entity_observations");
   const requestHash = await sha256Hex(canonicalJSON({ link_id: id, ...body }));
-  type Receipt = { link_id: number; request_hash: string; content_revision: number; outcome: string };
-  const receipt = () => env.DB.prepare(`SELECT link_id,request_hash,content_revision,outcome FROM entity_operations WHERE operation_key=?`)
-    .bind(operationKey).first<Receipt>();
-  const acknowledge = (stored: Receipt, replayed: boolean) => stored.link_id !== id || stored.request_hash !== requestHash
-    ? fail("operation_conflict", 409)
-    : reply({ id, status: stored.outcome, revision: stored.content_revision, replayed });
+  type Receipt = { link_id: number; request_hash: string; content_revision: number; outcome: string; expired: number };
+  const receipt = () => env.DB.prepare(`SELECT link_id,request_hash,content_revision,outcome,0 AS expired
+      FROM entity_operations WHERE operation_key=?
+      UNION ALL SELECT link_id,request_hash,content_revision,outcome,1 AS expired
+      FROM entity_operation_tombstones WHERE operation_key=?`)
+    .bind(operationKey, operationKey).first<Receipt>();
+  const acknowledge = (stored: Receipt, replayed: boolean) => {
+    if (stored.link_id !== id || stored.request_hash !== requestHash) return fail("operation_conflict", 409);
+    if (stored.expired === 1) return fail("entity_operation_expired", 410);
+    return reply({ id, status: stored.outcome, revision: stored.content_revision, replayed });
+  };
   const existing = await receipt();
   if (existing) {
-    if (existing.link_id === id && existing.request_hash === requestHash) await rebuildProjection(env, id);
+    if (existing.expired === 0 && existing.link_id === id && existing.request_hash === requestHash) await rebuildProjection(env, id);
     return acknowledge(existing, true);
   }
   const link = await env.DB.prepare(`SELECT id FROM links WHERE id=?`).bind(id).first();
@@ -264,9 +269,10 @@ async function submitEntityState(request: Request, env: Env, id: number): Promis
         ) THEN 'ignored_stale' ELSE 'stored' END,?
       FROM links l JOIN evidence_snapshots s ON s.link_id=l.id AND s.content_revision=l.content_revision
       WHERE l.id=? AND s.id=? AND s.content_revision=? AND s.content_hash=? AND ${inputGuard.sql}
+        AND NOT EXISTS (SELECT 1 FROM entity_operation_tombstones WHERE operation_key=?)
       ON CONFLICT(operation_key) DO NOTHING`)
       .bind(operationKey, requestHash, canonicalJSON(body), state,body.observations===undefined?1:0, now,
-        id, body.evidence_snapshot_id, body.content_revision, body.content_hash, ...inputGuard.bindings),
+        id, body.evidence_snapshot_id, body.content_revision, body.content_hash, ...inputGuard.bindings, operationKey),
     env.DB.prepare(`INSERT INTO entity_states(link_id,state,content_revision,content_hash,evidence_snapshot_id,entities,observations,updated_at,operation_key,revision)
       SELECT link_id,?,content_revision,content_hash,evidence_snapshot_id,?,?,?,operation_key,1 FROM entity_operations
       WHERE operation_key=? AND request_hash=? AND applied=0 AND outcome='stored'
