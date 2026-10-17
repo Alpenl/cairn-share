@@ -983,6 +983,8 @@ private fun DetailScreen(
                             )
                             RunHistorySection(linkId = id, baseUrl = state.apiBaseUrl, token = state.preferences.apiToken,
                                 accountGeneration = state.accountGeneration)
+                            ManualMaterialSection(linkId = id, baseUrl = state.apiBaseUrl, token = state.preferences.apiToken,
+                                accountGeneration = state.accountGeneration, onSaved = { onLoadV2(id, true); onEnsureLink(id) })
                             PersonalTagsSection(linkId = id, baseUrl = state.apiBaseUrl, apiToken = state.preferences.apiToken,
                                 onChanged = { onLoadV2(id, true); onEnsureLink(id) }, onFlush = onFlushPersonal, editorDraft = personalEditor)
                             if (enrichment != null) BookmarkCuration(id, enrichment, state.v2Taxonomy ?: state.taxonomy,

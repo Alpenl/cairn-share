@@ -23,6 +23,7 @@ import { bookmarkSource, record, storedClassification, taxonomy, validCurationSt
 import { ackSourceRefresh, classificationRoute, manualEnqueueRoute, manualSourceRoute, refreshSource, sourceRoute } from "./classification";
 import { appRunHistoryRoute, computeEffective, domainRoute, persistSelectionOverrides } from "./domain-routes";
 import { savedRecordsRoute, type SavedRecordKind } from "./saved-records";
+import { manualMaterialRoute } from "./manual-material";
 import { entityEvidenceRoute } from "./entity-evidence";
 import { applyV1Write, topicGranularityAware } from "./taxonomy-v2";
 import { canonicalJSON } from "./domain";
@@ -628,6 +629,12 @@ async function handleRequest(request: Request, env: Env, timing: TimingCollector
     const denied = requireApiToken(request, env);
     if (denied !== null) return denied;
     return appRunHistoryRoute(request, env, Number(appHistory[1]), appHistory[2] === undefined ? undefined : Number(appHistory[2]));
+  }
+  const manualMaterial = path.match(/^\/api\/bookmarks\/(\d+)\/manual-material$/);
+  if (manualMaterial) {
+    const denied = requireApiToken(request, env);
+    if (denied !== null) return denied;
+    return manualMaterialRoute(request, env, Number(manualMaterial[1]));
   }
   const saved = path.match(/^\/api\/bookmarks\/(\d+)\/saved-records\/(sources|entities|overrides|events)$/);
   if (saved) {

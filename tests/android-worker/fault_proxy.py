@@ -10,7 +10,7 @@ import urllib.parse
 import uuid
 
 upstream = urllib.parse.urlsplit(sys.argv[1])
-state = {"mode": "online", "key": "", "requests": [], "selection_reads": [], "deletes": [], "web_writes": 0}
+state = {"mode": "online", "key": "", "requests": [], "materials": [], "selection_reads": [], "deletes": [], "web_writes": 0}
 lock = threading.Lock()
 
 
@@ -73,13 +73,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                    if name.lower() in ("authorization", "content-type", "accept", "user-agent", "if-match", "if-none-match")
                    or name.lower().startswith("x-cairn-")}
         mutation = not direct and self.command == "POST" and (path.endswith(("/v2-override", "/tags")) or path.startswith("/api/collections/") and path.endswith("/operations"))
+        material = not direct and self.command == "POST" and path.endswith("/manual-material")
         deletion = not direct and self.command == "DELETE" and path.startswith("/api/links/")
-        action = json.loads(body) if mutation else {}
+        action = json.loads(body) if mutation or material else {}
         with lock:
             mode, key = state["mode"], state["key"]
             if deletion:
                 state["deletes"].append(path)
                 if mode == "lose_delete": state["mode"] = "offline"
+            if material:
+                state["materials"].append(action)
+                if mode == "lose_first": state["mode"] = "offline"
             if mutation:
                 state["requests"].append(action)
                 if mode in ("lose_first", "fail_key") and (mode == "lose_first" or key == action["operation_key"]):
@@ -87,7 +91,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if mode == "conflict" and key == action["operation_key"]:
                     state["mode"] = "online"
                     state["web_writes"] += 1
-        if not direct and (mode == "offline" or (mode == "writes_offline" and mutation)):
+        if not direct and (mode == "offline" or (mode == "writes_offline" and (mutation or material))):
             return self.drop()
         if mutation and mode == "fail_key" and key == action["operation_key"]:
             return self.drop()
@@ -110,7 +114,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if deletion and mode == "lose_delete":
             assert status == 204, (status, result)
             return self.drop()
-        if mutation and mode == "lose_first":
+        if (mutation or material) and mode == "lose_first":
             assert status == 200, (status, result)
             return self.drop()
         self.respond(status, result, response_headers)

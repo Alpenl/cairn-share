@@ -82,5 +82,36 @@ for phase in persistOfflineCollectionAndLoseCommittedCreateResponse recoverAfter
     com.alpenl.cairn.share.test/androidx.test.runner.AndroidJUnitRunner | tee "$work/$phase.log"
   grep -Eq '^OK \(1 test\)' "$work/$phase.log"
 done
+# Run the original twenty stages under their existing legacy target first.
+# Only these final material stages opt into a registered v2 target.
+spec_hash="$(curl -fsS "http://127.0.0.1:$worker_port/api/v2/question-specs" -H 'Authorization: Bearer internal' -H 'Content-Type: application/json' -d '{"spec_id":"android-material","spec_version":1,"questions":{}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["spec_hash"])')"
+target_body="$(python3 - "$spec_hash" <<'PY'
+import json,sys
+print(json.dumps(dict(spec_id="android-material",spec_hash=sys.argv[1],taxonomy_version="2026-09-20.1",policy_version="android-material",requested_model="fixture",protocol="v2")))
+PY
+)"
+curl -fsS "http://127.0.0.1:$worker_port/api/enrichment/classifications/target" -H 'Authorization: Bearer internal' -H 'Content-Type: application/json' -d "$target_body" > "$work/material-target.json"
+python3 "$root/tests/android-worker/material_fixture.py" > "$work/material.sql"
+(cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --file "$work/material.sql" > "$work/material-seed.log" 2>&1)
+for phase in persistManualMaterialBeforeSendAndLoseActualCommitResponse recoverManualMaterialAfterProcessDeathWithoutAnotherVersionOrQueue; do
+  "$adb" -s "$serial" shell am force-stop com.alpenl.cairn.share
+  "$adb" -s "$serial" shell am instrument -w -r \
+    -e class "com.alpenl.cairn.share.ManualMaterialWorkerIntegrationTest#$phase" \
+    -e cairnWorkerUrl http://127.0.0.1:18978 \
+    com.alpenl.cairn.share.test/androidx.test.runner.AndroidJUnitRunner | tee "$work/$phase.log"
+  grep -Eq '^OK \(1 test\)' "$work/$phase.log"
+done
+material_sql="SELECT l.content_revision,j.revision,j.input_revision,j.status,l.original_text,l.ai_title,l.summary,l.translated_text,(SELECT COUNT(*) FROM evidence_snapshots WHERE link_id=l.id) AS snapshots,(SELECT COUNT(*) FROM evidence_requests WHERE link_id=l.id AND protocol=2) AS requests,(SELECT COUNT(*) FROM classification_provider_attempts WHERE link_id=l.id) AS classification_calls,(SELECT COUNT(*) FROM enrichment_provider_attempts WHERE link_id=l.id) AS reading_calls FROM links l JOIN classification_jobs j ON j.link_id=l.id WHERE l.url='https://example.com/android-manual-material'"
+(cd "$root/worker" && npx wrangler d1 execute android-recovery --local --config "$work/wrangler.jsonc" --command "$material_sql" --json > "$work/material-final.json")
+python3 - "$work/material-final.json" <<'PY'
+import json,sys
+rows=json.load(open(sys.argv[1]))[0]["results"]
+assert len(rows)==1, rows
+row=rows[0]
+assert row["snapshots"]==2 and row["requests"]==2 and row["revision"]==1 and row["input_revision"]==1 and row["status"]=="pending", row
+assert row["classification_calls"]==0 and row["reading_calls"]==0, row
+assert (row["original_text"],row["ai_title"],row["summary"],row["translated_text"])==("Manual fixture original source","Keep title","Keep summary","Keep translation"), row
+print("Actual D1: one new snapshot/queue revision, duplicate content is a no-op; original reading kept and zero providers")
+PY
 curl -fsS "http://127.0.0.1:$proxy_port/__test/control" > "$work/transport-history.json"
-echo "PASS: twenty phases ran in separate Android processes against actual authenticated Worker/D1"
+echo "PASS: twenty-two phases ran in separate Android processes against actual authenticated Worker/D1"

@@ -728,6 +728,85 @@ class V2CurationInstrumentedTest {
         }
     }
 
+    @Test fun manualMaterialKeepsUnknownIntentAcrossActivityRecreationAndConfirmsSameReceipt() {
+        val bodies = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val reads = java.util.concurrent.atomic.AtomicInteger(0)
+        val committed = AtomicReference<String?>(null)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                return when (request.requestUrl!!.encodedPath) {
+                    "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                    "/api/links/4", "/api/bookmarks/4" -> response(link(4))
+                    "/api/bookmarks/4/v2-selection" -> response(selection(3))
+                    "/api/v2-taxonomy" -> response(taxonomy())
+                    "/api/bookmarks/4/manual-material" -> {
+                        assertEquals("1", request.getHeader("X-Cairn-App-Manual-Material"))
+                        assertEquals("Bearer $token", request.getHeader("Authorization"))
+                        if (request.method == "GET") {
+                            reads.incrementAndGet()
+                            response(JSONObject().put("version", 1).put("id", 4).put("source", JSONObject().put("content_revision", 3)
+                                .put("evidence_snapshot_id", 8).put("source_hash", "a".repeat(64)).put("target_generation", 2))
+                                .put("can_submit", true).put("blocked_reason", JSONObject.NULL).put("max_text_bytes", 100000)
+                                .put("options", JSONArray().put(JSONObject().put("kind", "image_text").put("source_ref", "image").put("role", "legacy_unknown"))))
+                                .setHeader("X-Cairn-App-Manual-Material", "1")
+                        } else {
+                            val body = request.body.readUtf8(); bodies.add(body)
+                            val journal = runBlocking { ManualMaterialStore(context).load(accountKeyFor(server.url("/").toString(), token), 4) }
+                            assertNotNull("Intent must be durable before the first network byte", journal)
+                            assertEquals(journal!!.intent.encode().toString(), body)
+                            assertEquals("Human image transcription 🙂", JSONObject(body).getString("text"))
+                            if (committed.compareAndSet(null, body)) MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST)
+                            else {
+                                assertEquals(committed.get(), body)
+                                response(JSONObject().put("version", 1).put("id", 4).put("operation_key", JSONObject(body).getString("operation_key"))
+                                    .put("request_id", "same-receipt").put("status", "material_saved").put("content_revision", 4).put("evidence_snapshot_id", 9)
+                                    .put("source_hash", "b".repeat(64)).put("changed", true).put("classification_queued", true).put("model_calls", 0).put("replayed", true))
+                                    .setHeader("X-Cairn-App-Manual-Material", "1")
+                            }
+                        }
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use { activity ->
+            openDetailAndLoadTaxonomy()
+            assertEquals(0, reads.get()); assertTrue(bodies.isEmpty())
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("manual_material_toggle"))
+            compose.onNodeWithTag("manual_material_toggle").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("manual_material_text").assertIsEnabled(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("manual_material_text").performScrollTo().performTextInput("Human image transcription 🙂")
+            activity.onActivity { host ->
+                host.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+                    .hideSoftInputFromWindow(host.window.decorView.windowToken, 0)
+            }
+            compose.waitUntil(5000) {
+                var hidden = false
+                activity.onActivity { host -> hidden = androidx.core.view.ViewCompat.getRootWindowInsets(host.window.decorView)
+                    ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == false }
+                hidden
+            }
+            compose.onNodeWithTag("manual_material_submit").performScrollTo().performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("manual_material_message").assertTextContains("结果尚未确认", substring=true); true }.getOrDefault(false) }
+            assertEquals(1, bodies.size)
+            activity.recreate()
+            compose.waitUntil(20000) { runCatching { compose.onNodeWithTag("reader_curation_toggle").assertExists(); true }.getOrDefault(false) ||
+                runCatching { compose.onNodeWithTag("link_4").assertExists(); true }.getOrDefault(false) }
+            if (runCatching { compose.onNodeWithTag("link_4").assertExists(); true }.getOrDefault(false)) compose.onNodeWithTag("link_4").performClick()
+            compose.waitUntil(20000) { runCatching { compose.onNodeWithTag("reader_curation_toggle").assertExists(); true }.getOrDefault(false) }
+            if (!runCatching { compose.onNodeWithTag("manual_material_toggle").assertExists(); true }.getOrDefault(false)) compose.onNodeWithTag("reader_curation_toggle").performClick()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("manual_material_toggle"))
+            compose.onNodeWithTag("manual_material_toggle").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("manual_material_draft_status").assertTextContains("上次保存结果未确认", substring=true); true }.getOrDefault(false) }
+            compose.onNodeWithTag("manual_material_text").assertIsNotEnabled().assertTextContains("Human image transcription 🙂", substring=true)
+            assertEquals(1, bodies.size)
+            compose.onNodeWithTag("manual_material_submit").performScrollTo().performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("manual_material_message").assertTextEquals("材料已保存，分类已排队。"); true }.getOrDefault(false) }
+            assertEquals(2, bodies.size); assertEquals(bodies[0], bodies[1])
+            assertNull(runBlocking { ManualMaterialStore(context).load(accountKeyFor(server.url("/").toString(), token), 4) })
+        }
+    }
+
     @Test fun classificationHistoryLoadsOnlyOnRequestAndKeepsPartialUnknownAndPagedRecords() {
         val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
         fun row(id: Int) = JSONObject().put("id", id).put("status", "partial")
