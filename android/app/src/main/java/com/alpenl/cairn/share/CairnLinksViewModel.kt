@@ -42,6 +42,13 @@ import com.alpenl.cairn.share.network.QueryPageKey
 import com.alpenl.cairn.share.network.QueuePageResult
 import com.alpenl.cairn.share.network.cancellableRead
 import com.alpenl.cairn.share.network.V2CurationClient
+import com.alpenl.cairn.share.network.ProcessingClient
+import com.alpenl.cairn.share.network.ProcessingIntent
+import com.alpenl.cairn.share.network.ProcessingRepository
+import com.alpenl.cairn.share.network.ProcessingStatus
+import com.alpenl.cairn.share.network.ProcessingWriteResult
+import com.alpenl.cairn.share.network.StoredProcessingIntent
+import com.alpenl.cairn.share.network.RunHistoryResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.Mutex
@@ -61,6 +68,9 @@ import java.time.ZoneId
 import java.time.temporal.TemporalAdjusters
 
 internal data class CurationDisplayContext(val accountKey: String, val accountGeneration: Long)
+internal data class ProcessingPanelState(val result: RunHistoryResult<ProcessingStatus>? = null,
+    val pending: StoredProcessingIntent? = null, val storageReady: Boolean = false, val loading: Boolean = false,
+    val saving: Boolean = false, val message: String = "")
 
 internal data class CairnLinksUiState(
     val apiBaseUrl: String,
@@ -116,6 +126,7 @@ internal data class CairnLinksUiState(
     // always wins over a server refresh), the last conflict revision and the
     // offline queue size. A draft is never silently discarded.
     val v2Selections: Map<Int, MultidimensionalSelection> = emptyMap(),
+    val processingPanels: Map<Int, ProcessingPanelState> = emptyMap(),
     val entityEvidence: EntityEvidenceReadState? = null,
     val v2Drafts: Map<Int, MultidimensionalSelection> = emptyMap(),
     val v2Conflicts: Map<Int, Long> = emptyMap(),
@@ -197,6 +208,7 @@ internal class CairnLinksViewModel(
     releasesApiUrl: String,
     currentVersionName: String,
     currentVersionCode: Int,
+    private val processingRepository: ProcessingRepository = ProcessingRepository(ProcessingClient(apiBaseUrl), ProcessingStore(curationActionStore.context)),
 ) : ViewModel() {
     var uiState by mutableStateOf(
         CairnLinksUiState(
@@ -213,6 +225,8 @@ internal class CairnLinksViewModel(
     private val entityEvidenceClient = EntityEvidenceClient(apiBaseUrl)
     private var entityEvidenceJob: Job? = null
     private var entityEvidenceRequest = 0L
+    private val processingReads = mutableMapOf<Int, Job>()
+    private val processingRequests = mutableMapOf<Int, Long>()
     private var libraryJob: Job? = null
     private var libraryGeneration = 0L
     private var libraryFilterTime = Instant.now()
@@ -395,7 +409,11 @@ internal class CairnLinksViewModel(
 
     private fun clearV2AccountState() {
         invalidateEntityEvidence()
+        processingReads.values.forEach { it.cancel() }
+        processingReads.clear()
+        processingRequests.clear()
         uiState = uiState.copy(v2Selections = emptyMap(), v2Drafts = emptyMap(),
+            processingPanels = emptyMap(),
             v2Conflicts = emptyMap(), v2Busy = emptySet(), v2Queued = emptyMap(), v2LegacyActions = emptyMap(),
             v2Taxonomy = null, v2TaxonomyLoading = false, v2SelectionAvailable = null, v2TaxonomyAvailable = null)
     }
@@ -442,6 +460,101 @@ internal class CairnLinksViewModel(
 
     private fun matchesCurationDisplay(expected: CurationDisplayContext?): Boolean = expected == null ||
         (expected.accountKey == curationAccountKey() && isCurrentAccount(expected.accountGeneration))
+
+    /** Explicit status open/refresh only. Reading a journal never drains it. */
+    fun loadProcessing(id: Int, expected: CurationDisplayContext) {
+        if (!matchesCurationDisplay(expected) || id in deletedLinks || id in pendingDeletions || uiState.preferences.apiToken.isBlank()) return
+        val old = uiState.processingPanels[id] ?: ProcessingPanelState()
+        if (old.saving) return
+        processingReads.remove(id)?.cancel()
+        val request = (processingRequests[id] ?: 0) + 1
+        processingRequests[id] = request
+        val token = uiState.preferences.apiToken
+        uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to old.copy(loading = true)))
+        processingReads[id] = viewModelScope.launch {
+            try {
+                val read = processingRepository.read(expected.accountKey, id, token)
+                if (!matchesCurationDisplay(expected) || processingRequests[id] != request || id in deletedLinks || id in pendingDeletions) return@launch
+                uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to
+                    old.copy(result = read.result, pending = read.pending, storageReady = true, loading = false)))
+            } catch (error: kotlinx.coroutines.CancellationException) { throw error
+            } catch (_: Exception) {
+                if (matchesCurationDisplay(expected) && processingRequests[id] == request && id !in deletedLinks && id !in pendingDeletions)
+                    uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to old.copy(loading = false, storageReady = false,
+                        message = "本地请求记录无法确认，已保留编辑内容。请重新读取，未自动重试。")))
+            }
+        }
+    }
+
+    /** The UI confirms costs and passes the displayed identity. Unknown writes
+     * can only resend the identical persisted operation, never a fresh nonce. */
+    fun submitProcessing(id: Int, intent: ProcessingIntent, expected: CurationDisplayContext) {
+        fun permitted() = matchesCurationDisplay(expected) && id !in deletedLinks && id !in pendingDeletions && uiState.preferences.apiToken.isNotBlank()
+        if (!permitted() || !intent.valid()) return
+        val panel = uiState.processingPanels[id] ?: return
+        val status = (panel.result as? RunHistoryResult.Loaded)?.value ?: return
+        if (panel.loading || panel.saving || !panel.storageReady) return
+        val old = panel.pending
+        if (old != null && old.rejected == null) {
+            if (old.intent != intent) return
+        } else if (status.identity != intent.source || status.actions[intent.action]?.allowed != true) {
+            uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to panel.copy(message = "资料或处理状态已更新，请重新核对后再确认。")))
+            return
+        }
+        val token = uiState.preferences.apiToken
+        val sent = StoredProcessingIntent(expected.accountKey, id, intent)
+        uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to panel.copy(saving = true, message = "")))
+        viewModelScope.launch {
+            try {
+                val result = processingRepository.submit(sent, old, token, ::permitted)
+                if (!permitted()) return@launch
+                val updated = panel.copy(saving = false, pending = when (result) {
+                    is ProcessingWriteResult.Confirmed -> null
+                    is ProcessingWriteResult.Rejected -> sent.copy(rejected = result.code)
+                    is ProcessingWriteResult.Unknown -> sent
+                }, message = when (result) {
+                    is ProcessingWriteResult.Confirmed -> if (result.replayed) "已确认上次请求，没有另建任务。" else "请求已保存，所选阶段已排队。"
+                    is ProcessingWriteResult.Rejected -> "本次请求未执行。${processingReason(result.code)} 编辑内容已保留。"
+                    is ProcessingWriteResult.Unknown -> "结果尚未确认。原请求已保留，只能明确核对原请求，不会自动重试。"
+                })
+                uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to updated))
+                if (result is ProcessingWriteResult.Confirmed) {
+                    queryPages.clear()
+                    verifiedDetails.remove(id)
+                    ensureLink(id, force = true)
+                    loadV2Selection(id, force = true)
+                    loadProcessing(id, expected)
+                }
+            } catch (error: kotlinx.coroutines.CancellationException) { throw error
+            } catch (_: Exception) {
+                if (permitted()) uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to panel.copy(saving = false,
+                    storageReady = false, message = "本地请求状态无法确认，编辑内容已保留。请重新读取，未自动重试。")))
+            }
+        }
+    }
+
+    fun discardRefusedProcessing(id: Int, expected: CurationDisplayContext) {
+        if (!matchesCurationDisplay(expected) || id in deletedLinks || id in pendingDeletions) return
+        val panel = uiState.processingPanels[id] ?: return
+        val pending = panel.pending?.takeIf { it.rejected != null } ?: return
+        if (panel.loading || panel.saving || !panel.storageReady) return
+        uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to panel.copy(saving = true)))
+        viewModelScope.launch {
+            try {
+                processingRepository.discardRefused(pending)
+                if (matchesCurationDisplay(expected) && id !in deletedLinks && id !in pendingDeletions) {
+                    uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to panel.copy(pending = null, saving = false,
+                        message = "已放弃明确未执行的请求，服务端资料未改变。")))
+                    loadProcessing(id, expected)
+                }
+            } catch (error: kotlinx.coroutines.CancellationException) { throw error
+            } catch (_: Exception) {
+                if (matchesCurationDisplay(expected) && id !in deletedLinks && id !in pendingDeletions)
+                    uiState = uiState.copy(processingPanels = uiState.processingPanels + (id to panel.copy(saving = false, storageReady = false,
+                        message = "本地草稿未能清理，请重新读取后核对。")))
+            }
+        }
+    }
 
     private fun invalidateEntityEvidence() {
         entityEvidenceRequest += 1
@@ -1529,6 +1642,8 @@ internal class CairnLinksViewModel(
 
     private fun forgetDeletedLink(id: Int) {
         if (uiState.entityEvidence?.linkId == id) invalidateEntityEvidence()
+        processingReads.remove(id)?.cancel()
+        processingRequests[id] = (processingRequests[id] ?: 0) + 1
         val account = curationAccountKey()
         viewModelScope.launch {
             try { offlineReads.remove(account, id); localMedia.remove(account, id) }
@@ -1547,6 +1662,7 @@ internal class CairnLinksViewModel(
             libraryResults = uiState.libraryResults.filterNot { it.id == id },
             searchResults = uiState.searchResults.filterNot { it.id == id },
             detailLoads = uiState.detailLoads - id, busyIds = uiState.busyIds - id,
+            processingPanels = uiState.processingPanels - id,
             editDraft = uiState.editDraft?.takeUnless { it.id == id },
             v2Selections = uiState.v2Selections - id, v2Drafts = uiState.v2Drafts - id,
             v2Conflicts = uiState.v2Conflicts - id, v2Busy = uiState.v2Busy - id,

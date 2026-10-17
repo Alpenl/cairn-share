@@ -84,5 +84,8 @@ jobs:
             android/app/build/outputs/androidTest-results/connected/**
             ${{ runner.temp }}/cairn-android-worker.*/*.log
             ${{ runner.temp }}/cairn-android-worker.*/transport-history.json
+            ${{ runner.temp }}/cairn-android-worker.*/material-initial.json
+            ${{ runner.temp }}/cairn-android-worker.*/material-final.json
+            ${{ runner.temp }}/cairn-android-worker.*/processing-*.json
           if-no-files-found: ignore
           retention-days: 7

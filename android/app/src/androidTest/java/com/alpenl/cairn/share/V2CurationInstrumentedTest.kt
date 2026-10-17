@@ -6,7 +6,7 @@ import android.app.Instrumentation
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -33,6 +33,8 @@ import java.util.concurrent.atomic.AtomicReference
  */
 @RunWith(AndroidJUnit4::class)
 class V2CurationInstrumentedTest {
+    // Queue coroutine resumes on the test scheduler; v1's unconfined
+    // dispatcher could run frame application on the HTTP executor thread.
     @get:Rule val compose = createEmptyComposeRule()
     private val server = MockWebServer()
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
@@ -962,6 +964,179 @@ class V2CurationInstrumentedTest {
             compose.onNodeWithTag("run_history_close").performClick()
             assertTrue(paths.any { it.endsWith("/run-history?after_id=8") })
             assertTrue("History reads must never submit actions or invoke a model", paths.all { it.startsWith("GET ") })
+        }
+    }
+
+    @Test fun processingDiscardCasFailureKeepsTheNewUnknownIntentAndDisplaysItsActualText() {
+        val bodies = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
+        val current = AtomicReference(ProcessingFixture.status())
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.requestUrl!!.encodedPath != "/api/bookmarks/4/processing") return processingFallback(request)
+                if (request.method == "GET") return ProcessingFixture.response(current.get())
+                val body = JSONObject(request.body.readUtf8()); bodies += body
+                if (bodies.size == 1) return ProcessingFixture.response(JSONObject().put("error", "state_conflict"), 409)
+                assertEquals("another-instance", body.getString("operation_key"))
+                assertEquals("Another instance original", body.getString("text"))
+                current.set(ProcessingFixture.status(4, "b".repeat(64), missing = false))
+                return ProcessingFixture.response(ProcessingFixture.receipt(body))
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use { activity ->
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("processing_toggle"))
+            compose.onNodeWithTag("processing_toggle").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_primary_text").assertExists(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("processing_primary_text").performScrollTo().performTextInput("UI owned draft")
+            hideProcessingKeyboard(activity)
+            compose.onNodeWithTag("processing_action_save_primary").performScrollTo().performClick()
+            compose.onNodeWithTag("processing_confirm").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_discard").assertExists(); true }.getOrDefault(false) }
+            val account = accountKeyFor(server.url("/").toString(), token)
+            val store = ProcessingStore(context)
+            val old = runBlocking { store.load(account, 4)!! }
+            val replacement = old.copy(intent = old.intent.copy(operationKey = "another-instance", text = "Another instance original"), rejected = null)
+            runBlocking { store.prepare(replacement, old) }
+            compose.onNodeWithTag("processing_discard").performScrollTo().performClick()
+            compose.onNodeWithTag("processing_discard_confirm").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_message").assertTextContains("本地草稿未能清理", substring = true); true }.getOrDefault(false) }
+            assertEquals(replacement, runBlocking { store.load(account, 4) })
+            compose.onNodeWithTag("processing_saved_text").assertTextContains("UI owned draft", substring = true)
+            compose.onNodeWithTag("processing_refresh").performScrollTo().performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_saved_text").assertTextContains("Another instance original", substring = true); true }.getOrDefault(false) }
+            compose.onNodeWithTag("processing_discard").assertDoesNotExist()
+            assertEquals(1, bodies.size)
+            compose.onNodeWithTag("processing_recover").performScrollTo().performClick()
+            compose.onNodeWithTag("processing_confirm").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_message").assertTextContains("请求已保存", substring = true); true }.getOrDefault(false) }
+            assertEquals(2, bodies.size)
+            assertNull(runBlocking { store.load(account, 4) })
+        }
+    }
+
+    private fun processingFallback(request: RecordedRequest): MockResponse = when (request.requestUrl!!.encodedPath) {
+        "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+        "/api/links/4", "/api/bookmarks/4" -> response(link(4))
+        "/api/bookmarks/4/v2-selection" -> response(selection(3))
+        "/api/v2-taxonomy" -> response(taxonomy())
+        else -> MockResponse().setResponseCode(404)
+    }
+    private fun openProcessingAfterRecreation() {
+        compose.waitUntil(20000) { runCatching { compose.onNodeWithTag("reader_curation_toggle").assertExists(); true }.getOrDefault(false) ||
+            runCatching { compose.onNodeWithTag("link_4").assertExists(); true }.getOrDefault(false) }
+        if (runCatching { compose.onNodeWithTag("link_4").assertExists(); true }.getOrDefault(false)) compose.onNodeWithTag("link_4").performClick()
+        compose.waitUntil(20000) { runCatching { compose.onNodeWithTag("reader_curation_toggle").assertExists(); true }.getOrDefault(false) }
+        if (!runCatching { compose.onNodeWithTag("processing_toggle").assertExists(); true }.getOrDefault(false)) compose.onNodeWithTag("reader_curation_toggle").performClick()
+        compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("processing_toggle"))
+        if (!runCatching { compose.onNodeWithTag("processing_refresh").assertExists(); true }.getOrDefault(false)) compose.onNodeWithTag("processing_toggle").performClick()
+        compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_stage_source").assertExists(); true }.getOrDefault(false) }
+    }
+    private fun hideProcessingKeyboard(activity: ActivityScenario<LauncherActivity>) {
+        activity.onActivity { host -> host.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+            .hideSoftInputFromWindow(host.window.decorView.windowToken, 0) }
+        compose.waitUntil(5000) {
+            var hidden = false
+            activity.onActivity { host -> hidden = androidx.core.view.ViewCompat.getRootWindowInsets(host.window.decorView)
+                ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == false }
+            hidden
+        }
+    }
+
+    @Test fun processingStatusIsExplicitAndUnknownIntentRecreationOnlyConfirmsSamePersistedRequest() {
+        val bodies = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        val committed = AtomicReference<String?>(null)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.requestUrl!!.encodedPath != "/api/bookmarks/4/processing") return processingFallback(request)
+                assertEquals("Bearer $token", request.getHeader("Authorization"))
+                assertEquals("1", request.getHeader("X-Cairn-App-Processing"))
+                if (request.method == "GET") {
+                    reads.incrementAndGet()
+                    return ProcessingFixture.response(if (committed.get() == null) ProcessingFixture.status() else ProcessingFixture.status(4, "b".repeat(64), missing = false))
+                }
+                val body = request.body.readUtf8(); bodies += body
+                val journal = runBlocking { ProcessingStore(context).load(accountKeyFor(server.url("/").toString(), token), 4) }
+                assertNotNull("Actual journal is durable before HTTP", journal)
+                assertEquals(body, journal!!.intent.encode().toString())
+                if (committed.compareAndSet(null, body)) return MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AFTER_REQUEST)
+                assertEquals(committed.get(), body)
+                return ProcessingFixture.response(ProcessingFixture.receipt(JSONObject(body), replayed = true))
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use { activity ->
+            openDetailAndLoadTaxonomy()
+            assertEquals(0, reads.get()); assertTrue(bodies.isEmpty())
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("processing_toggle"))
+            compose.onNodeWithTag("processing_toggle").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_primary_text").assertExists(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("processing_primary_text").performScrollTo().performTextInput("Keep exact primary 🙂")
+            hideProcessingKeyboard(activity)
+            compose.onNodeWithTag("processing_action_save_primary").performScrollTo().performClick()
+            compose.onNodeWithTag("processing_confirm").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_pending").assertTextContains("上次请求结果未确认", substring = true); true }.getOrDefault(false) }
+            assertEquals(1, bodies.size)
+            activity.recreate()
+            openProcessingAfterRecreation()
+            compose.onNodeWithTag("processing_saved_text").assertTextContains("Keep exact primary 🙂", substring = true)
+            assertEquals(1, bodies.size)
+            compose.onNodeWithTag("processing_recover").performScrollTo().performClick()
+            compose.onNodeWithTag("processing_confirm").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_message").assertTextContains("已确认上次请求", substring = true); true }.getOrDefault(false) }
+            assertEquals(2, bodies.size); assertEquals(bodies[0], bodies[1])
+            assertNull(runBlocking { ProcessingStore(context).load(accountKeyFor(server.url("/").toString(), token), 4) })
+        }
+    }
+
+    @Test fun processingRefusedPrimaryEditsSurviveRefreshAndRecreationUntilExplicitlyAdoptingNewState() {
+        val bodies = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
+        val current = AtomicReference(ProcessingFixture.status())
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.requestUrl!!.encodedPath != "/api/bookmarks/4/processing") return processingFallback(request)
+                if (request.method == "GET") return ProcessingFixture.response(current.get())
+                val body = JSONObject(request.body.readUtf8()); bodies += body
+                if (bodies.size == 1) {
+                    current.set(ProcessingFixture.status(4, "b".repeat(64)))
+                    return ProcessingFixture.response(JSONObject().put("error", "state_conflict"), 409)
+                }
+                assertEquals("edited primary must survive", body.getString("text"))
+                assertEquals(5, body.getLong("expected_content_revision"))
+                assertNotEquals(bodies[0].getString("operation_key"), body.getString("operation_key"))
+                current.set(ProcessingFixture.status(6, "d".repeat(64), missing = false))
+                return ProcessingFixture.response(ProcessingFixture.receipt(body))
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use { activity ->
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("processing_toggle"))
+            compose.onNodeWithTag("processing_toggle").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_primary_text").assertExists(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("processing_primary_text").performScrollTo().performTextInput("original primary")
+            hideProcessingKeyboard(activity)
+            compose.onNodeWithTag("processing_action_save_primary").performScrollTo().performClick()
+            compose.onNodeWithTag("processing_confirm").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_reprepare").assertExists(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("processing_refresh").performScrollTo().performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_reprepare").assertIsEnabled(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("processing_reprepare").performScrollTo().performClick()
+            compose.onNodeWithTag("processing_primary_text").performScrollTo().performTextReplacement("edited primary must survive")
+            hideProcessingKeyboard(activity)
+            current.set(ProcessingFixture.status(5, "c".repeat(64)))
+            compose.onNodeWithTag("processing_refresh").performScrollTo().performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_changed").assertExists(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("processing_primary_text").assertTextContains("edited primary must survive", substring = true)
+            compose.onNodeWithTag("processing_action_save_primary").assertIsNotEnabled()
+            activity.recreate()
+            openProcessingAfterRecreation()
+            compose.onNodeWithTag("processing_primary_text").assertTextContains("edited primary must survive", substring = true)
+            compose.onNodeWithTag("processing_action_save_primary").assertIsNotEnabled()
+            assertEquals(1, bodies.size)
+            compose.onNodeWithTag("processing_adopt").performScrollTo().performClick()
+            compose.onNodeWithTag("processing_action_save_primary").performScrollTo().performClick()
+            compose.onNodeWithTag("processing_confirm").performClick()
+            compose.waitUntil(15000) { runCatching { compose.onNodeWithTag("processing_message").assertTextContains("请求已保存", substring = true); true }.getOrDefault(false) }
+            assertEquals(2, bodies.size)
         }
     }
 }
