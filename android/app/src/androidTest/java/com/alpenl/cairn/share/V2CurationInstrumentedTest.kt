@@ -643,4 +643,95 @@ class V2CurationInstrumentedTest {
             assertEquals(1, runBlocking { CurationActionStore(context).snapshot().size })
         }
     }
+
+    @Test fun classificationHistoryLoadsOnlyOnRequestAndKeepsPartialUnknownAndPagedRecords() {
+        val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
+        fun row(id: Int) = JSONObject().put("id", id).put("status", "partial")
+            .put("resolved_model", JSONObject.NULL).put("requested_model", "recorded-request")
+            .put("coverage", "partial").put("evidence_coverage", "partial").put("content_revision", 2)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.requestUrl!!.encodedPath
+                paths.add("${request.method} ${request.requestUrl!!.encodedPath}?${request.requestUrl!!.encodedQuery.orEmpty()}")
+                return when (path) {
+                    "/api/links" -> response(JSONObject().put("items", JSONArray().put(link(4))).put("next_before_id", JSONObject.NULL))
+                    "/api/links/4", "/api/bookmarks/4" -> response(link(4))
+                    "/api/bookmarks/4/v2-selection" -> response(selection(3))
+                    "/api/v2-taxonomy" -> response(taxonomy())
+                    "/api/bookmarks/4/run-history" -> {
+                        assertEquals("Bearer $token", request.getHeader("Authorization"))
+                        assertEquals("1", request.getHeader("X-Cairn-App-Run-History"))
+                        val older = request.requestUrl!!.queryParameter("after_id") == "8"
+                        response(JSONObject().put("version", 1).put("bookmark_id", 4)
+                            .put("runs", if (older) JSONArray().put(row(7).put("status", "failed"))
+                                else JSONArray().put(row(9)).put(row(8)))
+                            .put("next_after_id", if (older) JSONObject.NULL else 8))
+                            .setHeader("X-Cairn-App-Run-History", "1")
+                    }
+                    "/api/bookmarks/4/run-history/9" -> response(JSONObject().put("version", 1).put("bookmark_id", 4)
+                        .put("run", row(9).put("answers", JSONObject().put("topic", false))
+                            .put("usage", JSONObject().put("input_tokens", 17))
+                            .put("raw_judgments", JSONObject().put("source", "recorded-source").put("large", "x".repeat(17_000)))))
+                        .setHeader("X-Cairn-App-Run-History", "1")
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        ActivityScenario.launch<LauncherActivity>(start()).use {
+            openDetailAndLoadTaxonomy()
+            compose.onNodeWithTag("detail_content").performScrollToNode(hasTestTag("run_history_open"))
+            assertFalse(paths.any { it.contains("/run-history") })
+            compose.onNodeWithTag("run_history_open").performClick()
+            compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag("run_history_row_9").assertExists(); true }.getOrDefault(false) }
+            assertFalse(paths.any { it.contains("/run-history/9") })
+            compose.onNodeWithTag("run_history_row_9").performScrollTo().performClick()
+            compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag("run_history_status").assertTextEquals("记录状态：部分完成"); true }.getOrDefault(false) }
+            compose.onNodeWithTag("run_history_model").assertTextEquals("实际模型：未知")
+            compose.onNodeWithTag("run_history_preview_toggle").performScrollTo().performClick()
+            compose.onNodeWithTag("run_history_preview").assertTextContains("recorded-source", substring = true)
+            val preview = compose.onNodeWithTag("run_history_preview").fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
+            assertEquals(16_384, preview.length)
+            compose.onNodeWithTag("run_history_preview_toggle").performScrollTo().performClick()
+            compose.onNodeWithTag("run_history_export").performScrollTo().assertIsDisplayed()
+            // Return a controlled file-picker result, then use the actual
+            // ContentResolver writer. This does not claim to test system UI.
+            val exported = java.io.File.createTempFile("cairn-history-", ".json", context.cacheDir)
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            var exportIntents = 0
+            val monitor = object : Instrumentation.ActivityMonitor() {
+                override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                    if (intent.action != Intent.ACTION_CREATE_DOCUMENT) return null
+                    assertEquals("application/json", intent.type)
+                    assertEquals("cairn-classification-4-9.json", intent.getStringExtra(Intent.EXTRA_TITLE))
+                    exportIntents++
+                    return Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(android.net.Uri.fromFile(exported)))
+                }
+            }
+            instrumentation.addMonitor(monitor)
+            try {
+                compose.onNodeWithTag("run_history_export").performClick()
+                compose.waitUntil(15_000) { runCatching {
+                    compose.onNodeWithTag("run_history_export_status").assertTextEquals("已导出所选记录。"); true
+                }.getOrDefault(false) }
+                assertEquals(1, exportIntents)
+                val saved = JSONObject(exported.readText()).getJSONObject("run")
+                assertTrue(saved.has("resolved_model")); assertTrue(saved.isNull("resolved_model"))
+                assertEquals(17_000, saved.getJSONObject("raw_judgments").getString("large").length)
+                assertFalse(saved.getJSONObject("answers").getBoolean("topic"))
+                assertEquals(17, saved.getJSONObject("usage").getInt("input_tokens"))
+            } finally {
+                instrumentation.removeMonitor(monitor)
+                assertTrue("Remove only the owned synthetic export", exported.delete())
+            }
+            compose.onNodeWithTag("run_history_back").performClick()
+            compose.onNodeWithTag("run_history_more").performScrollTo().performClick()
+            compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag("run_history_row_7").assertExists(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("run_history_row_9").assertDoesNotExist()
+            compose.onNodeWithTag("run_history_latest").performScrollTo().performClick()
+            compose.waitUntil(15_000) { runCatching { compose.onNodeWithTag("run_history_row_9").assertExists(); true }.getOrDefault(false) }
+            compose.onNodeWithTag("run_history_close").performClick()
+            assertTrue(paths.any { it.endsWith("/run-history?after_id=8") })
+            assertTrue("History reads must never submit actions or invoke a model", paths.all { it.startsWith("GET ") })
+        }
+    }
 }
