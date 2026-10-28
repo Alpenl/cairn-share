@@ -61,6 +61,10 @@ async function dispatch(message) {
     case "batch-pause": return batch.pause();
     case "collections": return controller.collections();
     case "lookup": return controller.lookup(message.url);
+    case "delete-saved": {
+      await batch.pause();
+      return controller.deleteSaved(message.bookmark);
+    }
     case "tags-sync": return tagSync.sync(message.mode === "check" ? "check" : "refresh");
     case "tags-clear": return tagSync.clear();
     case "preferences": return controller.savePreferences(message.preferences);

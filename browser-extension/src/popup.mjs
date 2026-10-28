@@ -9,6 +9,9 @@ let activeTab;
 let saved = false;
 let operationId = crypto.randomUUID();
 let saving = false;
+let deleting = false;
+let lookupGeneration = 0;
+let lastLookupResult;
 let initialized = false;
 let editingUrl = false;
 let requestedOrigins = [];
@@ -42,9 +45,9 @@ function inputsChanged() {
   const length = $("note").value.length;
   $("note-count").textContent = `${length} / ${MAX_NOTE}`;
   $("note-count").classList.toggle("near", length >= MAX_NOTE - 200);
-  $("save").disabled = saving || saved || !configured || !valid();
-  $("url").readOnly = saving;
-  $("note").readOnly = saving;
+  $("save").disabled = deleting || Boolean(state?.deletion) || saving || saved || !configured || !valid();
+  $("url").readOnly = saving || deleting;
+  $("note").readOnly = saving || deleting;
   $("collection-choices").querySelectorAll("input").forEach(n=>n.disabled=saving||saved);
   $("tag-cloud").querySelectorAll("button").forEach(n=>n.disabled=saving||saved);
   const samePage = Boolean(activeTab?.id) && $("url").value === activeTab.url;
@@ -64,6 +67,10 @@ function inputsChanged() {
   $("comment-count").replaceChildren(stat("comment", `页面已加载 ${commentsFound} 条评论`));
   renderStats(samePage);
   const isKnown = Boolean(known?.saved) && known.url === $("url").value;
+  const pendingDelete = state?.deletion && valid() && state.deletion.url === submissionUrl($("url").value, state.keepFullUrl !== false);
+  $("delete-saved").hidden = !state?.collector || (!isKnown && !pendingDelete);
+  $("delete-saved").disabled = deleting || saving;
+  $("delete-saved").textContent = deleting ? "正在删除…" : pendingDelete ? "重试删除" : "删除收藏";
   $("saved-badge").hidden = !isKnown;
   $("saved-note").hidden = !isKnown || saved;
   if (isKnown) renderKnown();
@@ -131,18 +138,19 @@ function renderSync() {
 }
 
 async function loadKnown() {
+  const generation = ++lookupGeneration;
   const url = $("url").value;
   if (!state?.configured || !/^https?:/.test(url)) return;
   try {
     const answer = await send("lookup", { url: submissionUrl(url, state.keepFullUrl !== false) });
-    if (answer.binding !== state?.binding || !answer.result) return;
+    if (generation !== lookupGeneration || url !== $("url").value || answer.binding !== state?.binding || !answer.result) return;
     known = { ...answer.result, url };
     inputsChanged();
   } catch { /* lookup is advisory */ }
 }
 
 function persistDraft() {
-  const draft = { url: $("url").value, note: $("note").value, title, client_id: operationId, ...(state?.server === "cairn-go.alpenl.com" && known?.saved && known.url === $("url").value ? {expected:{id:known.id,content_revision:known.content_revision,app_body_revision:known.app_body_revision,personal_revision:known.personal_revision}} : {}), collection_ids:[...selectedCollections],tag_refs:[...selectedTags],binding:state?.binding };
+  const draft = { url: $("url").value, note: $("note").value, title, client_id: operationId, ...(state?.collector && known?.saved && known.url === $("url").value ? {expected:{id:known.id,content_revision:known.content_revision,app_body_revision:known.app_body_revision,personal_revision:known.personal_revision}} : {}), collection_ids:[...selectedCollections],tag_refs:[...selectedTags],binding:state?.binding };
   draftWrites = draftWrites.catch(() => {}).then(() => ext.storage.local.set({ [DRAFT_KEY]: draft }))
     .catch(() => { throw new CaptureError("storage"); });
   return draftWrites;
@@ -151,7 +159,7 @@ function persistDraft() {
 for (const id of ["url", "note"]) $(id).addEventListener("input", () => {
   saved = false;
   status($("status"), "");
-  if (id === "url") title = "";
+  if (id === "url") { title = ""; known = null; ++lookupGeneration; void loadKnown(); }
   operationId = crypto.randomUUID();
   inputsChanged();
   void persistDraft().catch((error) => showError($("status"), error));
@@ -184,6 +192,9 @@ function resultText(result, pending) {
 async function refresh() {
   const next=await send("snapshot");if(state?.binding&&state.binding!==next.binding){selectedCollections.clear();definitions=[];renderCollections();selectedTags.clear();tagCache=null;tagsVisible=false;renderTags();}
   state=next;
+  if (!deleting && state.lastResult?.status === 'uploaded' && lastLookupResult !== state.lastResult.client_id) {
+    lastLookupResult = state.lastResult.client_id; void loadKnown();
+  }
   // Only surface queue items that are not the one already described in the
   // status line, unless they need the user's attention.
   const shown = state.queue.filter(j => j.client_id !== operationId || j.errorKind)
@@ -203,7 +214,7 @@ async function refresh() {
 
 $("capture-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (saving || !initialized || !state?.configured || !valid()) return;
+  if (saving || deleting || state?.deletion || !initialized || !state?.configured || !valid()) return;
   saving = true;
   status($("status"), "正在读取页面…", "pending");
   inputsChanged();
@@ -212,7 +223,7 @@ $("capture-form").addEventListener("submit", async (event) => {
     // this page's media hosts and prepared before the button becomes active.
     if ($("capture-page").checked && $("url").value===activeTab?.url && requestedOrigins.length) await ext.permissions.request({origins:requestedOrigins});
     await persistDraft();
-    const capture = { url: $("url").value, note: $("note").value, title, client_id: operationId, ...(state?.server === "cairn-go.alpenl.com" && known?.saved && known.url === $("url").value ? {expected:{id:known.id,content_revision:known.content_revision,app_body_revision:known.app_body_revision,personal_revision:known.personal_revision}} : {}), collection_ids:[...selectedCollections],tag_refs:chosenTags(),binding:state?.binding };
+    const capture = { url: $("url").value, note: $("note").value, title, client_id: operationId, ...(state?.collector && known?.saved && known.url === $("url").value ? {expected:{id:known.id,content_revision:known.content_revision,app_body_revision:known.app_body_revision,personal_revision:known.personal_revision}} : {}), collection_ids:[...selectedCollections],tag_refs:chosenTags(),binding:state?.binding };
     await send("save", { capture, tabId: activeTab?.id, capturePage: $("capture-page").checked && capture.url === activeTab?.url, captureComments: $("capture-comments").checked });
     await draftWrites;
     await ext.storage.local.remove(DRAFT_KEY);
@@ -454,3 +465,24 @@ async function loadTags(stored) {
     await syncTags("refresh", { quiet: true });
   } else await syncTags("refresh");
 }
+
+$("delete-saved").addEventListener('click', async () => {
+  if (saving || deleting || !state?.collector) return;
+  const url = submissionUrl($("url").value, state.keepFullUrl !== false);
+  const pending = state.deletion?.url === url ? state.deletion : null;
+  if (!pending && (!known?.saved || known.url !== $("url").value)) return;
+  if (!pending && !confirm('将这条收藏移到回收站？相关待上传任务会停止，可以在网页回收站恢复。')) return;
+  const bookmark = pending ? {...pending,binding:state.binding} : {id:known.id,revision:known.personal_revision,url,binding:state.binding};
+  deleting = true; ++lookupGeneration; inputsChanged();
+  try {
+    state = await send('delete-saved', {bookmark});
+    known = null; saved = false; operationId = crypto.randomUUID();
+    await draftWrites.catch(()=>{});
+    await ext.storage.local.remove(DRAFT_KEY);
+    status($("status"), '已移到回收站，可在网页恢复。', 'success');
+  } catch(error) {
+    state = await send('snapshot');
+    status($("status"), error.kind === 'revision_conflict' ? '收藏刚刚发生变化，已刷新。请核对后再次删除。' : '删除尚未确认，请点击重试删除；相关上传已暂停。', 'error');
+    if (!state.deletion) await loadKnown();
+  } finally { deleting = false; inputsChanged(); }
+});

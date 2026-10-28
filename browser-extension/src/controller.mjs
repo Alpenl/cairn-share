@@ -12,6 +12,8 @@ export function createController({ store, client, clientFor = () => client, now 
   let mutations = Promise.resolve();
   let flushPromise = null;
   let connectionTest = null;
+  let deleting = false;
+  const matchesDeletion = (job, intent) => intent && (job.url === intent.url || job.target?.id === intent.id || job.expected?.id === intent.id || job.savedLink?.id === intent.id);
 
   const read = async () => (await store.read()) ?? emptyState();
   function update(edit) {
@@ -39,7 +41,8 @@ export function createController({ store, client, clientFor = () => client, now 
       keepFullUrl: state.settings.keepFullUrl,
       connectedAt: state.settings.connectedAt ?? null,
       queue: state.queue.map(({ binding, capture, ...job }) => job),
-      lastResult: state.lastResult
+      lastResult: state.lastResult,
+      deletion: state.deletion ? {id:state.deletion.id,url:state.deletion.url,revision:state.deletion.revision} : null
     };
   }
 
@@ -48,6 +51,7 @@ export function createController({ store, client, clientFor = () => client, now 
     // An empty field keeps the existing token; the options page never needs
     // to read it back. A candidate is tested before the active token changes.
     const previous = await read();
+    if (deleting || previous.deletion) throw new CaptureError('delete_pending');
     const candidate = token.trim() || previous.settings.token;
     if (!candidate) throw new CaptureError("not_configured");
     if (connectionTest) throw new CaptureError("unexpected");
@@ -86,6 +90,7 @@ export function createController({ store, client, clientFor = () => client, now 
       throw new CaptureError("invalid_client_id");
     }
     return update(async (state) => {
+      if (deleting || matchesDeletion({url,target,expected},state.deletion)) throw new CaptureError('delete_pending');
       const existing = state.queue.find((job) => job.client_id === client_id);
       if (existing) return existing;
       if (state.lastResult?.client_id === client_id) return state.lastResult;
@@ -106,7 +111,7 @@ export function createController({ store, client, clientFor = () => client, now 
   }
 
   function flush({ force = false, onlyId } = {}) {
-    if (connectionTest) return snapshot();
+    if (connectionTest || deleting) return snapshot();
     // A new menu/capture event can arrive after an existing flush has read
     // its final empty queue. Run another pass after it settles, so that the
     // newly committed item does not have to wait for the next alarm.
@@ -118,12 +123,13 @@ export function createController({ store, client, clientFor = () => client, now 
       const round=crypto.randomUUID();
       const startedAt = now();
       for (let count = 0; count < MAX_QUEUE && now() - startedAt < 15000; count++) {
+        if (deleting) break;
         await mutations;
         const state = await read();
         if (!state.settings.token) break;
         const binding = await connectionIdentity(state.settings);
         const client = clientFor(state.settings);
-        const job = state.queue.find((item) => item.binding === binding && !attempted.has(item.client_id) &&
+        const job = state.queue.find((item) => !matchesDeletion(item,state.deletion) && item.binding === binding && !attempted.has(item.client_id) &&
           (!onlyId || item.client_id === onlyId) && (force || (!PAUSED_ERRORS.has(item.errorKind) && item.nextAttemptAt <= now())));
         if (!job) break;
         attempted.add(job.client_id);
@@ -188,10 +194,47 @@ export function createController({ store, client, clientFor = () => client, now 
     return snapshot();
   }
 
+  async function deleteSaved({id,revision,url,binding}) {
+    if (deleting || connectionTest) throw new CaptureError('delete_pending');
+    if (!Number.isSafeInteger(id) || id < 1 || !Number.isSafeInteger(revision) || revision < 1) throw new CaptureError('response');
+    validateCapture(url);
+    deleting = true;
+    try {
+      // Drain an already-started upload before taking the version-checked delete.
+      // Persist intent first: response loss or MV3 restart must not resume uploads
+      // for this bookmark, nor generate a different deletion operation on retry.
+      if (flushPromise) await flushPromise;
+      const intent = await update(async state => {
+        if (binding !== await connectionIdentity(state.settings)) throw new CaptureError('queue_connection');
+        if (state.deletion && (state.deletion.id !== id || state.deletion.binding !== binding)) throw new CaptureError('delete_pending');
+        state.deletion ??= {id,revision,url,binding,key:uuid()};
+        return state.deletion;
+      });
+      const state = await read();
+      try {
+        await clientFor(state.settings).deleteSaved(state.settings.token,id,{operation_key:intent.key,expected_revision:intent.revision});
+      } catch (error) {
+        // A conflict is a definitive rejection; keep the item and refresh lookup
+        // before a new confirmation. Uncertain failures retain the same intent.
+        if (error.kind === 'revision_conflict') await update(s => { delete s.deletion; });
+        throw error;
+      }
+      const discarded = await update(s => {
+        const jobs = s.queue.filter(j => matchesDeletion(j,intent));
+        s.queue = s.queue.filter(j => !matchesDeletion(j,intent));
+        if (s.lastResult?.url === intent.url || s.lastResult?.linkId === id) s.lastResult = null;
+        delete s.deletion;
+        return jobs;
+      });
+      for (const job of discarded) { try { await onUploaded(job); } catch { /* Startup prunes local files. */ } }
+      return snapshot();
+    } finally { deleting = false; }
+  }
+
   async function collections(){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await connectionIdentity(state.settings);try{const items=await clientFor(state.settings).collections(state.settings.token);if(await connectionIdentity((await read()).settings)!==binding)throw new CaptureError("queue_connection");await update(current=>{current.collectionCatalog={binding,items,at:now()}});return {items,cached:false,binding};}catch(error){if(state.collectionCatalog?.binding===binding)return {items:state.collectionCatalog.items,cached:true,binding};throw error;}}
   async function lookup(url){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await connectionIdentity(state.settings);const result=await clientFor(state.settings).lookup(state.settings.token,url);return {binding,result};}
   // The token never leaves background; callers get the binding to discard a
   // response that arrives after the connection changed.
   async function tags(etag){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await connectionIdentity(state.settings);return {binding,result:await clientFor(state.settings).tags(state.settings.token,etag)};}
-  return { snapshot, saveSettings, savePreferences, tags, enqueue, flush, remove, collections, lookup, newId: uuid };
+  return { snapshot, saveSettings, savePreferences, tags, enqueue, flush, remove, deleteSaved, collections, lookup, newId: uuid };
 }

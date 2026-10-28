@@ -54,6 +54,12 @@ export function createClient({ fetchImpl = fetch, apiBase = API_BASE, collectorB
       if (data?.batch_version !== 1) throw new CaptureError("batch_upgrade");
       return data;
     },
+    async deleteSaved(token, id, body) {
+      if (!token.startsWith('cairn_c_')) throw new CaptureError('delete_unsupported');
+      const data = await request(token, `/api/links/${id}`, body, {method:'DELETE'});
+      if (data?.id !== id || data.deleted !== true) throw new CaptureError('response');
+      return data;
+    },
     async receipt(token, id) { return request(token, `/api/captures/v2/${id}`, null, {missing:true}); },
     async collections(token) {const data=await request(token,"/api/collections",null,{collections:true});if(!Array.isArray(data.items))throw new CaptureError("response");return data.items;},
     // Already-saved lookup. Older Workers answer 404; the popup then simply

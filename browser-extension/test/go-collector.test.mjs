@@ -43,3 +43,40 @@ test('old queued content cannot silently move to the Go library and tokens stay 
  await controller.saveSettings({token,keepFullUrl:true,movePending:true});
  const snapshot=await controller.snapshot();assert.equal(snapshot.server,'cairn-go.alpenl.com');assert.ok(!JSON.stringify(snapshot).includes(token));assert.equal(state.queue.length,1);
 });
+
+test('deletion uses the scoped endpoint and rechecks before each batch page',async()=>{
+ const calls=[];const client=createClient({collectorBase:'https://cairn.alpenl.com/api/v1/collector',fetchImpl:async(url,options)=>{
+  calls.push({url,options});return ok(options.method==='DELETE'?{id:9,deleted:true,revision:3}:{batch_version:1,item:null});
+ }});
+ assert.deepEqual(await client.pending(token,'/9'),{batch_version:1,item:null});
+ await client.deleteSaved(token,9,{operation_key:'delete',expected_revision:2});
+ assert.equal(calls[0].url,'https://cairn.alpenl.com/api/v1/collector/captures/v2/pending/9');
+ assert.equal(calls[1].url,'https://cairn.alpenl.com/api/v1/collector/links/9');
+ assert.equal(calls[1].options.method,'DELETE');
+});
+
+test('delete response loss survives restart, blocks stale uploads and retries the same intent',async()=>{
+ let state=emptyState();state.settings={token,server:'https://cairn.alpenl.com',keepFullUrl:true};
+ const calls=[];let lost=true,uploads=0;
+ const client={upload:async()=>{uploads++;throw Error('unexpected upload')},deleteSaved:async(_token,id,body)=>{calls.push({id,body});if(lost){lost=false;throw Object.assign(Error(),{kind:'network'})}return {id,deleted:true}}};
+ const create=()=>createController({store:{read:async()=>structuredClone(state),write:async s=>{state=structuredClone(s)}},client});
+ let c=create();const binding=(await c.snapshot()).binding,url='https://example.test/deleted';
+ await c.enqueue({client_id:crypto.randomUUID(),url,binding,expected:{id:7,personal_revision:2}});
+ await assert.rejects(c.deleteSaved({id:7,revision:2,url,binding}),e=>e.kind==='network');
+ c=create();await c.flush({force:true});assert.equal(uploads,0);
+ await assert.rejects(c.enqueue({client_id:crypto.randomUUID(),url,binding}),e=>e.kind==='delete_pending');
+ await assert.rejects(c.deleteSaved({id:7,revision:2,url,binding:'different'}),e=>e.kind==='queue_connection');
+ await c.deleteSaved({id:7,revision:2,url,binding});
+ assert.deepEqual(calls[0],calls[1]);assert.equal(state.queue.length,0);assert.equal(state.deletion,undefined);
+ assert.ok(!JSON.stringify(await c.snapshot()).includes(token));
+});
+
+test('delete waits for an active upload and conflicts require a new confirmation',async()=>{
+ let state=emptyState();state.settings={token,keepFullUrl:true};let release,started;
+ const uploading=new Promise(r=>{started=r}),waiting=new Promise(r=>{release=r});const calls=[];
+ const c=createController({store:{read:async()=>structuredClone(state),write:async s=>{state=structuredClone(s)}},client:{upload:async(_token,job)=>{started();await waiting;calls.push('upload');return {id:7,url:job.url,note:''}},deleteSaved:async()=>{calls.push('delete');throw Object.assign(Error(),{kind:'revision_conflict'})}}});
+ const binding=(await c.snapshot()).binding,url='https://example.test/delete';
+ await c.enqueue({client_id:crypto.randomUUID(),url});const flush=c.flush();await uploading;
+ const deletion=c.deleteSaved({id:7,revision:1,url,binding});release();await flush;
+ await assert.rejects(deletion,e=>e.kind==='revision_conflict');assert.deepEqual(calls,['upload','delete']);assert.equal(state.deletion,undefined);
+});

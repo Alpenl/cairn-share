@@ -63,11 +63,13 @@ export async function tokenIdentity(token) {
 }
 
 export const ERROR_TEXT = {
+  delete_pending: "请先重试并完成这次删除；相关上传已暂停。",
+  delete_unsupported: "此连接尚未支持删除，请连接 cairn.alpenl.com 后重试。",
   invalid_server: "请填写 HTTPS 服务器地址（不含路径）；仅本机回环地址允许 HTTP。",
   server_permission: "未获得服务器访问权限，原连接保持不变。",
   capture_not_pending: "原收藏已有正文或已变更，本次补采未覆盖。可移除此任务。",
   batch_account: "请先完成或移除已保存或带资料版本的待同步任务，再更换令牌。",
-  batch_upgrade: "收藏服务尚未支持批量补采，请更新服务后重试。",
+  batch_upgrade: "收藏服务缺少批量补采接口，请更新服务后重试。",
   batch_permission: "批量采集需要网站访问权限，请允许后继续。",
   batch_connection: "收藏库连接已变更，请重新开始一轮采集。",
   batch_restart: "浏览器重新启动，采集已暂停。点击继续即可恢复。",
