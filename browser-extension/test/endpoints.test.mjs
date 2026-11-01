@@ -12,7 +12,8 @@ test('service origins require HTTPS except exact loopback and reject embedded cr
 test('existing queues keep their identity; a different server using the same token gets a new identity', async () => {
   const token='cairn_c_test';
   assert.equal(await connectionIdentity({token}), await tokenIdentity(token));
-  assert.equal(await connectionIdentity({token,server:DEFAULT_SERVER}), await tokenIdentity(token));
+  assert.equal(await connectionIdentity({token,server:"https://cairn-go.alpenl.com"}), await tokenIdentity(token));
+  assert.notEqual(await connectionIdentity({token,server:DEFAULT_SERVER}), await tokenIdentity(token));
   assert.notEqual(await connectionIdentity({token,server:'https://second.example'}), await tokenIdentity(token));
 });
 test('a server switch is atomic, checks the queue, clears old caches and binds requests to the saved origin', async () => {

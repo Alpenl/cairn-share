@@ -1,7 +1,10 @@
 export const API_BASE = "https://share.alpenl.com";
 export const COLLECTOR_API_BASE = "https://cairn-go.alpenl.com/api/v1/collector";
-export const AUTH_API_BASE = COLLECTOR_API_BASE.replace(/\/collector$/, "/auth");
-export const DEFAULT_SERVER = new URL(COLLECTOR_API_BASE).origin;
+// New connections use the main site. Legacy saved credentials without an
+// explicit server keep their old origin and queue binding during upgrades.
+export const DEFAULT_SERVER = "https://cairn.alpenl.com";
+export const AUTH_API_BASE = `${DEFAULT_SERVER}/api/v1/auth`;
+const LEGACY_COLLECTOR_SERVER = new URL(COLLECTOR_API_BASE).origin;
 
 // A service origin only; paths, credentials and insecure remote HTTP are refused.
 export function normalizeServer(value) {
@@ -14,11 +17,11 @@ export function normalizeServer(value) {
   } catch { throw new CaptureError("invalid_server"); }
 }
 export function connectionServer(settings) {
-  return settings.server || (settings.token?.startsWith("cairn_c_") ? DEFAULT_SERVER : API_BASE);
+  return settings.server || (settings.token?.startsWith("cairn_c_") ? LEGACY_COLLECTOR_SERVER : API_BASE);
 }
 export function connectionIdentity(settings) {
   const origin = connectionServer(settings);
-  const original = settings.token?.startsWith("cairn_c_") ? DEFAULT_SERVER : API_BASE;
+  const original = settings.token?.startsWith("cairn_c_") ? LEGACY_COLLECTOR_SERVER : API_BASE;
   // Keep existing queues valid on upgrade. Custom origins are part of identity.
   return tokenIdentity(origin === original ? settings.token : `${origin}\n${settings.token}`);
 }
@@ -88,7 +91,7 @@ export const ERROR_TEXT = {
   not_configured: "请先在设置中登录或填写访问令牌。",
   sign_in_cancelled: "已取消登录，插件未连接。",
   sign_in_denied: "已取消授权，插件未连接。",
-  sign_in_forbidden: "这个账号不是收藏库的所有者，无法连接。",
+  sign_in_forbidden: "此账号当前无法登录，请联系服务管理员。",
   sign_in_expired: "这次登录已失效，请重新登录。",
   sign_in_failed: "暂时无法完成登录，请稍后重试。",
   invalid_url: "请填写完整的 HTTP(S) 链接，不能包含用户名或密码。",
@@ -102,6 +105,7 @@ export const ERROR_TEXT = {
   server: "服务暂时不可用，稍后会自动重试。",
   response: "服务器响应异常，收藏已保留，请稍后重试。",
   queue_full: "待上传队列已满，请先重试或移除部分收藏。",
+  disconnect_pending: "请先完成或移除待同步任务，再退出连接；任务不会自动转给其他账号。",
   queue_connection: "请确认是否用新令牌上传已有的待上传收藏。",
   storage: "无法写入本机存储，收藏尚未保存，请重试。",
   capture_unavailable: "未能读取此页正文。请回到网页重试，或取消勾选正文采集，仅保存链接。",

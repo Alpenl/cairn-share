@@ -21,7 +21,8 @@
         <div id="conn-row" class="set-row" hidden>
           <span class="ico ok" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></svg></span>
           <div class="txt"><div id="server" class="ttl">cairn-go.alpenl.com</div><div id="conn-desc" class="dsc"></div></div>
-          <button id="change-token" type="button" class="secondary">更换令牌</button>
+          <button id="change-token" type="button" class="secondary">切换账号 / Key</button>
+          <button id="disconnect" type="button" class="text-button">退出连接</button>
         </div>
         <form id="settings-form" class="set-block" hidden>
           <label for="server-url">服务器地址</label>
@@ -37,7 +38,7 @@
             <button id="show-token" type="button" class="secondary" aria-label="显示访问令牌">显示</button>
             <button id="connect" type="submit" class="primary" disabled>测试并保存</button>
           </div>
-          <p class="hint">在 cairn.alpenl.com「设置 → 状态与账户 → 浏览器插件」中创建采集令牌，不会参与浏览器账号同步。</p>
+          <p class="hint">使用 GitHub 登录后自动连接你自己的收藏库；也可在主站「设置 → 状态与账户 → 浏览器插件」生成个人 Key。Key 仅保存在本机，不参与浏览器账号同步。</p>
           <label id="move-pending-label" class="check" hidden><input id="move-pending" type="checkbox"><span id="move-pending-text"></span></label>
         </form>
       </div>

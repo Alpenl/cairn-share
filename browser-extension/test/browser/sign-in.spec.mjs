@@ -64,7 +64,7 @@ test("GitHub sign-in connects the extension without pasting a token", async () =
   await expect(button).toBeVisible();
   await expect(options.locator("#auth-redirect-row")).toBeHidden();
   await button.click();
-  await expect(options.locator("#status")).toHaveText("这个账号不是收藏库的所有者，无法连接。");
+  await expect(options.locator("#status")).toHaveText("此账号当前无法登录，请联系服务管理员。");
   expect(redeemed).toBeNull();
   await expect(options.locator("#sync-text")).toHaveText("未连接");
   await options.close();
@@ -80,6 +80,11 @@ test("GitHub sign-in connects the extension without pasting a token", async () =
   // Changing the connection offers sign-in again next to the token field.
   await options.locator("#change-token").click();
   await expect(options.getByRole("button", { name: "使用 GitHub 登录" })).toBeVisible();
+  await options.getByRole("button", { name: "退出连接", exact: true }).click();
+  await expect(options.locator("#sync-text")).toHaveText("未连接");
+  await expect(options.getByRole("button", { name: "使用 GitHub 登录" })).toBeVisible();
+  await options.getByRole("button", { name: "使用 GitHub 登录" }).click();
+  await expect(options.locator("#sync-text")).toHaveText("已连接");
   await options.close();
 });
 

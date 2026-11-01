@@ -50,7 +50,7 @@ function renderConnection() {
   $("server").textContent = state?.server || new URL(DEFAULT_SERVER).host;
   if (!changingToken) $("server-url").value = state?.configured ? state.serverUrl : DEFAULT_SERVER;
   $("conn-desc").textContent = [state?.binding && `令牌指纹 ${state.binding.slice(0, 8)}`, state?.connectedAt && `${day(state.connectedAt)}连接`, "只保存在这个浏览器"].filter(Boolean).join(" · ");
-  $("change-token").textContent = changingToken ? "取消" : "更换令牌";
+  $("change-token").textContent = changingToken ? "取消" : "切换账号 / Key";
   $("settings-form").hidden = ok && !changingToken;
   $("token").placeholder = ok ? "粘贴新的采集令牌；留空则重新测试当前令牌" : "粘贴 cairn.alpenl.com 创建的采集令牌";
   $("move-pending-label").hidden = !queue.length;
@@ -123,6 +123,14 @@ $("settings-form").addEventListener("submit", async (event) => {
     else showError($("status"), error);
   }
   finally { $("connect").disabled = false; $("connect").textContent = "测试并保存"; }
+});
+
+$("disconnect").addEventListener("click", async () => {
+  try {
+    await send("disconnect"); changingToken = false;
+    await refresh(); await loadProviders();
+    status($("status"), "已退出本机连接。主站中的个人 Key 可单独撤销。", "success");
+  } catch (error) { showError($("status"), error); }
 });
 
 // ───────────── Sign-in ─────────────

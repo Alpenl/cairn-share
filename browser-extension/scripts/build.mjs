@@ -3,7 +3,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {build as bundle} from "esbuild";
 import JSZip from "jszip";
-import { API_BASE, COLLECTOR_API_BASE } from "../src/config.mjs";
+import { API_BASE, COLLECTOR_API_BASE, DEFAULT_SERVER } from "../src/config.mjs";
+
+import { CHROME_PUBLIC_KEY, FIREFOX_EXTENSION_ID } from "./extension-identity.mjs";
 
 export const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -17,7 +19,7 @@ export function manifest(browser, version, apiBase = API_BASE) {
     icons: { 16: "icons/16.png", 48: "icons/48.png", 128: "icons/128.png" },
     action: { default_title: "收藏到 Cairn", default_popup: "popup.html", default_icon: { 16: "icons/16.png", 48: "icons/48.png" } },
     permissions: ["activeTab", "storage", "unlimitedStorage", "scripting", "contextMenus", "alarms", "identity"],
-    host_permissions: [...new Set([`${endpoint.protocol}//${endpoint.hostname}/*`, ...(apiBase === API_BASE ? [`${new URL(COLLECTOR_API_BASE).origin}/*`] : [])])],
+    host_permissions: [...new Set([`${endpoint.protocol}//${endpoint.hostname}/*`, ...(apiBase === API_BASE ? [`${new URL(COLLECTOR_API_BASE).origin}/*`, `${DEFAULT_SERVER}/*`] : [])])],
     optional_host_permissions: ["http://*/*", "https://*/*"],
     options_ui: { page: "options.html", open_in_tab: true },
     commands: { _execute_action: { suggested_key: { default: "Alt+Shift+C" } } },
@@ -26,11 +28,12 @@ export function manifest(browser, version, apiBase = API_BASE) {
   if (browser === "firefox") {
     result.background = { scripts: ["background.mjs"], type: "module" };
     result.browser_specific_settings = { gecko_android: { strict_min_version: "142.0" }, gecko: {
-      id: "cairn-capture@alpenl.com",
+      id: FIREFOX_EXTENSION_ID,
       strict_min_version: "140.0",
       data_collection_permissions: { required: ["authenticationInfo", "browsingActivity", "websiteContent"] }
     } };
   } else {
+    result.key = CHROME_PUBLIC_KEY;
     result.minimum_chrome_version = "110";
     result.background = { service_worker: "background.mjs", type: "module" };
   }
@@ -79,7 +82,7 @@ export async function build({ outputRoot = join(projectRoot, "dist"), apiBase = 
     if (apiBase !== API_BASE) {
       const configPath = join(folder, "config.mjs");
       const source = await readFile(configPath, "utf8");
-      await writeFile(configPath, source.replace(JSON.stringify(API_BASE), JSON.stringify(apiBase)).replace(JSON.stringify(COLLECTOR_API_BASE), JSON.stringify(`${apiBase}/api/v1/collector`)));
+      await writeFile(configPath, source.replace(JSON.stringify(API_BASE), JSON.stringify(apiBase)).replace(JSON.stringify(COLLECTOR_API_BASE), JSON.stringify(`${apiBase}/api/v1/collector`)).replace(JSON.stringify(DEFAULT_SERVER), JSON.stringify(apiBase)));
     }
     await writeFile(join(folder, "manifest.json"), `${JSON.stringify(manifest(browser, pkg.version, apiBase), null, 2)}\n`);
     await cp(join(projectRoot, "..", "LICENSE"), join(folder, "LICENSE"));

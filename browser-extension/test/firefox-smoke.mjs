@@ -96,6 +96,7 @@ try {
   const url = `moz-extension://${uuid}`;
   await command("url", { url: `${url}/options.html` });
   await until(async () => execute("return document.getElementById('connect')?.disabled === false"), "Firefox options/background did not initialize");
+  console.log("Firefox OAuth redirect:", await execute("return browser.identity.getRedirectURL()"));
   await fill("token", "firefox-test-token");
   await click("connect");
   await until(async () => (await text("status")).includes("连接成功"), "Firefox connection test failed");

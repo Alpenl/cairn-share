@@ -137,3 +137,21 @@ Firefox：`dist/cairn-firefox-0.10.0.zip` 可用于临时调试安装；长期�
 Go 连接的已收藏页面新增“删除收藏”，确认后移到网页回收站。删除请求保存操作编号，响应丢失或扩展后台重启后可重试；相关旧上传任务暂停，确认删除后清理，其他收藏不受影响。自定义服务器地址（例如 https://cairn.alpenl.com）与默认地址使用同样的内容/人工版本保护。
 
 批量补采需要服务同时提供 pending 列表与 pending/{id} 核验；新服务已补齐核验接口。更新时覆盖原安装目录并重新加载，保留连接和队列。Firefox ZIP 为未签名开发包。
+
+## 多用户连接（2026-11-02）
+
+主站与后端、插件的改动前基线都保存在各自 Git 标签 `0.1.0`。本插件原包版本为0.10.1，新包继续单调升级到0.11.0，避免浏览器降级拒绝；不会覆盖旧v0.1.0标签。
+
+新连接默认 `https://cairn.alpenl.com`，选择“使用 GitHub 登录”即可获得只属于当前用户/资料库的随机个人 Key，无需手动粘贴。也可从主站设置生成个人 Key。原先无显式服务器地址的旧凭据保留旧origin及队列身份，不自动转移收藏。
+
+“切换账号 / Key”会先检查待同步任务，已关联目标的补采任务不能转给别的账号；普通待同步内容只有明确勾选迁移才可更换目的地。“退出连接”仅清除空闲连接的本机凭据及缓存，未同步任务需先完成/移除；要使其他安装中的Key也失效，请在主站撤销。
+
+Chrome/Edge的公开manifest key固定插件ID与OAuth回调，私钥不随包发布。首次从未固定ID的老版安装迁移时，先完成旧插件的待同步任务，保留旧目录，加载新包后重新登录；不要把旧本地队列复制给另一个账号。Firefox保留原扩展ID。后续更新须保留scripts/extension-identity.mjs公钥，不得重新生成。
+
+生产回调白名单：
+- Chrome/Edge：`https://fmalikgllmcngknlmiepcoogalacikmb.chromiumapp.org/`
+- Firefox（原生浏览器实测）：`https://dec7f0d561f5c41158d6ba1c896c4f9ba19f7b71.extensions.allizom.org/`
+
+服务端OAuth broker验证state与单次PKCE授权码；插件只收到Cairn Key，不收到GitHub secret/access token。AUTH_PROVIDERS是未来Google等提供方的展示注册表；auth.mjs只按提供方ID调用同一协议，保留该边界。通用服务API权限尚未开放。
+
+固定ID与回调依据：[Chrome manifest key](https://developer.chrome.com/docs/extensions/reference/manifest/key)、[Firefox getRedirectURL](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/identity/getRedirectURL)。

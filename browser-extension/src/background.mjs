@@ -81,6 +81,12 @@ async function dispatch(message) {
       void controller.flush().catch(handleFailure);
       return controller.snapshot();
     }
+    case "disconnect": {
+      await batch.pause();
+      const result = await controller.disconnect();
+      await tagSync.clear();
+      return result;
+    }
     case "settings": {
       await batch.pause();
       const result = await controller.saveSettings(message.settings);

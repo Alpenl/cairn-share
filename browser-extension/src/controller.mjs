@@ -76,6 +76,20 @@ export function createController({ store, client, clientFor = () => client, now 
     return snapshot();
   }
 
+  // Disconnect clears local credentials only; revocation is available on the
+  // website. Never silently move queued captures to the next signed-in user.
+  async function disconnect() {
+    if (connectionTest || deleting) throw new CaptureError("unexpected");
+    if (flushPromise) await flushPromise;
+    await update((state) => {
+      if (state.queue.length || state.deletion) throw new CaptureError("disconnect_pending");
+      state.settings = { token: "", server: state.settings.server, keepFullUrl: state.settings.keepFullUrl };
+      delete state.collectionCatalog;
+      state.lastResult = null;
+    });
+    return snapshot();
+  }
+
   // Switches on the settings page apply at once; only a new token is tested.
   async function savePreferences({ keepFullUrl }) {
     if (typeof keepFullUrl !== "boolean") throw new CaptureError("unexpected");
@@ -236,5 +250,5 @@ export function createController({ store, client, clientFor = () => client, now 
   // The token never leaves background; callers get the binding to discard a
   // response that arrives after the connection changed.
   async function tags(etag){await mutations;const state=await read();if(!state.settings.token)throw new CaptureError("not_configured");const binding=await connectionIdentity(state.settings);return {binding,result:await clientFor(state.settings).tags(state.settings.token,etag)};}
-  return { snapshot, saveSettings, savePreferences, tags, enqueue, flush, remove, deleteSaved, collections, lookup, newId: uuid };
+  return { snapshot, disconnect, saveSettings, savePreferences, tags, enqueue, flush, remove, deleteSaved, collections, lookup, newId: uuid };
 }

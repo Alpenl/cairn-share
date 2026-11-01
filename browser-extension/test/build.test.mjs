@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { CHROME_EXTENSION_ID } from "../scripts/extension-identity.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,8 +11,10 @@ import { build, manifest, projectRoot } from "../scripts/build.mjs";
 test("browser manifests use minimal permissions and native MV3 backgrounds", () => {
   const chrome = manifest("chrome", "0.1.0");
   const firefox = manifest("firefox", "0.1.0");
-  assert.deepEqual(chrome.host_permissions, ["https://share.alpenl.com/*", "https://cairn-go.alpenl.com/*"]);
+  assert.deepEqual(chrome.host_permissions, ["https://share.alpenl.com/*", "https://cairn-go.alpenl.com/*", "https://cairn.alpenl.com/*"]);
   assert.deepEqual(chrome.permissions, ["activeTab", "storage", "unlimitedStorage", "scripting", "contextMenus", "alarms", "identity"]);
+  const derived = [...createHash("sha256").update(Buffer.from(chrome.key,"base64")).digest().subarray(0,16)].map(x=>String.fromCharCode(97+(x>>4),97+(x&15))).join("");
+  assert.equal(derived,CHROME_EXTENSION_ID);
   assert.equal(chrome.background.service_worker, "background.mjs");
   assert.deepEqual(firefox.background.scripts, ["background.mjs"]);
   assert.equal(chrome.content_scripts, undefined);

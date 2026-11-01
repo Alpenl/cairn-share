@@ -200,3 +200,16 @@ test("collection version conflicts require human retry, and moving accounts clea
  await h.controller.enqueue(capture({collection_ids:[cid],binding:await tokenIdentity("test-token")}));await connect(h.controller,"second-token",{movePending:true});assert.deepEqual(h.raw().queue[0].collection_ids,[]);
  await assert.rejects(h.controller.enqueue(capture({collection_ids:[cid],binding:await tokenIdentity("test-token")})),{kind:"queue_connection"});
 });
+
+
+test("disconnect refuses pending data and clears only an idle local connection", async () => {
+ const h=harness();await connect(h.controller);
+ await h.controller.enqueue(capture());
+ await assert.rejects(h.controller.disconnect(),{kind:"disconnect_pending"});
+ assert.equal((await h.controller.snapshot()).configured,true);
+ await h.controller.flush();
+ await h.controller.disconnect();
+ const state=await h.controller.snapshot();
+ assert.equal(state.configured,false);assert.equal(state.lastResult,null);assert.equal(state.binding,"");
+ assert.equal(h.raw().settings.token,"");
+});

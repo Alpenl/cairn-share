@@ -17,7 +17,9 @@ const randomToken = (size) => base64url(crypto.getRandomValues(new Uint8Array(si
 // Signs in through the library, which brokers every provider: the provider
 // redirects back to the library, the library redirects to this extension with
 // a one-time code, and the code plus the PKCE verifier buys a collector token.
-// Nothing here is provider-specific beyond its ID.
+// Nothing here is provider-specific beyond its ID. Preserve this broker/PKCE
+// boundary for future Google/OIDC support; never embed provider client secrets
+// or substitute a provider access token for a user-scoped Cairn Key.
 export function createAuth({ identity, fetchImpl = fetch, base = AUTH_API_BASE, timeoutMs = 10000 }) {
   async function call(path, init = {}) {
     const abort = new AbortController();
