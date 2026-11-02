@@ -25,10 +25,14 @@
           <button id="disconnect" type="button" class="text-button">退出连接</button>
         </div>
         <form id="settings-form" class="set-block" hidden>
-          <label for="server-url">服务器地址</label>
-          <input id="server-url" type="url" autocomplete="url" placeholder="https://your-cairn.example" aria-label="服务器地址">
-          <button id="server-auth" type="button" class="secondary">检查登录方式</button>
-          <p class="hint">HTTPS 服务地址；本机回环地址允许 HTTP。测试成功后才切换连接。</p>
+          <div class="server-field">
+            <label for="server-url">服务器地址</label>
+            <div class="server-field-row">
+              <input id="server-url" type="url" autocomplete="url" placeholder="https://cairn.alpenl.com" aria-describedby="server-hint">
+              <button id="server-auth" type="button" class="secondary">检查登录方式</button>
+            </div>
+            <p id="server-hint" class="hint">连接你的 Cairn 服务，验证成功后才会切换。</p>
+          </div>
           <div id="auth-block" class="auth-block" hidden>
             <div id="auth-providers" class="auth-providers"></div>
             <p class="auth-divider"><span>或粘贴采集令牌</span></p>
